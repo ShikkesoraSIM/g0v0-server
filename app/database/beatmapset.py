@@ -9,7 +9,7 @@ from ._base import DatabaseModel, OnDemand, included, ondemand
 from .beatmap_playcounts import BeatmapPlaycounts
 from .user import User, UserDict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, ConfigDict
 from sqlalchemy import JSON, Boolean, Column, DateTime, Text
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlmodel import Field, Relationship, SQLModel, col, exists, func, select
@@ -76,7 +76,7 @@ class BeatmapsetDict(TypedDict):
     covers: BeatmapCovers | None
     creator: str
     nsfw: bool
-    preview_url: str
+    preview_url: str | None
     source: str
     spotlight: bool
     title: str
@@ -84,6 +84,7 @@ class BeatmapsetDict(TypedDict):
     track_id: int | None
     user_id: int
     video: bool
+    is_local: NotRequired[bool]
     current_nominations: list[BeatmapNomination] | None
     description: BeatmapDescription | None
     pack_tags: list[str]
@@ -91,10 +92,10 @@ class BeatmapsetDict(TypedDict):
     bpm: NotRequired[float]
     can_be_hyped: NotRequired[bool]
     discussion_locked: NotRequired[bool]
-    last_updated: NotRequired[datetime]
+    last_updated: NotRequired[datetime | None]
     ranked_date: NotRequired[datetime | None]
     storyboard: NotRequired[bool]
-    submitted_date: NotRequired[datetime]
+    submitted_date: NotRequired[datetime | None]
     tags: NotRequired[str]
     discussion_enabled: NotRequired[bool]
     legacy_thread_url: NotRequired[str | None]
@@ -133,6 +134,20 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         "rating",
         "storyboard",
     ]
+
+    @field_validator("last_updated", "ranked_date", "submitted_date", mode="before")
+    @classmethod
+    def _parse_dt(cls, v):
+        from datetime import datetime
+        if v is None or isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            # support 'Z' suffix (UTC) and offset forms
+            if v.endswith("Z"):
+                v = v[:-1] + "+00:00"
+            return datetime.fromisoformat(v)
+        return v
+
     API_INCLUDES: ClassVar[list[str]] = [
         *BEATMAPSET_TRANSFORMER_INCLUDES,
         "beatmaps.current_user_playcount",
@@ -167,7 +182,10 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
     covers: BeatmapCovers | None = Field(sa_column=Column(JSON))
     creator: str = Field(index=True)
     nsfw: bool = Field(default=False, sa_column=Column(Boolean))
-    preview_url: str
+    @ondemand
+    @staticmethod
+    async def preview_url(_session: AsyncSession, beatmapset: "Beatmapset") -> str:
+        return f"{str(settings.server_url).rstrip('/')}/preview/{beatmapset.id}.mp3"
     source: str = Field(default="")
     spotlight: bool = Field(default=False, sa_column=Column(Boolean))
     title: str = Field(index=True)
@@ -175,6 +193,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
     track_id: int | None = Field(default=None, index=True)  # feature artist?
     user_id: int = Field(index=True)
     video: bool = Field(sa_column=Column(Boolean, index=True))
+    is_local: bool = Field(default=False)
 
     # optional
     # converts: list[Beatmap] = Relationship(back_populates="beatmapset")
@@ -192,10 +211,10 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
     bpm: OnDemand[float] = Field(default=0.0)
     can_be_hyped: OnDemand[bool] = Field(default=False, sa_column=Column(Boolean))
     discussion_locked: OnDemand[bool] = Field(default=False, sa_column=Column(Boolean))
-    last_updated: OnDemand[datetime] = Field(sa_column=Column(DateTime, index=True))
+    last_updated: OnDemand[datetime | None] = Field(sa_column=Column(DateTime, index=True))
     ranked_date: OnDemand[datetime | None] = Field(default=None, sa_column=Column(DateTime, index=True))
     storyboard: OnDemand[bool] = Field(default=False, sa_column=Column(Boolean, index=True))
-    submitted_date: OnDemand[datetime] = Field(sa_column=Column(DateTime, index=True))
+    submitted_date: OnDemand[datetime | None] = Field(sa_column=Column(DateTime, index=True))
     tags: OnDemand[str] = Field(default="", sa_column=Column(Text))
 
     @ondemand
@@ -221,7 +240,10 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         beatmapset: "Beatmapset",
     ) -> str:
         beatmap_status = beatmapset.beatmap_status
-        if settings.enable_all_beatmap_leaderboard and not beatmap_status.has_leaderboard():
+        if settings.enable_all_beatmap_leaderboard and beatmap_status not in (
+            BeatmapRankStatus.RANKED,
+            BeatmapRankStatus.APPROVED,
+        ):
             return BeatmapRankStatus.APPROVED.name.lower()
         return beatmap_status.name.lower()
 
@@ -232,7 +254,10 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         beatmapset: "Beatmapset",
     ) -> int:
         beatmap_status = beatmapset.beatmap_status
-        if settings.enable_all_beatmap_leaderboard and not beatmap_status.has_leaderboard():
+        if settings.enable_all_beatmap_leaderboard and beatmap_status not in (
+            BeatmapRankStatus.RANKED,
+            BeatmapRankStatus.APPROVED,
+        ):
             return BeatmapRankStatus.APPROVED.value
         return beatmap_status.value
 
@@ -531,11 +556,27 @@ class Beatmapset(AsyncAttrs, BeatmapsetModel, table=True):
     @classmethod
     async def get_or_fetch(cls, session: AsyncSession, fetcher: "Fetcher", sid: int) -> "Beatmapset":
         from app.service.beatmapset_update_service import get_beatmapset_update_service
+        from app.log import logger
 
+        # 1. First check if it exists in local DB (including user-uploaded ones)
         beatmapset = await session.get(Beatmapset, sid)
-        if not beatmapset:
+        if beatmapset:
+            return beatmapset
+
+        # 2. If not in DB, try fetching from external API
+        try:
             resp = await fetcher.get_beatmapset(sid)
             beatmapset = await cls.from_resp(session, resp)
             await get_beatmapset_update_service().add(resp)
             await session.refresh(beatmapset)
-        return beatmapset
+            return beatmapset
+        except Exception as e:
+            # 3. If API fetch fails (e.g. 404), re-check DB in case it was created concurrently
+            logger.warning(f"Failed to fetch beatmapset {sid} from API: {e}")
+            beatmapset = await session.get(Beatmapset, sid)
+            if beatmapset:
+                return beatmapset
+
+            # 4. If still not found and it's a 404 from API, we might want to return
+            # something or raise a specific error that the caller can handle as 404.
+            raise

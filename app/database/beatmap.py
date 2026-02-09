@@ -1,6 +1,7 @@
 from datetime import datetime
 import hashlib
-from typing import TYPE_CHECKING, ClassVar, NotRequired, TypedDict
+from typing import TYPE_CHECKING, ClassVar, NotRequired
+from typing_extensions import TypedDict
 
 from app.calculator import get_calculator
 from app.config import settings
@@ -18,7 +19,7 @@ from .user import User, UserDict, UserModel
 
 from pydantic import BaseModel, TypeAdapter
 from redis.asyncio import Redis
-from sqlalchemy import Column, DateTime
+from sqlalchemy import Boolean, Column, DateTime
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlmodel import VARCHAR, Field, Relationship, SQLModel, col, exists, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -40,9 +41,9 @@ class BeatmapDict(TypedDict):
     total_length: int
     user_id: int
     version: str
-    url: str
+    url: str | None
 
-    checksum: NotRequired[str]
+    checksum: NotRequired[str | None]
     max_combo: NotRequired[int | None]
     ar: NotRequired[float]
     cs: NotRequired[float]
@@ -54,7 +55,7 @@ class BeatmapDict(TypedDict):
     count_spinners: NotRequired[int]
     deleted_at: NotRequired[datetime | None]
     hit_length: NotRequired[int]
-    last_updated: NotRequired[datetime]
+    last_updated: NotRequired[datetime | None]
 
     status: NotRequired[str]
     beatmapset: NotRequired[BeatmapsetDict]
@@ -65,6 +66,7 @@ class BeatmapDict(TypedDict):
     user: NotRequired[UserDict]
     convert: NotRequired[bool]
     is_scoreable: NotRequired[bool]
+    is_local: NotRequired[bool]
     mode_int: NotRequired[int]
     ranked: NotRequired[int]
     playcount: NotRequired[int]
@@ -85,6 +87,7 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
         "deleted_at",
         "drain",
         "hit_length",
+        "is_local",
         "is_scoreable",
         "last_updated",
         "mode_int",
@@ -111,9 +114,12 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
     user_id: int = Field(index=True)
     version: str = Field(index=True)
 
-    url: OnDemand[str]
+    @ondemand
+    @staticmethod
+    async def url(_session: AsyncSession, beatmap: "Beatmap") -> str:
+        return f"{str(settings.server_url).rstrip('/')}/beatmaps/{beatmap.id}"
     # optional
-    checksum: OnDemand[str] = Field(sa_column=Column(VARCHAR(32), index=True))
+    checksum: OnDemand[str | None] = Field(sa_column=Column(VARCHAR(32), index=True))
     max_combo: OnDemand[int | None] = Field(default=0)
     # TODO: owners
 
@@ -128,12 +134,16 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
     count_spinners: OnDemand[int] = Field(default=0)
     deleted_at: OnDemand[datetime | None] = Field(default=None, sa_column=Column(DateTime))
     hit_length: OnDemand[int] = Field(default=0)
-    last_updated: OnDemand[datetime] = Field(sa_column=Column(DateTime, index=True))
+    last_updated: OnDemand[datetime | None] = Field(sa_column=Column(DateTime, index=True))
+    is_local: bool = Field(default=False, sa_column=Column(Boolean, index=True))
 
     @included
     @staticmethod
     async def status(_session: AsyncSession, beatmap: "Beatmap") -> str:
-        if settings.enable_all_beatmap_leaderboard and not beatmap.beatmap_status.has_leaderboard():
+        if settings.enable_all_beatmap_leaderboard and beatmap.beatmap_status not in (
+            BeatmapRankStatus.RANKED,
+            BeatmapRankStatus.APPROVED,
+        ):
             return BeatmapRankStatus.APPROVED.name.lower()
         return beatmap.beatmap_status.name.lower()
 
@@ -271,6 +281,7 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
     __tablename__: str = "beatmaps"
 
     beatmap_status: BeatmapRankStatus = Field(index=True)
+    is_local: bool = Field(default=False, index=True)
     # optional
     beatmapset: "Beatmapset" = Relationship(back_populates="beatmaps", sa_relationship_kwargs={"lazy": "joined"})
     failtimes: FailTime | None = Relationship(back_populates="beatmap", sa_relationship_kwargs={"lazy": "joined"})
@@ -351,19 +362,35 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             stmt = stmt.where(Beatmap.checksum == md5)
         else:
             raise ValueError("Either bid or md5 must be provided")
+
+        # 1. First check if it exists in local DB (including user-uploaded ones)
         beatmap = (await session.exec(stmt)).first()
-        if not beatmap:
+        if beatmap:
+            return beatmap
+
+        # 2. If not in DB, try fetching from external API
+        try:
             resp = await fetcher.get_beatmap(bid, md5)
             beatmapset_id = resp.get("beatmapset_id")
             if beatmapset_id is None:
                 raise ValueError("beatmapset_id is required")
+
+            # Check if set exists, if not fetch it
             r = await session.exec(select(Beatmapset.id).where(Beatmapset.id == beatmapset_id))
             if not r.first():
                 set_resp = await fetcher.get_beatmapset(beatmapset_id)
                 resp_id = resp.get("id")
                 await Beatmapset.from_resp(session, set_resp, from_=resp_id or 0)
+
             return await Beatmap.from_resp(session, resp)
-        return beatmap
+        except Exception as e:
+            # 3. If API fetch fails, re-check DB in case it was created concurrently
+            from app.log import logger
+            logger.warning(f"Failed to fetch beatmap {bid or md5} from API: {e}")
+            beatmap = (await session.exec(stmt)).first()
+            if beatmap:
+                return beatmap
+            raise
 
 
 class APIBeatmapTag(BaseModel):
