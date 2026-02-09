@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from app.const import BANCHOBOT_ID
-from app.database.chat import ChannelType, ChatChannel  # ChatChannel 模型 & 枚举
+from app.database.chat import ChannelType, ChatChannel, ChatMessage, MessageType
 from app.database.playlists import Playlist as DBPlaylist
 from app.database.room import Room
 from app.database.room_participated_user import RoomParticipatedUser
@@ -14,15 +14,17 @@ from app.dependencies.database import Database, Redis
 from app.dependencies.fetcher import Fetcher
 from app.dependencies.storage import StorageService
 from app.log import log
+from app.models.notification import ChannelMessage
 from app.models.playlist import PlaylistItem
 from app.models.room import MatchType, QueueMode, RoomCategory, RoomStatus
 from app.models.score import RULESETS_VERSION_HASH, GameMode, VersionEntry
+from app.service.redis_message_system import redis_message_system
 from app.utils import camel_to_snake, utcnow
 
 from .notification.server import server
 
-from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request, status, UploadFile
+from pydantic import BaseModel, Field, AliasChoices
 from sqlalchemy import update
 from sqlmodel import col, select
 
@@ -59,7 +61,7 @@ async def _ensure_room_chat_channel(
         await db.commit()
         await db.refresh(ch)
         await db.refresh(room)
-        if room.channel_id == 0:
+        if room.channel_id is None:
             room.channel_id = ch.channel_id
     else:
         room.channel_id = ch.channel_id
@@ -88,6 +90,66 @@ async def _validate_user_exists(db: Database, user_id: int) -> User:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID {user_id} not found")
 
     return user
+
+
+class InviteRequest(BaseModel):
+    room_id: int
+    room_name: str
+    inviter_id: int
+
+
+@router.post("/rooms/{room_id}/invite/{user_id}")
+async def invite_user(
+    room_id: int,
+    user_id: int,
+    req: InviteRequest,
+    db: Database,
+):
+    inviter = await db.get(User, req.inviter_id)
+    invited = await db.get(User, user_id)
+    if not inviter or not invited:
+        raise HTTPException(404, "User not found")
+
+    channel = await ChatChannel.get_pm_channel(req.inviter_id, user_id, db)
+    if not channel:
+        u1, u2 = sorted([req.inviter_id, user_id])
+        channel = ChatChannel(
+            name=f"pm_{u1}_{u2}",
+            description="Private Message",
+            type=ChannelType.PM,
+        )
+        db.add(channel)
+        await db.commit()
+        await db.refresh(channel)
+
+    await server.batch_join_channel([invited, inviter], channel)
+
+    actual_room_id = req.room_id or room_id
+    content = f'Come join my multiplayer game "{req.room_name}": osu://room/{actual_room_id}'
+
+    resp = await redis_message_system.send_message(
+        channel_id=channel.channel_id,
+        user=inviter,
+        content=content,
+        is_action=False,
+    )
+
+    await server.send_message_to_channel(resp, False)
+
+    temp_msg = ChatMessage(
+        message_id=resp["message_id"],
+        channel_id=channel.channel_id,
+        content=content,
+        sender_id=req.inviter_id,
+        type=MessageType.PLAIN,
+    )
+
+    user_ids = [req.inviter_id, user_id]
+    await server.new_private_notification(
+        ChannelMessage.init(temp_msg, inviter, user_ids, ChannelType.PM)
+    )
+
+    return {"status": "ok"}
 
 
 def _parse_room_enums(match_type: str, queue_mode: str) -> tuple[MatchType, QueueMode]:
@@ -666,20 +728,98 @@ async def ensure_beatmap_present(
 
 
 class ReplayDataRequest(BaseModel):
-    score_id: int
-    user_id: int
-    mreplay: str
-    beatmap_id: int
+    score_id: int = Field(validation_alias=AliasChoices("score_id", "scoreId", "s"))
+    user_id: int = Field(validation_alias=AliasChoices("user_id", "userId", "u"))
+    mreplay: str = Field(validation_alias=AliasChoices("mreplay", "replay", "data"))
+    beatmap_id: int = Field(validation_alias=AliasChoices("beatmap_id", "beatmapId", "b"))
 
 
 @router.post("/scores/replay")
 async def save_replay(
-    req: ReplayDataRequest,
+    req: ReplayDataRequest | None,
     storage_service: StorageService,
+    db: Database,
+    request: Request,
 ):
-    replay_data = req.mreplay
-    replay_path = f"replays/{req.score_id}_{req.beatmap_id}_{req.user_id}_lazer_replay.osr"
-    await storage_service.write_file(replay_path, base64.b64decode(replay_data), "application/x-osu-replay")
+    try:
+        content_type = request.headers.get("content-type", "")
+        body_bytes = await request.body()
+
+        score_id: int | None = None
+        user_id: int | None = None
+        beatmap_id: int | None = None
+        data_bytes: bytes | None = None
+
+        if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+            form = await request.form()
+            def get_first(*names: str) -> str | UploadFile | None:
+                for n in names:
+                    v = form.get(n)
+                    if v is not None:
+                        return v
+                return None
+            def to_int(v: str | UploadFile | None) -> int | None:
+                if isinstance(v, UploadFile) or v is None:
+                    return None
+                try:
+                    return int(v)
+                except Exception:
+                    return None
+            score_id = to_int(get_first("score_id", "scoreId", "s"))
+            user_id = to_int(get_first("user_id", "userId", "u"))
+            beatmap_id = to_int(get_first("beatmap_id", "beatmapId", "b"))
+            file_field = get_first("file", "replay", "mreplay", "data")
+            if isinstance(file_field, UploadFile):
+                data_bytes = await file_field.read()
+            elif isinstance(file_field, str):
+                try:
+                    data_bytes = base64.b64decode(file_field)
+                except Exception:
+                    data_bytes = None
+        else:
+            data_dict: dict[str, Any] | None = None
+            try:
+                data_dict = json.loads(body_bytes.decode("utf-8"))
+            except Exception:
+                data_dict = None
+            if data_dict is None and req is None:
+                raise HTTPException(status_code=400, detail="Invalid replay payload")
+            if req is None and data_dict is not None:
+                req = ReplayDataRequest.model_validate(data_dict)
+            if req is not None:
+                score_id = req.score_id
+                user_id = req.user_id
+                beatmap_id = req.beatmap_id
+                try:
+                    data_bytes = base64.b64decode(req.mreplay)
+                except Exception:
+                    data_bytes = None
+
+        if score_id is None or user_id is None or beatmap_id is None or data_bytes is None:
+            raise HTTPException(status_code=400, detail="Missing required replay fields")
+
+        from app.database.score import Score
+        score = await db.get(Score, score_id)
+        replay_path = score.replay_filename if score else f"replays/{score_id}_{beatmap_id}_{user_id}_lazer_replay.osr"
+        await storage_service.write_file(replay_path, data_bytes, "application/x-osu-replay")
+        if score:
+            score.has_replay = True
+            await db.commit()
+            await db.refresh(score)
+        logger.debug(f"Saved replay for score {score_id} to {replay_path}")
+        return {"success": True, "path": replay_path}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
+async def lio_fallback(path: str, request: Request):
+    try:
+        logger.debug(f"LIO fallback hit: {request.method} /_lio/{path} content-type={request.headers.get('content-type')}")
+        return {"error": "not_found", "path": f"/_lio/{path}"}
+    except Exception:
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 @router.get("/ruleset-hashes", response_model=dict[GameMode, VersionEntry])
