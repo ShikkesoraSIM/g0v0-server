@@ -3,6 +3,7 @@ from typing import Annotated, Any
 from app.auth import validate_username
 from app.config import settings
 from app.database import User
+from app.database.user import UserModel
 from app.database.events import Event, EventType
 from app.database.user_preference import (
     DEFAULT_ORDER,
@@ -33,7 +34,8 @@ from .router import router
 
 from fastapi import Body, HTTPException
 from pydantic import BaseModel, Field
-from sqlmodel import exists, select
+from sqlmodel import exists, select, col
+from sqlalchemy import update as sql_update, text
 
 
 @router.post("/rename", name="修改用户名", tags=["用户", "g0v0 API"])
@@ -87,6 +89,55 @@ async def user_rename(
     return None
 
 
+class UserSelfUpdate(BaseModel):
+    country_code: str | None = None
+    # Add other fields here if needed in the future, matching Admin's flexibility
+    # username: str | None = None 
+
+
+@router.patch("/me", name="更新个人信息", tags=["用户", "g0v0 API"])
+@router.patch("/user/country", include_in_schema=False) # Keep legacy path for now but redirect logic
+async def update_user_profile(
+    session: Database,
+    request: UserSelfUpdate,
+    current_user: ClientUser,
+    cache_service: UserCacheService,
+):
+    """Update user profile (Self) - Logic mirrored from Admin Panel"""
+    
+    if await current_user.is_restricted(session):
+        raise HTTPException(403, "Your account is restricted and cannot perform this action.")
+
+    if request.country_code is not None:
+        # Match Admin Panel logic: Direct assignment
+        # Admin logic: user.country_code = user_data.country_code
+        
+        # We still need basic validation because unlike admin, user input is untrusted
+        country_code = request.country_code.upper()
+        if not country_code or len(country_code) != 2:
+             raise HTTPException(400, "Invalid country code format.")
+        
+        from app.database.user import COUNTRIES
+        if country_code not in COUNTRIES:
+            raise HTTPException(400, f"Invalid country code: {country_code}")
+
+        current_user.country_code = country_code
+
+    # Match Admin logic: Commit and Refresh
+    await session.commit()
+    await session.refresh(current_user)
+
+    # Invalidate cache (Good practice, even if Admin doesn't explicit it in the snippet, 
+    # self-update should reflect immediately)
+    await cache_service.invalidate_user_cache(current_user.id)
+    await cache_service.invalidate_v1_user_cache(current_user.id)
+
+    # Return full user model for Frontend state
+    me_includes = [*User.USER_INCLUDES, "session_verified", "session_verification_method", "user_preferences"]
+    user_resp = await User.transform(current_user, session=session, includes=me_includes)
+    return user_resp
+
+
 @router.put(
     "/user/page",
     response_model=UpdateUserpageResponse,
@@ -105,11 +156,6 @@ async def update_userpage(
         raise HTTPException(403, "Your account is restricted and cannot perform this action.")
 
     try:
-        errors = bbcode_service.validate_bbcode(request.body)
-        if errors:
-            msg = "Invalid BBCode content: " + "; ".join(errors)
-            raise UserpageError(msg)
-
         # 处理BBCode内容
         processed_page = bbcode_service.process_userpage_content(request.body)
 
