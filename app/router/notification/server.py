@@ -3,7 +3,7 @@ from typing import Annotated, overload
 
 from app.database import ChatMessageDict
 from app.database.chat import ChannelType, ChatChannel, ChatChannelDict, ChatChannelModel
-from app.database.notification import UserNotification, insert_notification
+from app.database.notification import Notification, UserNotification, insert_notification
 from app.database.user import User, UserModel
 from app.dependencies.database import (
     DBFactory,
@@ -22,7 +22,7 @@ from app.utils import bg_tasks, safe_json_dumps
 from fastapi import APIRouter, Depends, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.security import SecurityScopes
 from fastapi.websockets import WebSocketState
-from sqlmodel import select
+from sqlmodel import select, col, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 logger = log("NotificationServer")
@@ -152,6 +152,39 @@ class ChatServer:
 
     async def mark_as_read(self, channel_id: int, user_id: int, message_id: int):
         await self.redis.set(f"chat:{channel_id}:last_read:{user_id}", message_id)
+
+        try:
+            async with with_db() as session:
+                # Get notification IDs first to avoid complex subquery update issues
+                notification_ids = (
+                    await session.exec(
+                        select(Notification.id).where(
+                            col(Notification.object_type) == "channel",
+                            col(Notification.object_id) == channel_id,
+                        )
+                    )
+                ).all()
+
+                if notification_ids:
+                    statement = (
+                        update(UserNotification)
+                        .where(
+                            col(UserNotification.user_id) == user_id,
+                            col(UserNotification.is_read) == False,
+                            col(UserNotification.notification_id).in_(notification_ids),
+                        )
+                        .values(is_read=True)
+                    )
+
+                    result = await session.exec(statement)
+                    await session.commit()
+                    logger.debug(
+                        f"Marked {result.rowcount} notifications as read for channel {channel_id}, user {user_id}"
+                    )
+        except Exception as e:
+            logger.error(
+                f"Failed to mark notifications as read for channel {channel_id}, user {user_id}: {e}"
+            )
 
     async def send_message_to_channel(self, message: ChatMessageDict, is_bot_command: bool = False):
         logger.info(
@@ -382,6 +415,18 @@ async def chat_websocket(
             if db_channel is not None:
                 await server.join_channel(user, db_channel)
 
+            pm_channels = (
+                await session.exec(
+                    select(ChatChannel).where(
+                        ChatChannel.type == ChannelType.PM,
+                        col(ChatChannel.name).like(f"pm\\_{user_id}\\_%", escape="\\")
+                        | col(ChatChannel.name).like(f"pm\\_%\\_{user_id}", escape="\\"),
+                    )
+                )
+            ).all()
+            for channel in pm_channels:
+                await server.join_channel(user, channel)
+
             await _listen_stop(websocket, user_id)
             return  # importante: salimos del handler cuando termina
 
@@ -398,6 +443,6 @@ async def chat_websocket(
     finally:
         if user is not None and session is not None:
             try:
-                await server.disconnect(user, websocket, session)
+                await server.disconnect(user, session, websocket)
             except Exception:
                 logger.exception(f"Cleanup failed for client {user_id}")
