@@ -107,6 +107,8 @@ class BeatmapsetFetcher(BaseFetcher):
             cache_data["r"] = query.r
         if query.played is not False:
             cache_data["played"] = query.played
+        if query.is_local:
+            cache_data["is_local"] = query.is_local
 
         # 添加 cursor
         if cursor:
