@@ -146,24 +146,35 @@ async def _count_online_users_optimized(redis):
     online_count = 0
     cursor = 0
     scan_iterations = 0
-    max_iterations = 50  # 进一步减少最大迭代次数
-    batch_size = 10000  # 增加批次大小
+    max_iterations = 500  # 增加最大迭代次数
+    batch_size = 1000
 
     try:
-        while cursor != 0 or scan_iterations == 0:
+        # 调试：检查 Redis 是否能连接
+        logger.debug(f"Scanning Redis for metadata:online:* keys (DB: {redis.connection_pool.connection_kwargs.get('db')})")
+
+        while True:
+            cursor, keys = await redis.scan(cursor, match="metadata:online:*", count=batch_size)
+            if keys:
+                logger.debug(f"Found {len(keys)} keys in this batch: {keys[:5]}...")
+            online_count += len(keys)
+            scan_iterations += 1
+
+            if cursor == 0:
+                break
+
             if scan_iterations >= max_iterations:
                 logger.warning(f"Redis SCAN reached max iterations ({max_iterations}), breaking")
                 break
 
-            cursor, keys = await redis.scan(cursor, match="metadata:online:*", count=batch_size)
-            online_count += len(keys)
-            scan_iterations += 1
+        # 兜底：如果 SCAN 没找到，检查是否有 metadata:online_users_set
+        if online_count == 0:
+            online_set_key = "metadata:online_users_set"
+            if await redis.exists(online_set_key):
+                online_count = await redis.scard(online_set_key)
+                logger.debug(f"Fallback to online_users_set: {online_count}")
 
-            # 如果连续几次没有找到键，可能已经扫描完成
-            if len(keys) == 0 and scan_iterations > 2:
-                break
-
-        logger.debug(f"Found {online_count} online users after {scan_iterations} scan iterations")
+        logger.info(f"Final online count: {online_count} (scanned {scan_iterations} iterations)")
         return online_count
 
     except Exception as e:
@@ -268,6 +279,7 @@ async def api_get_player_info(
 )
 async def api_get_player_count(
     session: Database,
+    force: bool = False,
 ):
     """
     获取玩家数量统计
@@ -279,17 +291,17 @@ async def api_get_player_count(
         redis = get_redis()
 
         online_cache_key = "stats:online_users_count"
-        cached_online = await redis.get(online_cache_key)
+        cached_online = await redis.get(online_cache_key) if not force else None
 
         if cached_online is not None:
             online_count = int(cached_online)
             logger.debug(f"Using cached online user count: {online_count}")
         else:
-            logger.debug("Cache miss, scanning Redis for online users")
+            logger.debug("Scanning Redis for online users")
             online_count = await _count_online_users_optimized(redis)
 
-            await redis.setex(online_cache_key, 30, str(online_count))
-            logger.debug(f"Cached online user count: {online_count} for 30 seconds")
+            await redis.setex(online_cache_key, 10, str(online_count))
+            logger.debug(f"Cached online user count: {online_count} for 10 seconds")
 
         cache_key = "stats:total_users"
         cached_total = await redis.get(cache_key)
