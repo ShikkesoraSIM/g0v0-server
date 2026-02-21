@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 
 from app.config import settings
-from app.models.beatmap import BeatmapRankStatus, Genre, Language
+from app.models.beatmap import BeatmapRankStatus, Genre, Language, effective_rank_status
 from app.models.score import GameMode
 
 from ._base import DatabaseModel, OnDemand, included, ondemand
@@ -257,7 +257,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         _session: AsyncSession,
         beatmapset: "Beatmapset",
     ) -> str:
-        return beatmapset.beatmap_status.name.lower()
+        return effective_rank_status(beatmapset.beatmap_status).name.lower()
 
     @included
     @staticmethod
@@ -265,7 +265,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         _session: AsyncSession,
         beatmapset: "Beatmapset",
     ) -> int:
-        return beatmapset.beatmap_status.value
+        return effective_rank_status(beatmapset.beatmap_status).value
 
     @ondemand
     @staticmethod

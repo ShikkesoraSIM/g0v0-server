@@ -1,6 +1,8 @@
 from enum import IntEnum
 from typing import Annotated, Any, Literal
 
+from app.config import settings
+
 from .score import Rank
 
 from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer
@@ -32,6 +34,24 @@ class BeatmapRankStatus(IntEnum):
     def ranked(self) -> bool:
         # https://osu.ppy.sh/wiki/Gameplay/Score/Ranked_score
         return self in {BeatmapRankStatus.RANKED, BeatmapRankStatus.APPROVED, BeatmapRankStatus.LOVED}
+
+
+def effective_rank_status(status: BeatmapRankStatus) -> BeatmapRankStatus:
+    """
+    Return API-facing rank status when global leaderboard/pp overrides are enabled.
+    Keep database status untouched; only normalize public representation so clients
+    treat non-ranked maps as scoreable/pp maps without rewriting historical data.
+    """
+    if settings.enable_all_beatmap_leaderboard or settings.enable_all_beatmap_pp:
+        if status in {
+            BeatmapRankStatus.GRAVEYARD,
+            BeatmapRankStatus.WIP,
+            BeatmapRankStatus.PENDING,
+            BeatmapRankStatus.QUALIFIED,
+            BeatmapRankStatus.LOVED,
+        }:
+            return BeatmapRankStatus.APPROVED
+    return status
 
 
 class Genre(IntEnum):

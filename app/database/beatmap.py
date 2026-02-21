@@ -5,7 +5,7 @@ from typing_extensions import TypedDict
 
 from app.calculator import get_calculator
 from app.config import settings
-from app.models.beatmap import BeatmapRankStatus
+from app.models.beatmap import BeatmapRankStatus, effective_rank_status
 from app.models.mods import APIMod
 from app.models.performance import DifficultyAttributesUnion
 from app.models.score import GameMode
@@ -140,7 +140,7 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
     @included
     @staticmethod
     async def status(_session: AsyncSession, beatmap: "Beatmap") -> str:
-        return beatmap.beatmap_status.name.lower()
+        return effective_rank_status(beatmap.beatmap_status).name.lower()
 
     @ondemand
     @staticmethod
@@ -240,7 +240,7 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
     @ondemand
     @staticmethod
     async def ranked(_session: AsyncSession, beatmap: "Beatmap") -> int:
-        return beatmap.beatmap_status.value
+        return effective_rank_status(beatmap.beatmap_status).value
 
     @ondemand
     @staticmethod

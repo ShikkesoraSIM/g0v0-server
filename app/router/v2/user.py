@@ -461,11 +461,14 @@ async def get_user_beatmapsets(
             # Local submissions are usually WIP first, so include both.
             status_filters = [BeatmapRankStatus.WIP, BeatmapRankStatus.PENDING]
         elif type == BeatmapsetType.RANKED:
-            status_filters = [
-                BeatmapRankStatus.RANKED,
-                BeatmapRankStatus.APPROVED,
-                BeatmapRankStatus.QUALIFIED,
-            ]
+            if settings.enable_all_beatmap_leaderboard or settings.enable_all_beatmap_pp:
+                status_filters = list(BeatmapRankStatus)
+            else:
+                status_filters = [
+                    BeatmapRankStatus.RANKED,
+                    BeatmapRankStatus.APPROVED,
+                    BeatmapRankStatus.QUALIFIED,
+                ]
         elif type in {BeatmapsetType.GUEST, BeatmapsetType.NOMINATED}:
             status_filters = []
 
