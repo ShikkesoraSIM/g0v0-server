@@ -1,12 +1,17 @@
 import asyncio
+from io import BytesIO
 from enum import Enum
 import importlib
 import math
+import re
+import zipfile
 from typing import TYPE_CHECKING
 
 from app.calculators.performance import PerformanceCalculator
 from app.config import settings
 from app.const import MAX_SCORE
+from app.dependencies.storage import get_storage_service
+from app.database.beatmap import Beatmap
 from app.log import log
 from app.models.score import GameMode, HitResult, ScoreStatistics
 from app.models.scoring_mode import ScoringMode
@@ -185,9 +190,43 @@ async def pre_fetch_and_calculate_pp(
         if beatmap_banned:
             return 0, False
 
-    # 异步获取beatmap原始文件，利用已有的Redis缓存机制
+    # Prefer server-local .osu for locally submitted beatmaps to avoid ID collisions
+    # with upstream osu! beatmaps that can produce incorrect PP values.
+    beatmap_raw: str | None = None
     try:
-        beatmap_raw = await fetcher.get_or_fetch_beatmap_raw(redis, beatmap_id)
+        beatmap = await session.get(Beatmap, beatmap_id)
+        if beatmap and beatmap.is_local:
+            cache_key = f"beatmap:{beatmap_id}:raw"
+            if await redis.exists(cache_key):
+                cached = await redis.get(cache_key)
+                if cached:
+                    beatmap_raw = cached
+            if beatmap_raw is None:
+                storage = get_storage_service()
+                osz_path = f"beatmapsets/{beatmap.beatmapset_id}.osz"
+                if await storage.is_exists(osz_path):
+                    osz_bytes = await storage.read_file(osz_path)
+                    with zipfile.ZipFile(BytesIO(osz_bytes)) as zf:
+                        osu_files = [name for name in zf.namelist() if name.endswith(".osu")]
+                        preferred_by_id: str | None = None
+                        preferred_by_version: str | None = None
+                        for name in osu_files:
+                            text = zf.read(name).decode("utf-8", errors="ignore")
+                            if re.search(rf"(?m)^BeatmapID\s*:\s*{beatmap_id}\s*$", text):
+                                preferred_by_id = text
+                                break
+                            if beatmap.version and re.search(
+                                rf"(?m)^Version\s*:\s*{re.escape(beatmap.version)}\s*$", text
+                            ):
+                                preferred_by_version = text
+                        beatmap_raw = preferred_by_id or preferred_by_version
+                        if beatmap_raw is None and osu_files:
+                            beatmap_raw = zf.read(osu_files[0]).decode("utf-8", errors="ignore")
+                    if beatmap_raw:
+                        cache_expire = settings.beatmap_cache_expire_hours * 60 * 60
+                        await redis.set(cache_key, beatmap_raw, ex=cache_expire)
+        if beatmap_raw is None:
+            beatmap_raw = await fetcher.get_or_fetch_beatmap_raw(redis, beatmap_id)
     except Exception as e:
         logger.error(f"Failed to fetch beatmap {beatmap_id}: {e}")
         return 0, False

@@ -52,6 +52,9 @@ async def process_achievements(session: AsyncSession, redis: Redis, score_id: in
     score = await session.get(Score, score_id, options=[joinedload(Score.beatmap)])
     if not score:
         return
+    # Local uploaded beatmaps should not award official-style medals.
+    if score.beatmap and score.beatmap.is_local:
+        return
     achieved = (
         await session.exec(select(UserAchievement.achievement_id).where(UserAchievement.user_id == score.user_id))
     ).all()
