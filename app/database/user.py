@@ -3,6 +3,7 @@ import json
 from typing import TYPE_CHECKING, ClassVar, Literal, NotRequired, TypedDict, overload
 
 from app.config import settings
+from app.models.beatmap import BeatmapRankStatus
 from app.models.notification import NotificationName
 from app.models.score import GameMode
 from app.models.user import Country, Page
@@ -341,13 +342,35 @@ class UserModel(DatabaseModel[UserDict]):
 
     @ondemand
     @staticmethod
-    async def graveyard_beatmapset_count(_session: AsyncSession, _obj: "User") -> int:
-        return 0
+    async def graveyard_beatmapset_count(session: AsyncSession, obj: "User") -> int:
+        from .beatmapset import Beatmapset
+
+        return (
+            await session.exec(
+                select(func.count())
+                .select_from(Beatmapset)
+                .where(
+                    Beatmapset.user_id == obj.id,
+                    Beatmapset.beatmap_status == BeatmapRankStatus.GRAVEYARD,
+                )
+            )
+        ).one()
 
     @ondemand
     @staticmethod
-    async def loved_beatmapset_count(_session: AsyncSession, _obj: "User") -> int:
-        return 0
+    async def loved_beatmapset_count(session: AsyncSession, obj: "User") -> int:
+        from .beatmapset import Beatmapset
+
+        return (
+            await session.exec(
+                select(func.count())
+                .select_from(Beatmapset)
+                .where(
+                    Beatmapset.user_id == obj.id,
+                    Beatmapset.beatmap_status == BeatmapRankStatus.LOVED,
+                )
+            )
+        ).one()
 
     @ondemand
     @staticmethod
@@ -366,13 +389,43 @@ class UserModel(DatabaseModel[UserDict]):
 
     @ondemand
     @staticmethod
-    async def pending_beatmapset_count(_session: AsyncSession, _obj: "User") -> int:
-        return 0
+    async def pending_beatmapset_count(session: AsyncSession, obj: "User") -> int:
+        from .beatmapset import Beatmapset
+
+        return (
+            await session.exec(
+                select(func.count())
+                .select_from(Beatmapset)
+                .where(
+                    Beatmapset.user_id == obj.id,
+                    col(Beatmapset.beatmap_status).in_(
+                        [BeatmapRankStatus.WIP, BeatmapRankStatus.PENDING]
+                    ),
+                )
+            )
+        ).one()
 
     @ondemand
     @staticmethod
-    async def ranked_beatmapset_count(_session: AsyncSession, _obj: "User") -> int:
-        return 0
+    async def ranked_beatmapset_count(session: AsyncSession, obj: "User") -> int:
+        from .beatmapset import Beatmapset
+
+        return (
+            await session.exec(
+                select(func.count())
+                .select_from(Beatmapset)
+                .where(
+                    Beatmapset.user_id == obj.id,
+                    col(Beatmapset.beatmap_status).in_(
+                        [
+                            BeatmapRankStatus.RANKED,
+                            BeatmapRankStatus.APPROVED,
+                            BeatmapRankStatus.QUALIFIED,
+                        ]
+                    ),
+                )
+            )
+        ).one()
 
     @ondemand
     @staticmethod

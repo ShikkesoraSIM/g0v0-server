@@ -148,6 +148,24 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
             return datetime.fromisoformat(v)
         return v
 
+    @field_validator("covers", mode="before")
+    @classmethod
+    def _normalize_covers(cls, v):
+        if v:
+            return v
+
+        fallback_base = "https://assets.ppy.sh/beatmaps/0/covers"
+        return {
+            "cover": f"{fallback_base}/cover.jpg",
+            "card": f"{fallback_base}/card.jpg",
+            "list": f"{fallback_base}/list.jpg",
+            "slimcover": f"{fallback_base}/slimcover.jpg",
+            "cover@2x": f"{fallback_base}/cover@2x.jpg",
+            "card@2x": f"{fallback_base}/card@2x.jpg",
+            "list@2x": f"{fallback_base}/list@2x.jpg",
+            "slimcover@2x": f"{fallback_base}/slimcover@2x.jpg",
+        }
+
     API_INCLUDES: ClassVar[list[str]] = [
         *BEATMAPSET_TRANSFORMER_INCLUDES,
         "beatmaps.current_user_playcount",
@@ -239,13 +257,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         _session: AsyncSession,
         beatmapset: "Beatmapset",
     ) -> str:
-        beatmap_status = beatmapset.beatmap_status
-        if settings.enable_all_beatmap_leaderboard and beatmap_status not in (
-            BeatmapRankStatus.RANKED,
-            BeatmapRankStatus.APPROVED,
-        ):
-            return BeatmapRankStatus.APPROVED.name.lower()
-        return beatmap_status.name.lower()
+        return beatmapset.beatmap_status.name.lower()
 
     @included
     @staticmethod
@@ -253,13 +265,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         _session: AsyncSession,
         beatmapset: "Beatmapset",
     ) -> int:
-        beatmap_status = beatmapset.beatmap_status
-        if settings.enable_all_beatmap_leaderboard and beatmap_status not in (
-            BeatmapRankStatus.RANKED,
-            BeatmapRankStatus.APPROVED,
-        ):
-            return BeatmapRankStatus.APPROVED.value
-        return beatmap_status.value
+        return beatmapset.beatmap_status.value
 
     @ondemand
     @staticmethod

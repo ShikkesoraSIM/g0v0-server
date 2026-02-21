@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING
 from datetime import datetime
 
 from app.models.beatmapset_upload import BeatmapSetFile
-from app.database import Beatmapset, Beatmap
+from app.database import Beatmapset, Beatmap, User
 from app.models.beatmap import BeatmapRankStatus
 from app.models.score import GameMode
 from app.calculator import get_calculator
 
 from osupyparser import OsuFile
-from sqlmodel import select
+from sqlmodel import col, select
 from PIL import Image
 
 if TYPE_CHECKING:
@@ -99,6 +99,8 @@ class BeatmapsetUploadService:
     @staticmethod
     async def allocate_beatmaps(db: "AsyncSession", beatmapset_id: int, user_id: int, count: int) -> list[int]:
         beatmap_ids = []
+        beatmapset = await db.get(Beatmapset, beatmapset_id)
+        status = beatmapset.beatmap_status if beatmapset is not None else BeatmapRankStatus.WIP
         for _ in range(count):
             beatmap = Beatmap(
                 beatmapset_id=beatmapset_id,
@@ -106,7 +108,7 @@ class BeatmapsetUploadService:
                 mode=GameMode.OSU, # Default
                 total_length=0,
                 version="New Beatmap",
-                beatmap_status=BeatmapRankStatus.WIP,
+                beatmap_status=status,
                 last_updated=datetime.utcnow(),
                 is_local=True,
                 # Initialize other required fields to avoid database errors
@@ -171,6 +173,9 @@ class BeatmapsetUploadService:
         beatmapset = await db.get(Beatmapset, beatmapset_id)
         if not beatmapset:
             return []
+        owner = await db.get(User, beatmapset.user_id)
+        if owner is not None:
+            beatmapset.creator = owner.username
 
         updated_beatmap_ids = []
         files_to_update = {}
@@ -178,19 +183,21 @@ class BeatmapsetUploadService:
             osu_files = [f for f in z.namelist() if f.endswith(".osu")]
             if not osu_files:
                 return []
+            processed_osu_files: set[str] = set()
 
             bg_filename = None
 
             # Update beatmapset metadata from the first valid .osu file
             for osu_file in osu_files:
                 with z.open(osu_file) as f:
-                    osu_content = f.read().decode("utf-8", errors="ignore")
+                    original_osu_bytes = f.read()
+                    osu_content = original_osu_bytes.decode("utf-8", errors="ignore")
+                    final_osu_bytes = original_osu_bytes
 
                     # Manual extraction fallback for Artist/Title if osupyparser fails
                     extracted_artist = None
                     extracted_title = None
                     extracted_version = None
-                    extracted_creator = None
                     extracted_source = None
                     extracted_tags = None
                     extracted_bid = None
@@ -216,7 +223,6 @@ class BeatmapsetUploadService:
                                 if key == "Artist": extracted_artist = value
                                 elif key == "Title": extracted_title = value
                                 elif key == "Version": extracted_version = value
-                                elif key == "Creator": extracted_creator = value
                                 elif key == "Source": extracted_source = value
                                 elif key == "Tags": extracted_tags = value
                                 elif key == "BeatmapID":
@@ -263,7 +269,6 @@ class BeatmapsetUploadService:
                         beatmapset.artist_unicode = getattr(parsed.metadata, "artist_unicode", parsed.metadata.artist)
                         beatmapset.title = parsed.metadata.title
                         beatmapset.title_unicode = getattr(parsed.metadata, "title_unicode", parsed.metadata.title)
-                        beatmapset.creator = parsed.metadata.creator
                         beatmapset.source = parsed.metadata.source
                         beatmapset.tags = parsed.metadata.tags
 
@@ -275,7 +280,6 @@ class BeatmapsetUploadService:
                         beatmapset.artist_unicode = extracted_artist or beatmapset.artist_unicode
                         beatmapset.title = extracted_title or beatmapset.title
                         beatmapset.title_unicode = extracted_title or beatmapset.title_unicode
-                        beatmapset.creator = extracted_creator or beatmapset.creator
                         beatmapset.source = extracted_source or beatmapset.source
                         beatmapset.tags = extracted_tags or beatmapset.tags
 
@@ -347,6 +351,7 @@ class BeatmapsetUploadService:
 
                     if beatmap:
                         # Ensure the .osu file has the correct BeatmapID
+                        file_modified = False
                         if bid != beatmap.id:
                             # Update the .osu content with the correct ID
                             if "[Metadata]" in osu_content:
@@ -360,8 +365,10 @@ class BeatmapsetUploadService:
                                 osu_content = re.sub(r"BeatmapSetID:\s*\d*", f"BeatmapSetID:{beatmapset_id}", osu_content)
                             else:
                                 osu_content = osu_content.replace("[Metadata]", f"[Metadata]\nBeatmapSetID:{beatmapset_id}")
+                            file_modified = True
 
                         beatmap.version = version
+                        beatmap.beatmap_status = beatmapset.beatmap_status
                         try:
                             beatmap.mode = GameMode.from_int(mode_val)
                         except (ValueError, KeyError):
@@ -450,24 +457,43 @@ class BeatmapsetUploadService:
                             if beatmap.difficulty_rating == 0 and hasattr(beatmapset, "difficulty_rating"):
                                 beatmap.difficulty_rating = beatmapset.difficulty_rating
 
-                        beatmap.checksum = hashlib.md5(osu_content.encode()).hexdigest()
+                        if file_modified:
+                            final_osu_bytes = osu_content.encode("utf-8")
+                        beatmap.checksum = hashlib.md5(final_osu_bytes).hexdigest()
                         beatmap.last_updated = datetime.utcnow()
                         beatmap.is_local = True
                         updated_beatmap_ids.append(beatmap.id)
+                        processed_osu_files.add(osu_file)
                         db.add(beatmap) # Explicitly ensure beatmap is in session
 
                         # Store updated .osu content back to the zip if modified
-                        if bid != beatmap.id:
-                            files_to_update[osu_file] = osu_content.encode("utf-8")
+                        if file_modified:
+                            files_to_update[osu_file] = final_osu_bytes
 
-            # If any .osu files were modified, re-pack the OSZ
-            if files_to_update:
+            files_to_delete = [name for name in osu_files if name not in processed_osu_files]
+
+            # If .osu files were modified or stale .osu files were found, re-pack the OSZ
+            if files_to_update or files_to_delete:
                 await BeatmapsetUploadService.patch_beatmapset_package(
                     storage,
                     beatmapset_id,
                     [(name, content) for name, content in files_to_update.items()],
-                    []
+                    files_to_delete
                 )
+
+            # Remove stale placeholders that were allocated but never matched to any uploaded .osu file.
+            # These rows can confuse lazer lookup/link generation (e.g. #osu without difficulty id).
+            if updated_beatmap_ids:
+                stale_stmt = select(Beatmap).where(
+                    Beatmap.beatmapset_id == beatmapset_id,
+                    ~col(Beatmap.id).in_(updated_beatmap_ids),
+                    col(Beatmap.is_local).is_(True),
+                    col(Beatmap.version) == "New Beatmap",
+                    (col(Beatmap.checksum) == "") | col(Beatmap.checksum).is_(None),
+                )
+                stale_beatmaps = (await db.exec(stale_stmt)).all()
+                for stale in stale_beatmaps:
+                    await db.delete(stale)
 
             # Update beatmapset BPM (max of beatmaps)
             stmt = select(Beatmap.bpm).where(Beatmap.beatmapset_id == beatmapset_id)
@@ -475,9 +501,19 @@ class BeatmapsetUploadService:
             if bpms:
                 beatmapset.bpm = max(bpms)
 
-            # Process background and covers
-            if bg_filename and bg_filename in z.namelist():
-                with z.open(bg_filename) as f:
+            # Process background and covers.
+            # Fallback: if [Events] did not provide a valid background, use first image in package.
+            cover_source = bg_filename if bg_filename in z.namelist() else None
+            if cover_source is None:
+                image_exts = (".jpg", ".jpeg", ".png", ".webp")
+                for name in z.namelist():
+                    lower = name.lower()
+                    if lower.endswith(image_exts):
+                        cover_source = name
+                        break
+
+            if cover_source is not None:
+                with z.open(cover_source) as f:
                     bg_data = f.read()
                     try:
                         covers = await BeatmapsetUploadService._generate_covers(storage, beatmapset_id, bg_data)

@@ -16,7 +16,8 @@ from app.dependencies.cache import BeatmapsetCacheService, UserCacheService
 from app.dependencies.database import Database, Redis
 from app.dependencies.fetcher import Fetcher
 from app.dependencies.geoip import IPAddress, get_geoip_helper
-from app.dependencies.user import ClientUser, get_current_user
+from app.dependencies.storage import StorageService
+from app.dependencies.user import ClientUser, get_optional_user
 from app.helpers.asset_proxy_helper import asset_proxy_response
 from app.models.beatmap import SearchQueryModel
 from app.service.beatmapset_cache_service import generate_hash
@@ -43,6 +44,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _beatmapset_includes_for_user(user: User | None) -> list[str]:
+    if user is not None:
+        return BeatmapsetModel.API_INCLUDES
+    return [
+        include
+        for include in BeatmapsetModel.API_INCLUDES
+        if not include.startswith("beatmaps.current_user_") and include != "current_user_attributes"
+    ]
+
+
 @router.get(
     "/beatmapsets/search",
     name="搜索谱面集",
@@ -54,10 +65,10 @@ async def search_beatmapset(
     query: Annotated[SearchQueryModel, Query()],
     request: Request,
     background_tasks: BackgroundTasks,
-    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
     fetcher: Fetcher,
     redis: Redis,
     cache_service: BeatmapsetCacheService,
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
     params = parse_qs(qs=request.url.query, keep_blank_values=True)
     cursor = {}
@@ -131,9 +142,9 @@ async def lookup_beatmapset(
     db: Database,
     request: Request,
     beatmap_id: Annotated[int, Query(description="谱面 ID")],
-    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
     fetcher: Fetcher,
     cache_service: BeatmapsetCacheService,
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
     # 先尝试从缓存获取
     cached_resp = await cache_service.get_beatmap_lookup_from_cache(beatmap_id)
@@ -144,7 +155,9 @@ async def lookup_beatmapset(
         beatmap = await Beatmap.get_or_fetch(db, fetcher, bid=beatmap_id)
 
         resp = await BeatmapsetModel.transform(
-            beatmap.beatmapset, user=current_user, includes=BeatmapsetModel.API_INCLUDES
+            beatmap.beatmapset,
+            user=current_user,
+            includes=_beatmapset_includes_for_user(current_user),
         )
 
         # 缓存结果
@@ -166,9 +179,9 @@ async def get_beatmapset(
     db: Database,
     request: Request,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
-    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
     fetcher: Fetcher,
     cache_service: BeatmapsetCacheService,
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
     # 先尝试从缓存获取
     cached_resp = await cache_service.get_beatmapset_from_cache(beatmapset_id)
@@ -177,8 +190,13 @@ async def get_beatmapset(
 
     try:
         beatmapset = await Beatmapset.get_or_fetch(db, fetcher, beatmapset_id)
-        await db.refresh(current_user)
-        resp = await BeatmapsetModel.transform(beatmapset, includes=BeatmapsetModel.API_INCLUDES, user=current_user)
+        if current_user is not None:
+            await db.refresh(current_user)
+        resp = await BeatmapsetModel.transform(
+            beatmapset,
+            includes=_beatmapset_includes_for_user(current_user),
+            user=current_user,
+        )
 
         # 缓存结果
         await cache_service.cache_beatmapset(resp)
@@ -189,12 +207,23 @@ async def get_beatmapset(
 
 @router.get("/beatmapsets/{beatmapset_id}/download", tags=["谱面集"])
 async def download_beatmapset(
+    db: Database,
+    storage: StorageService,
     client_ip: IPAddress,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
-    current_user: ClientUser,
     download_service: DownloadService,
     no_video: Annotated[bool, Query(alias="noVideo")] = True,
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
+    # Local user-uploaded beatmaps should be downloaded from local storage, not external mirrors.
+    local_beatmapset = await db.get(Beatmapset, beatmapset_id)
+    if local_beatmapset and local_beatmapset.is_local:
+        local_file_path = f"beatmapsets/{beatmapset_id}.osz"
+        if await storage.is_exists(local_file_path):
+            local_url = await storage.get_file_url(local_file_path)
+            logger.info(f"[beatmap dl] local redirect {beatmapset_id} -> {local_url}")
+            return RedirectResponse(url=local_url, status_code=307)
+
     geoip_helper = get_geoip_helper()
     geo_info = geoip_helper.lookup(client_ip)
     country_code = geo_info.get("country_iso", "")
@@ -206,7 +235,7 @@ async def download_beatmapset(
 
     if country_code:
         is_china = country_code == "CN"
-    elif not is_private_ip and current_user.country_code:
+    elif not is_private_ip and current_user and current_user.country_code:
         # 仅当客户端是公网 IP 且 GeoIP 无结果时，回退到用户资料国家。
         is_china = current_user.country_code == "CN"
     else:

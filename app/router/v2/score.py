@@ -526,8 +526,13 @@ async def create_solo_score(
         )
         raise HTTPException(status_code=422, detail="invalid client hash")
 
-    beatmap = await Beatmap.get_or_fetch(db, fetcher, md5=beatmap_hash)
-    if not beatmap or beatmap.id != beatmap_id:
+    beatmap = await Beatmap.get_or_fetch(db, fetcher, bid=beatmap_id)
+    if not beatmap:
+        raise HTTPException(status_code=404, detail="beatmap not found")
+
+    # Local uploads can end up with hash drift between editor/export/import paths.
+    # For local maps we trust the beatmap_id and only enforce hash for non-local maps.
+    if not beatmap.is_local and beatmap.checksum and beatmap.checksum.lower() != beatmap_hash.lower():
         raise HTTPException(status_code=422, detail="invalid or missing beatmap_hash")
 
     if not (result := gamemode.check_ruleset_version(ruleset_hash)):

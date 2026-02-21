@@ -8,6 +8,7 @@ from app.database import (
     Beatmap,
     BeatmapModel,
     BeatmapPlaycounts,
+    Beatmapset,
     BeatmapsetModel,
     FavouriteBeatmapset,
     User,
@@ -24,6 +25,7 @@ from app.dependencies.user import get_current_user, get_optional_user
 from app.helpers.asset_proxy_helper import asset_proxy_response
 from app.log import log
 from app.models.mods import API_MODS
+from app.models.beatmap import BeatmapRankStatus
 from app.models.score import GameMode
 from app.models.user import BeatmapsetType
 from app.service.user_cache_service import get_user_cache_service
@@ -429,7 +431,7 @@ async def get_user_beatmapsets(
     cache_service: UserCacheService,
     user_id: Annotated[int, Path(description="用户 ID")],
     type: Annotated[BeatmapsetType, Path(description="谱面集类型")],
-    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
     limit: Annotated[int, Query(ge=1, le=1000, description="返回条数 (1-1000)")] = 100,
     offset: Annotated[int, Query(ge=0, description="偏移量")] = 0,
 ):
@@ -450,8 +452,46 @@ async def get_user_beatmapsets(
         BeatmapsetType.PENDING,
         BeatmapsetType.RANKED,
     }:
-        # TODO: mapping, modding
-        resp = []
+        status_filters: list[BeatmapRankStatus] = []
+        if type == BeatmapsetType.GRAVEYARD:
+            status_filters = [BeatmapRankStatus.GRAVEYARD]
+        elif type == BeatmapsetType.LOVED:
+            status_filters = [BeatmapRankStatus.LOVED]
+        elif type == BeatmapsetType.PENDING:
+            # Local submissions are usually WIP first, so include both.
+            status_filters = [BeatmapRankStatus.WIP, BeatmapRankStatus.PENDING]
+        elif type == BeatmapsetType.RANKED:
+            status_filters = [
+                BeatmapRankStatus.RANKED,
+                BeatmapRankStatus.APPROVED,
+                BeatmapRankStatus.QUALIFIED,
+            ]
+        elif type in {BeatmapsetType.GUEST, BeatmapsetType.NOMINATED}:
+            status_filters = []
+
+        if status_filters:
+            stmt = (
+                select(Beatmapset)
+                .where(
+                    Beatmapset.user_id == user_id,
+                    col(Beatmapset.beatmap_status).in_(status_filters),
+                )
+                .order_by(col(Beatmapset.last_updated).desc(), col(Beatmapset.id).desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            beatmapsets = (await session.exec(stmt)).all()
+            resp = [
+                await BeatmapsetModel.transform(
+                    beatmapset,
+                    session=session,
+                    user=current_user,
+                    includes=beatmapset_includes,
+                )
+                for beatmapset in beatmapsets
+            ]
+        else:
+            resp = []
 
     elif type == BeatmapsetType.FAVOURITE:
         if offset == 0:

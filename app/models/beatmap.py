@@ -181,6 +181,10 @@ class SearchQueryModel(BaseModel):
         default=False,
         description="不良内容",
     )
+    is_local: bool = Field(
+        default=False,
+        description="query local beatmaps only",
+    )
     cursor_string: str | None = Field(
         default=None,
         description="游标字符串，用于分页",
@@ -188,3 +192,4 @@ class SearchQueryModel(BaseModel):
 
 
 SearchQueryModel.model_rebuild()
+

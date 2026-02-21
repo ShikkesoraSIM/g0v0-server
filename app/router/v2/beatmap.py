@@ -5,24 +5,15 @@ from typing import Annotated
 
 from app.calculator import get_calculator
 from app.calculators.performance import ConvertError
-from app.database import (
-    Beatmap,
-    BeatmapModel,
-    User,
-)
+from app.database import Beatmap, BeatmapModel, User
 from app.database.beatmap import calculate_beatmap_attributes
 from app.dependencies.database import Database, Redis
 from app.dependencies.fetcher import Fetcher
-from app.dependencies.user import get_current_user
+from app.dependencies.user import get_current_user, get_optional_user
 from app.helpers.asset_proxy_helper import asset_proxy_response
 from app.models.mods import APIMod, int_to_mods
-from app.models.performance import (
-    DifficultyAttributes,
-    DifficultyAttributesUnion,
-)
-from app.models.score import (
-    GameMode,
-)
+from app.models.performance import DifficultyAttributes, DifficultyAttributesUnion
+from app.models.score import GameMode
 from app.utils import api_doc
 
 from .router import router
@@ -32,21 +23,31 @@ from httpx import HTTPError, HTTPStatusError
 from sqlmodel import col, select
 
 
+def _beatmap_includes_for_user(user: User | None) -> list[str]:
+    if user is not None:
+        return BeatmapModel.TRANSFORMER_INCLUDES
+    return [
+        include
+        for include in BeatmapModel.TRANSFORMER_INCLUDES
+        if not include.startswith("current_user_")
+    ]
+
+
 @router.get(
     "/beatmaps/lookup",
-    tags=["谱面"],
-    name="查询单个谱面",
-    responses={200: api_doc("单个谱面详细信息。", BeatmapModel, BeatmapModel.TRANSFORMER_INCLUDES)},
-    description=("根据谱面 ID / MD5 / 文件名 查询单个谱面。至少提供 id / checksum / filename 之一。"),
+    tags=["beatmap"],
+    name="lookup beatmap",
+    responses={200: api_doc("beatmap detail", BeatmapModel, BeatmapModel.TRANSFORMER_INCLUDES)},
+    description="Lookup a beatmap by id/checksum/filename.",
 )
 @asset_proxy_response
 async def lookup_beatmap(
     db: Database,
-    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
     fetcher: Fetcher,
-    id: Annotated[int | None, Query(alias="id", description="谱面 ID")] = None,
-    md5: Annotated[str | None, Query(alias="checksum", description="谱面文件 MD5")] = None,
-    filename: Annotated[str | None, Query(alias="filename", description="谱面文件名")] = None,
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
+    id: Annotated[int | None, Query(alias="id", description="beatmap id")] = None,
+    md5: Annotated[str | None, Query(alias="checksum", description="beatmap md5")] = None,
+    filename: Annotated[str | None, Query(alias="filename", description="beatmap filename")] = None,
 ):
     if id is None and md5 is None and filename is None:
         raise HTTPException(
@@ -60,32 +61,38 @@ async def lookup_beatmap(
 
     if beatmap is None:
         raise HTTPException(status_code=404, detail="Beatmap not found")
-    await db.refresh(current_user)
+    if current_user is not None:
+        await db.refresh(current_user)
 
-    return await BeatmapModel.transform(beatmap, user=current_user, includes=BeatmapModel.TRANSFORMER_INCLUDES)
+    return await BeatmapModel.transform(
+        beatmap,
+        user=current_user,
+        includes=_beatmap_includes_for_user(current_user),
+    )
 
 
 @router.get(
     "/beatmaps/{beatmap_id}",
-    tags=["谱面"],
-    name="获取谱面详情",
-    responses={200: api_doc("单个谱面详细信息。", BeatmapModel, BeatmapModel.TRANSFORMER_INCLUDES)},
-    description="获取单个谱面详情。",
+    tags=["beatmap"],
+    name="get beatmap",
+    responses={200: api_doc("beatmap detail", BeatmapModel, BeatmapModel.TRANSFORMER_INCLUDES)},
+    description="Get beatmap detail.",
 )
 @asset_proxy_response
 async def get_beatmap(
     db: Database,
-    beatmap_id: Annotated[int, Path(..., description="谱面 ID")],
-    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+    beatmap_id: Annotated[int, Path(..., description="beatmap id")],
     fetcher: Fetcher,
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
     try:
         beatmap = await Beatmap.get_or_fetch(db, fetcher, beatmap_id)
-        await db.refresh(current_user)
+        if current_user is not None:
+            await db.refresh(current_user)
         return await BeatmapModel.transform(
             beatmap,
             user=current_user,
-            includes=BeatmapModel.TRANSFORMER_INCLUDES,
+            includes=_beatmap_includes_for_user(current_user),
         )
     except HTTPError:
         raise HTTPException(status_code=404, detail="Beatmap not found")
@@ -93,24 +100,24 @@ async def get_beatmap(
 
 @router.get(
     "/beatmaps/",
-    tags=["谱面"],
-    name="批量获取谱面",
+    tags=["beatmap"],
+    name="batch get beatmaps",
     responses={
         200: api_doc(
-            "谱面列表", {"beatmaps": list[BeatmapModel]}, BeatmapModel.TRANSFORMER_INCLUDES, name="BatchBeatmapResponse"
+            "beatmap list", {"beatmaps": list[BeatmapModel]}, BeatmapModel.TRANSFORMER_INCLUDES, name="BatchBeatmapResponse"
         )
     },
-    description=("批量获取谱面。若不提供 ids[]，按最近更新时间返回最多 50 条。为空时按最近更新时间返回。"),
+    description="Batch beatmap fetch (max 50).",
 )
 @asset_proxy_response
 async def batch_get_beatmaps(
     db: Database,
+    fetcher: Fetcher,
     beatmap_ids: Annotated[
         list[int],
-        Query(alias="ids[]", default_factory=list, description="谱面 ID 列表 （最多 50 个）"),
+        Query(alias="ids[]", default_factory=list, description="beatmap ids (max 50)"),
     ],
-    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
-    fetcher: Fetcher,
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
     if not beatmap_ids:
         beatmaps = (await db.exec(select(Beatmap).order_by(col(Beatmap.last_updated).desc()).limit(50))).all()
@@ -127,10 +134,15 @@ async def batch_get_beatmaps(
         )
         for beatmap in beatmaps:
             await db.refresh(beatmap)
-    await db.refresh(current_user)
+    if current_user is not None:
+        await db.refresh(current_user)
     return {
         "beatmaps": [
-            await BeatmapModel.transform(bm, user=current_user, includes=BeatmapModel.TRANSFORMER_INCLUDES)
+            await BeatmapModel.transform(
+                bm,
+                user=current_user,
+                includes=_beatmap_includes_for_user(current_user),
+            )
             for bm in beatmaps
         ]
     }
@@ -138,26 +150,26 @@ async def batch_get_beatmaps(
 
 @router.post(
     "/beatmaps/{beatmap_id}/attributes",
-    tags=["谱面"],
-    name="计算谱面属性",
+    tags=["beatmap"],
+    name="calculate beatmap attributes",
     response_model=DifficultyAttributesUnion,
-    description=("计算谱面指定 mods / ruleset 下谱面的难度属性 (难度/PP 相关属性)。"),
+    description="Calculate difficulty/performance attributes with mods/ruleset.",
 )
 async def get_beatmap_attributes(
     db: Database,
-    beatmap_id: Annotated[int, Path(..., description="谱面 ID")],
+    beatmap_id: Annotated[int, Path(..., description="beatmap id")],
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
     mods: Annotated[
         list[str],
         Query(
             default_factory=list,
-            description="Mods 列表；可为整型位掩码(单元素)或 JSON/简称",
+            description="mods list: int bitmask or json/acronyms",
         ),
     ],
     redis: Redis,
     fetcher: Fetcher,
-    ruleset: Annotated[GameMode | None, Query(description="指定 ruleset；为空则使用谱面自身模式")] = None,
-    ruleset_id: Annotated[int | None, Query(description="以数字指定 ruleset （与 ruleset 二选一）")] = None,
+    ruleset: Annotated[GameMode | None, Query(description="ruleset; default beatmap mode")] = None,
+    ruleset_id: Annotated[int | None, Query(description="ruleset as numeric id")] = None,
 ):
     mods_ = []
     if mods and mods[0].isdigit():

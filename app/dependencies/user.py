@@ -10,7 +10,7 @@ from app.models.oauth import OAuth2ClientCredentialsBearer
 from .api_version import APIVersion
 from .database import Database, get_redis
 
-from fastapi import Depends, HTTPException, Security
+from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import (
     APIKeyQuery,
     HTTPBearer,
@@ -18,6 +18,7 @@ from fastapi.security import (
     OAuth2PasswordBearer,
     SecurityScopes,
 )
+from fastapi.security.utils import get_authorization_scheme_param
 from redis.asyncio import Redis
 from sqlmodel import select
 
@@ -184,15 +185,22 @@ async def get_current_user(
 async def get_optional_user(
     db: Database,
     security_scopes: SecurityScopes,
-    token_pw: Annotated[str | None, Depends(oauth2_password)] = None,
-    token_code: Annotated[str | None, Depends(oauth2_code)] = None,
-    token_client_credentials: Annotated[str | None, Depends(oauth2_client_credentials)] = None,
+    request: Request,
 ) -> User | None:
-    token = token_pw or token_code or token_client_credentials
-    if not token:
+    # Be tolerant for optional auth endpoints:
+    # clients may send non-bearer or stale auth headers while still expecting public data.
+    authorization = request.headers.get("Authorization")
+    if not authorization:
         return None
 
-    return (await _validate_token(db, token, security_scopes))[0]
+    scheme, token = get_authorization_scheme_param(authorization)
+    if scheme.lower() != "bearer" or not token:
+        return None
+
+    try:
+        return (await _validate_token(db, token, security_scopes))[0]
+    except HTTPException:
+        return None
 
 
 ClientUser = Annotated[User, Security(get_client_user, scopes=["*"])]

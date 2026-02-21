@@ -15,7 +15,11 @@ from app.service.beatmapset_upload_service import BeatmapsetUploadService
 from fastapi import APIRouter, File, Form, HTTPException, Path, Security, UploadFile
 from sqlmodel import select
 
-router = APIRouter(prefix="/beatmap-submission", tags=["谱面提交"])
+router = APIRouter(prefix="/beatmap-submission", tags=["beatmap submission"])
+
+def _local_submission_status(target: str | None) -> BeatmapRankStatus:
+    # Keep local uploads scoreable without granting full ranked semantics/rewards.
+    return BeatmapRankStatus.APPROVED
 
 
 @router.put(
@@ -46,13 +50,14 @@ async def initialize_beatmapset_upload(
                 is_local=True,
                 submitted_date=datetime.utcnow(),
                 last_updated=datetime.utcnow(),
-                beatmap_status=BeatmapRankStatus.PENDING if req.target == "Pending" else BeatmapRankStatus.WIP,
+                beatmap_status=_local_submission_status(req.target),
             )
             db.add(beatmapset)
             await db.flush()
         elif beatmapset.user_id != current_user.id:
             raise HTTPException(status_code=403, detail="You do not own this beatmapset")
         else:
+            beatmapset.creator = current_user.username
             # Update metadata if provided
             if req.artist:
                 beatmapset.artist = req.artist
@@ -74,22 +79,25 @@ async def initialize_beatmapset_upload(
                 await db.delete(b)
 
         # Update status if target is provided
-        if req.target == "Pending":
-            beatmapset.beatmap_status = BeatmapRankStatus.PENDING
-        else:
-            beatmapset.beatmap_status = BeatmapRankStatus.WIP
+        beatmapset.beatmap_status = _local_submission_status(req.target)
 
         existing_files = await BeatmapsetUploadService.get_beatmapset_files(storage, beatmapset.id)
 
         # Allocate new beatmaps if needed
-        beatmap_ids = []
         if req.beatmaps_to_create > 0:
-            beatmap_ids = await BeatmapsetUploadService.allocate_beatmaps(
+            await BeatmapsetUploadService.allocate_beatmaps(
                 db, beatmapset.id, current_user.id, req.beatmaps_to_create
             )
 
         beatmapset_id = beatmapset.id
         await db.commit()
+
+        # Return the complete server-assigned beatmap ID list for this set.
+        beatmap_ids = (
+            await db.exec(
+                select(Beatmap.id).where(Beatmap.beatmapset_id == beatmapset_id).order_by(Beatmap.id.asc())
+            )
+        ).all()
     else:
         # Create a temporary beatmapset with default values
         # Custom ID generation: find the max ID in the 800,000,000 range and increment
@@ -110,7 +118,7 @@ async def initialize_beatmapset_upload(
             is_local=True,
             submitted_date=datetime.utcnow(),
             last_updated=datetime.utcnow(),
-            beatmap_status=BeatmapRankStatus.PENDING if req.target == "Pending" else BeatmapRankStatus.WIP,
+            beatmap_status=_local_submission_status(req.target),
         )
         db.add(beatmapset)
         await db.flush()
@@ -118,10 +126,16 @@ async def initialize_beatmapset_upload(
         beatmapset_id = beatmapset.id
         existing_files = []
         # Allocate placeholders for the beatmaps being uploaded
-        beatmap_ids = await BeatmapsetUploadService.allocate_beatmaps(
+        await BeatmapsetUploadService.allocate_beatmaps(
             db, beatmapset_id, current_user.id, req.beatmaps_to_create
         )
         await db.commit()
+
+        beatmap_ids = (
+            await db.exec(
+                select(Beatmap.id).where(Beatmap.beatmapset_id == beatmapset_id).order_by(Beatmap.id.asc())
+            )
+        ).all()
 
     return PutBeatmapSetResponse(
         beatmapset_id=beatmapset_id,
@@ -201,3 +215,5 @@ async def patch_beatmapset_package(
         await cache_service.invalidate_beatmap_lookup_cache(bid)
 
     return {"status": "success"}
+
+

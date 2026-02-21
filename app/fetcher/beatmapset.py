@@ -61,6 +61,15 @@ adapter = TypeAdapter(
 
 class BeatmapsetFetcher(BaseFetcher):
     @staticmethod
+    def _ensure_local_flags(beatmapset: dict) -> dict:
+        """Normalize remote payloads that do not contain local-only fields."""
+        beatmapset.setdefault("is_local", False)
+        for beatmap in beatmapset.get("beatmaps") or []:
+            if isinstance(beatmap, dict):
+                beatmap.setdefault("is_local", False)
+        return beatmapset
+
+    @staticmethod
     def _get_homepage_queries() -> list[tuple[SearchQueryModel, Cursor]]:
         """获取主页预缓存查询列表"""
         # 主页常用查询组合
@@ -107,8 +116,9 @@ class BeatmapsetFetcher(BaseFetcher):
             cache_data["r"] = query.r
         if query.played is not False:
             cache_data["played"] = query.played
-        if query.is_local:
-            cache_data["is_local"] = query.is_local
+        query_is_local = getattr(query, "is_local", False)
+        if query_is_local:
+            cache_data["is_local"] = query_is_local
 
         # 添加 cursor
         if cursor:
@@ -139,8 +149,10 @@ class BeatmapsetFetcher(BaseFetcher):
 
     async def get_beatmapset(self, beatmap_set_id: int) -> BeatmapsetDict:
         logger.opt(colors=True).debug(f"get_beatmapset: <y>{beatmap_set_id}</y>")
+        payload = await self.request_api(f"https://osu.ppy.sh/api/v2/beatmapsets/{beatmap_set_id}")
+        payload = self._ensure_local_flags(payload)
         return adapter.validate_python(  # pyright: ignore[reportReturnType]
-            await self.request_api(f"https://osu.ppy.sh/api/v2/beatmapsets/{beatmap_set_id}")
+            payload
         )
 
     async def search_beatmapset(
@@ -176,6 +188,9 @@ class BeatmapsetFetcher(BaseFetcher):
             "https://osu.ppy.sh/api/v2/beatmapsets/search",
             params=params,
         )
+        for beatmapset in api_response.get("beatmapsets") or []:
+            if isinstance(beatmapset, dict):
+                self._ensure_local_flags(beatmapset)
 
         # 处理响应中的cursor信息
         if api_response.get("cursor"):
@@ -256,6 +271,9 @@ class BeatmapsetFetcher(BaseFetcher):
                 "https://osu.ppy.sh/api/v2/beatmapsets/search",
                 params=params,
             )
+            for beatmapset in api_response.get("beatmapsets") or []:
+                if isinstance(beatmapset, dict):
+                    self._ensure_local_flags(beatmapset)
 
             # 处理响应中的cursor信息
             if api_response.get("cursor"):

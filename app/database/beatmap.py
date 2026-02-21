@@ -117,7 +117,7 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
     @ondemand
     @staticmethod
     async def url(_session: AsyncSession, beatmap: "Beatmap") -> str:
-        return f"{str(settings.server_url).rstrip('/')}/beatmaps/{beatmap.id}"
+        return f"{str(settings.web_url).rstrip('/')}/beatmaps/{beatmap.id}"
     # optional
     checksum: OnDemand[str | None] = Field(sa_column=Column(VARCHAR(32), index=True))
     max_combo: OnDemand[int | None] = Field(default=0)
@@ -140,11 +140,6 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
     @included
     @staticmethod
     async def status(_session: AsyncSession, beatmap: "Beatmap") -> str:
-        if settings.enable_all_beatmap_leaderboard and beatmap.beatmap_status not in (
-            BeatmapRankStatus.RANKED,
-            BeatmapRankStatus.APPROVED,
-        ):
-            return BeatmapRankStatus.APPROVED.name.lower()
         return beatmap.beatmap_status.name.lower()
 
     @ondemand
@@ -245,10 +240,7 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
     @ondemand
     @staticmethod
     async def ranked(_session: AsyncSession, beatmap: "Beatmap") -> int:
-        beatmap_status = beatmap.beatmap_status
-        if settings.enable_all_beatmap_leaderboard and not beatmap_status.has_leaderboard():
-            return BeatmapRankStatus.APPROVED.value
-        return beatmap_status.value
+        return beatmap.beatmap_status.value
 
     @ondemand
     @staticmethod
