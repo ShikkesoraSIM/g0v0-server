@@ -1,3 +1,4 @@
+from .beatmap_submission import router as beatmap_submission_router
 from .auth import router as auth_router
 from .fetcher import fetcher_router as fetcher_router
 from .file import file_router as file_router
@@ -15,6 +16,7 @@ __all__ = [
     "api_v1_router",
     "api_v2_router",
     "auth_router",
+    "beatmap_submission_router",
     "chat_router",
     "fetcher_router",
     "file_router",

@@ -28,6 +28,7 @@ from app.router import (
     api_v1_router,
     api_v2_router,
     auth_router,
+    beatmap_submission_router,
     chat_router,
     file_router,
     lio_router,
@@ -206,6 +207,7 @@ app.include_router(file_router)
 app.include_router(auth_router)
 app.include_router(private_router)
 app.include_router(lio_router)
+app.include_router(beatmap_submission_router)
 
 # 会话验证中间件
 if settings.enable_session_verification:
