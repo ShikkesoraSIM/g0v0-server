@@ -2,7 +2,8 @@
 
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Self
+import time
+from typing import TYPE_CHECKING, ClassVar, Literal, Self
 
 from app.utils import truncate
 
@@ -272,9 +273,63 @@ class TeamApplicationStore(TeamApplicationBase):
         return instance
 
 
+class GlobalAnnouncement(NotificationDetail):
+    name: ClassVar[NotificationName] = NotificationName.CHANNEL_ANNOUNCEMENT
+
+    title: str
+    message: str
+    severity: Literal["info", "warning", "error"] = "info"
+
+    _source_user_id: int = PrivateAttr()
+    _object_id: int = PrivateAttr()
+    _receiver_ids: list[int] | None = PrivateAttr(default=None)
+
+    @classmethod
+    def init(
+        cls,
+        source_user_id: int,
+        title: str,
+        message: str,
+        severity: Literal["info", "warning", "error"] = "info",
+        receiver_ids: list[int] | None = None,
+    ) -> Self:
+        instance = cls(
+            title=title,
+            message=message,
+            severity=severity,
+        )
+        instance._source_user_id = source_user_id
+        instance._object_id = time.time_ns()
+        instance._receiver_ids = receiver_ids
+        return instance
+
+    async def get_receivers(self, session: AsyncSession) -> list[int]:
+        if self._receiver_ids is not None:
+            return self._receiver_ids
+
+        from app.const import BANCHOBOT_ID
+        from app.database.user import User
+
+        user_ids = (await session.exec(select(User.id).where(User.id != BANCHOBOT_ID))).all()
+        return list(user_ids)
+
+    @property
+    def object_type(self) -> str:
+        return "announcement"
+
+    @property
+    def object_id(self) -> int:
+        return self._object_id
+
+    @property
+    def source_user_id(self) -> int:
+        return self._source_user_id
+
+
 NotificationDetails = (
     ChannelMessage
     | ChannelMessageTeam
+    | GlobalAnnouncement
     | UserAchievementUnlock
     | TeamApplicationAccept
     | TeamApplicationReject
