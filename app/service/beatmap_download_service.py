@@ -58,7 +58,7 @@ class BeatmapDownloadService:
                 health_check_url="https://api.gatari.pw",
                 url_template="https://osu.gatari.pw/d/{sid}",
                 is_china=False,
-                priority=0,
+                priority=2,
                 timeout=10,
             ),
             DownloadEndpoint(
@@ -67,7 +67,7 @@ class BeatmapDownloadService:
                 health_check_url="https://catboy.best/api",
                 url_template="https://catboy.best/d/{sid}",
                 is_china=False,
-                priority=1,
+                priority=0,
                 timeout=10,
             ),
             DownloadEndpoint(
@@ -208,32 +208,42 @@ class BeatmapDownloadService:
         healthy_endpoints.sort(key=lambda x: x.priority)
         return healthy_endpoints
 
-    def get_download_url(self, beatmapset_id: int, no_video: bool, is_china: bool) -> str:
-        """获取下载URL，带负载均衡和故障转移"""
-        healthy_endpoints = self.get_healthy_endpoints(is_china)
+    def _get_endpoint_pool(self, is_china: bool) -> list[DownloadEndpoint]:
+        """获取端点池。中国用户优先中国镜像，失败时回退国际镜像。"""
+        if is_china:
+            return self.china_endpoints + self.international_endpoints
+        return self.international_endpoints
 
-        if not healthy_endpoints:
-            # 如果没有健康的端点，记录错误并回退到所有端点中优先级最高的
-            logger.error(f"No healthy endpoints available for is_china={is_china}")
-            endpoints = self.china_endpoints if is_china else self.international_endpoints
-            if not endpoints:
-                raise HTTPException(status_code=503, detail="No download endpoints available")
-            endpoint = min(endpoints, key=lambda x: x.priority)
-        else:
-            # 使用第一个健康的端点（已按优先级排序）
-            endpoint = healthy_endpoints[0]
-
-        # 根据端点类型生成URL
+    def _build_download_url(self, endpoint: DownloadEndpoint, beatmapset_id: int, no_video: bool) -> str:
+        """根据端点配置生成下载 URL。"""
         if endpoint.name == "Sayobot":
             video_type = "novideo" if no_video else "full"
             return endpoint.url_template.format(type=video_type, sid=beatmapset_id)
-        elif endpoint.name == "Nerinyan" or endpoint.name == "OsuDirect":
+        if endpoint.name in {"Nerinyan", "OsuDirect"}:
             return endpoint.url_template.format(sid=beatmapset_id, no_video="true" if no_video else "false")
-        elif endpoint.name == "Catboy":
+        if endpoint.name == "Catboy":
             return endpoint.url_template.format(sid=f"{beatmapset_id}n" if no_video else beatmapset_id)
-        else:
-            # 默认处理
-            return endpoint.url_template.format(sid=beatmapset_id)
+        return endpoint.url_template.format(sid=beatmapset_id)
+
+    def get_download_urls(self, beatmapset_id: int, no_video: bool, is_china: bool) -> list[str]:
+        """获取下载 URL 列表（按优先级，健康端点优先）。"""
+        endpoints = self._get_endpoint_pool(is_china)
+        if not endpoints:
+            return []
+
+        healthy = [ep for ep in sorted(endpoints, key=lambda x: x.priority) if self.endpoint_status[ep.name].is_healthy]
+        healthy_names = {ep.name for ep in healthy}
+        unhealthy = [ep for ep in sorted(endpoints, key=lambda x: x.priority) if ep.name not in healthy_names]
+        ordered_endpoints = healthy + unhealthy
+
+        return [self._build_download_url(ep, beatmapset_id, no_video) for ep in ordered_endpoints]
+
+    def get_download_url(self, beatmapset_id: int, no_video: bool, is_china: bool) -> str:
+        """获取下载URL，带负载均衡和故障转移"""
+        urls = self.get_download_urls(beatmapset_id=beatmapset_id, no_video=no_video, is_china=is_china)
+        if not urls:
+            raise HTTPException(status_code=503, detail="No download endpoints available")
+        return urls[0]
 
     def get_service_status(self) -> dict:
         """获取服务状态信息"""

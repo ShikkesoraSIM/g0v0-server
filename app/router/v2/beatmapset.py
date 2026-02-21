@@ -1,6 +1,7 @@
 import re
 from typing import Annotated, Literal
 from urllib.parse import parse_qs
+import ipaddress
 
 from app.database import (
     Beatmap,
@@ -36,7 +37,6 @@ from fastapi.responses import RedirectResponse
 from httpx import HTTPError
 from sqlmodel import select
 
-from fastapi.responses import StreamingResponse
 import httpx
 import logging
 
@@ -198,7 +198,20 @@ async def download_beatmapset(
     geoip_helper = get_geoip_helper()
     geo_info = geoip_helper.lookup(client_ip)
     country_code = geo_info.get("country_iso", "")
-    is_china = country_code == "CN" or (not country_code and current_user.country_code == "CN")
+    try:
+        ip_obj = ipaddress.ip_address(str(client_ip))
+        is_private_ip = ip_obj.is_private or ip_obj.is_loopback
+    except ValueError:
+        is_private_ip = False
+
+    if country_code:
+        is_china = country_code == "CN"
+    elif not is_private_ip and current_user.country_code:
+        # 仅当客户端是公网 IP 且 GeoIP 无结果时，回退到用户资料国家。
+        is_china = current_user.country_code == "CN"
+    else:
+        # 本地开发 / Docker 网段下不强制走 CN 镜像，避免误判。
+        is_china = False
 
     download_urls = download_service.get_download_urls(
         beatmapset_id=beatmapset_id, no_video=no_video, is_china=is_china
@@ -207,52 +220,32 @@ async def download_beatmapset(
     if not download_urls:
         raise HTTPException(status_code=503, detail="No download URLs available")
 
-    async def iterate_mirrors():
-        timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
-        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-            last_err = None
-            for url in download_urls:
-                try:
-                    logger.info(f"[beatmap dl] try {beatmapset_id} from {url}")
-                    async with client.stream("GET", url) as r:
-                        if r.status_code != 200:
-                            logger.warning(f"[beatmap dl] {url} -> {r.status_code}")
-                            continue
+    timeout = httpx.Timeout(connect=8.0, read=12.0, write=12.0, pool=8.0)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        last_err = None
+        for url in download_urls:
+            try:
+                logger.info(f"[beatmap dl] probe {beatmapset_id} -> {url}")
+                async with client.stream("GET", url, headers={"Range": "bytes=0-1"}) as r:
+                    if r.status_code not in (200, 206):
+                        logger.warning(f"[beatmap dl] {url} -> {r.status_code}")
+                        continue
 
-                        # Read first chunk to validate ZIP (OSZ)
-                        first = b""
-                        async for chunk in r.aiter_bytes(chunk_size=65536):
-                            first = chunk
-                            break
+                    # Small probe: ensure response starts as ZIP when possible.
+                    first = await anext(r.aiter_bytes(chunk_size=64), b"")
+                    content_type = (r.headers.get("Content-Type") or "").lower()
+                    if first and not first.startswith(b"PK") and "zip" not in content_type and "octet-stream" not in content_type:
+                        logger.warning(f"[beatmap dl] {url} not zip-like (ct={content_type})")
+                        continue
 
-                        if not first:
-                            logger.warning(f"[beatmap dl] {url} empty body")
-                            continue
+                    logger.info(f"[beatmap dl] redirect {beatmapset_id} -> {url}")
+                    return RedirectResponse(url=url, status_code=307)
+            except Exception as e:
+                last_err = e
+                logger.warning(f"[beatmap dl] {url} probe failed: {e}")
 
-                        # ZIP magic check
-                        if not first.startswith(b"PK"):
-                            ct = r.headers.get("Content-Type", "")
-                            logger.warning(f"[beatmap dl] {url} not zip (ct={ct}), skipping")
-                            continue
-
-                        # Yield first chunk then rest
-                        yield first
-                        async for chunk in r.aiter_bytes(chunk_size=65536):
-                            yield chunk
-                        return  # success, stop trying mirrors
-
-                except Exception as e:
-                    last_err = e
-                    logger.warning(f"[beatmap dl] {url} failed: {e}")
-                    continue
-
-            logger.error(f"[beatmap dl] all mirrors failed for {beatmapset_id}: {last_err}")
-
-    return StreamingResponse(
-        iterate_mirrors(),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{beatmapset_id}.osz"'},
-    )
+    logger.error(f"[beatmap dl] all mirrors failed for {beatmapset_id}: {last_err}")
+    raise HTTPException(status_code=503, detail="All beatmap mirrors failed")
 
 
 @router.post(
