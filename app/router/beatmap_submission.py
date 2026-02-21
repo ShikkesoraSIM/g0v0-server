@@ -2,9 +2,10 @@ from datetime import datetime
 from typing import Annotated
 
 from app.database import Beatmap, Beatmapset
+from app.database.beatmap import clear_cached_beatmap_raws
 from app.dependencies.user import ClientUser, get_current_user
 from app.dependencies.cache import BeatmapsetCacheService
-from app.dependencies.database import Database
+from app.dependencies.database import Database, Redis
 from app.dependencies.storage import StorageService
 from app.models.beatmap import BeatmapRankStatus
 from app.models.beatmapset_upload import (
@@ -152,6 +153,7 @@ async def initialize_beatmapset_upload(
 )
 async def upload_beatmapset_package(
     db: Database,
+    redis: Redis,
     storage: StorageService,
     cache_service: BeatmapsetCacheService,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
@@ -173,6 +175,7 @@ async def upload_beatmapset_package(
     await cache_service.invalidate_beatmapset_cache(beatmapset_id)
     for bid in updated_ids:
         await cache_service.invalidate_beatmap_lookup_cache(bid)
+    await clear_cached_beatmap_raws(redis, updated_ids)
 
     return {"status": "success"}
 
@@ -185,6 +188,7 @@ async def upload_beatmapset_package(
 )
 async def patch_beatmapset_package(
     db: Database,
+    redis: Redis,
     storage: StorageService,
     cache_service: BeatmapsetCacheService,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
@@ -213,6 +217,7 @@ async def patch_beatmapset_package(
     await cache_service.invalidate_beatmapset_cache(beatmapset_id)
     for bid in updated_ids:
         await cache_service.invalidate_beatmap_lookup_cache(bid)
+    await clear_cached_beatmap_raws(redis, updated_ids)
 
     return {"status": "success"}
 

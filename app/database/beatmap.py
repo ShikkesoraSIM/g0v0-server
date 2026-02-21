@@ -320,7 +320,7 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             if beatmapset_id is None or ranked is None:
                 continue
 
-            # 创建 beatmap 字典,移除 beatmapset
+            # Build beatmap payload without nested beatmapset object.
             d = {k: v for k, v in resp_dict.items() if k != "beatmapset"}
 
             beatmap = Beatmap.model_validate(
@@ -414,19 +414,30 @@ async def calculate_beatmap_attributes(
 
 
 async def clear_cached_beatmap_raws(redis: Redis, beatmaps: list[int] = []):
-    """清理缓存的 beatmap 原始数据，使用非阻塞方式"""
+    """Clear cached beatmap raw files and derived difficulty attributes."""
     if beatmaps:
-        # 分批删除，避免一次删除太多 key 导致阻塞
         batch_size = 50
         for i in range(0, len(beatmaps), batch_size):
             batch = beatmaps[i : i + batch_size]
-            keys = [f"beatmap:{bid}:raw" for bid in batch]
-            # 使用 unlink 而不是 delete（非阻塞，更快）
+            keys: list[str] = [f"beatmap:{bid}:raw" for bid in batch]
+            for bid in batch:
+                pattern = f"beatmap:{bid}:*:attributes"
+                async for key in redis.scan_iter(match=pattern, count=200):
+                    keys.append(key if isinstance(key, str) else key.decode())
             try:
                 await redis.unlink(*keys)
             except Exception:
-                # 如果 unlink 不支持，回退到 delete
                 await redis.delete(*keys)
         return
 
-    await redis.delete("beatmap:*:raw")
+    all_keys: list[str] = []
+    async for key in redis.scan_iter(match="beatmap:*:raw", count=500):
+        all_keys.append(key if isinstance(key, str) else key.decode())
+    async for key in redis.scan_iter(match="beatmap:*:*:attributes", count=500):
+        all_keys.append(key if isinstance(key, str) else key.decode())
+
+    if all_keys:
+        try:
+            await redis.unlink(*all_keys)
+        except Exception:
+            await redis.delete(*all_keys)
