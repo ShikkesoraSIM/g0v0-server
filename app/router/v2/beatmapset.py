@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 from urllib.parse import parse_qs
 import ipaddress
 
+from app.config import settings
 from app.database import (
     Beatmap,
     Beatmapset,
@@ -19,7 +20,8 @@ from app.dependencies.geoip import IPAddress, get_geoip_helper
 from app.dependencies.storage import StorageService
 from app.dependencies.user import ClientUser, get_optional_user
 from app.helpers.asset_proxy_helper import asset_proxy_response
-from app.models.beatmap import SearchQueryModel
+from app.models.beatmap import BeatmapRankStatus, SearchQueryModel
+from app.models.score import GameMode
 from app.service.beatmapset_cache_service import generate_hash
 from app.utils import api_doc
 
@@ -36,12 +38,80 @@ from fastapi import (
 )
 from fastapi.responses import RedirectResponse
 from httpx import HTTPError
-from sqlmodel import select
+from sqlalchemy import or_
+from sqlmodel import col, select
 
 import httpx
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _status_filters_from_query(status: str) -> list[BeatmapRankStatus]:
+    if status == "leaderboard":
+        if settings.enable_all_beatmap_leaderboard:
+            return list(BeatmapRankStatus)
+        return [
+            BeatmapRankStatus.RANKED,
+            BeatmapRankStatus.APPROVED,
+            BeatmapRankStatus.QUALIFIED,
+            BeatmapRankStatus.LOVED,
+        ]
+    if status == "ranked":
+        return [BeatmapRankStatus.RANKED]
+    if status == "qualified":
+        return [BeatmapRankStatus.QUALIFIED]
+    if status == "loved":
+        return [BeatmapRankStatus.LOVED]
+    if status == "pending":
+        return [BeatmapRankStatus.PENDING]
+    if status == "wip":
+        return [BeatmapRankStatus.WIP]
+    if status == "graveyard":
+        return [BeatmapRankStatus.GRAVEYARD]
+    return []
+
+
+async def _search_local_beatmapsets(
+    db: Database,
+    query: SearchQueryModel,
+    current_user: User | None,
+) -> SearchBeatmapsetsResp:
+    stmt = (
+        select(Beatmapset)
+        .where(col(Beatmapset.is_local).is_(True))
+        .order_by(col(Beatmapset.last_updated).desc(), col(Beatmapset.id).desc())
+        .limit(50)
+    )
+
+    if query.q:
+        q = f"%{query.q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                col(Beatmapset.title).ilike(q),
+                col(Beatmapset.title_unicode).ilike(q),
+                col(Beatmapset.artist).ilike(q),
+                col(Beatmapset.artist_unicode).ilike(q),
+                col(Beatmapset.creator).ilike(q),
+                col(Beatmapset.tags).ilike(q),
+            )
+        )
+
+    status_filters = _status_filters_from_query(query.s)
+    if status_filters:
+        stmt = stmt.where(col(Beatmapset.beatmap_status).in_(status_filters))
+
+    if query.m is not None:
+        try:
+            mode = GameMode.from_int(query.m)
+            stmt = stmt.where(Beatmapset.beatmaps.any(Beatmap.mode == mode))
+        except Exception:
+            return SearchBeatmapsetsResp(total=0, beatmapsets=[])
+
+    beatmapsets = (await db.exec(stmt)).all()
+    includes = _beatmapset_includes_for_user(current_user)
+    data = [await BeatmapsetModel.transform(bmset, user=current_user, includes=includes) for bmset in beatmapsets]
+    return SearchBeatmapsetsResp(total=len(data), beatmapsets=data)
 
 
 def _beatmapset_includes_for_user(user: User | None) -> list[str]:
@@ -62,6 +132,7 @@ def _beatmapset_includes_for_user(user: User | None) -> list[str]:
 )
 @asset_proxy_response
 async def search_beatmapset(
+    db: Database,
     query: Annotated[SearchQueryModel, Query()],
     request: Request,
     background_tasks: BackgroundTasks,
@@ -70,6 +141,9 @@ async def search_beatmapset(
     cache_service: BeatmapsetCacheService,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
+    if query.is_local:
+        return await _search_local_beatmapsets(db, query, current_user)
+
     params = parse_qs(qs=request.url.query, keep_blank_values=True)
     cursor = {}
 
