@@ -130,9 +130,12 @@ def calculate_pp_for_no_calculator(score: "Score", star_rating: float) -> float:
 
 
 async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> float:
-    from app.database.beatmap import BannedBeatmaps
+    from app.database.beatmap import BannedBeatmaps, Beatmap
 
-    if settings.suspicious_score_check:
+    db_beatmap = await session.get(Beatmap, score.beatmap_id)
+    is_local_beatmap = bool(db_beatmap and db_beatmap.is_local)
+
+    if settings.suspicious_score_check and not is_local_beatmap:
         beatmap_banned = (
             await session.exec(select(exists()).where(col(BannedBeatmaps.beatmap_id) == score.beatmap_id))
         ).first()
@@ -160,7 +163,7 @@ async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> f
         attrs = await get_calculator().calculate_performance(beatmap, score)
         pp = attrs.pp
 
-    if settings.suspicious_score_check and (pp > 3000):
+    if settings.suspicious_score_check and not is_local_beatmap and (pp > 3000):
         logger.warning(
             f"User {score.user_id} played {score.beatmap_id} "
             f"with {pp=} "
