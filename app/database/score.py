@@ -387,8 +387,15 @@ class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
         _session: AsyncSession,
         score: "Score",
         includes: list[str] | None = None,
+        show_nsfw_media: bool = False,
     ) -> UserDict:
-        return await UserModel.transform(score.user, ruleset=score.gamemode, includes=includes or [])
+        user_resp = await UserModel.transform(
+            score.user,
+            ruleset=score.gamemode,
+            includes=includes or [],
+            show_nsfw_media=show_nsfw_media,
+        )
+        return UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media)
 
     @ondemand
     @staticmethod
@@ -548,10 +555,14 @@ class Score(ScoreModel, table=True):
         )
 
     async def to_resp(
-        self, session: AsyncSession, api_version: int, includes: list[str] = []
+        self,
+        session: AsyncSession,
+        api_version: int,
+        includes: list[str] = [],
+        show_nsfw_media: bool = False,
     ) -> "ScoreDict | LegacyScoreResp":
         if api_version >= 20220705:
-            return await ScoreModel.transform(self, includes=includes)
+            return await ScoreModel.transform(self, includes=includes, show_nsfw_media=show_nsfw_media)
         return await LegacyScoreResp.from_db(session, self)
 
     async def delete(
@@ -1654,4 +1665,3 @@ async def process_user(
         score_id=score_id,
         user_id=user_id,
     )
-

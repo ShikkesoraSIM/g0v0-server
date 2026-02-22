@@ -4,7 +4,7 @@ from typing import Annotated, overload
 from app.database import ChatMessageDict
 from app.database.chat import ChannelType, ChatChannel, ChatChannelDict, ChatChannelModel
 from app.database.notification import UserNotification, insert_notification
-from app.database.user import User
+from app.database.user import User, UserModel
 from app.dependencies.database import (
     DBFactory,
     Redis,
@@ -192,8 +192,13 @@ class ChatServer:
                 not_joined.append(user)
 
         for user in not_joined:
+            show_nsfw_media = await UserModel.viewer_allows_nsfw_media(user)
             channel_resp = await ChatChannelModel.transform(
-                channel, user=user, server=server, includes=ChatChannel.LISTING_INCLUDES
+                channel,
+                user=user,
+                server=server,
+                includes=ChatChannel.LISTING_INCLUDES,
+                show_nsfw_media=show_nsfw_media,
             )
             await self.send_event(
                 user.id,
@@ -212,8 +217,13 @@ class ChatServer:
         if user_id not in self.channels[channel_id]:
             self.channels[channel_id].append(user_id)
 
+        show_nsfw_media = await UserModel.viewer_allows_nsfw_media(user)
         channel_resp: ChatChannelDict = await ChatChannelModel.transform(
-            channel, user=user, server=server, includes=ChatChannel.LISTING_INCLUDES
+            channel,
+            user=user,
+            server=server,
+            includes=ChatChannel.LISTING_INCLUDES,
+            show_nsfw_media=show_nsfw_media,
         )
 
         await self.send_event(
@@ -236,8 +246,13 @@ class ChatServer:
         if (c := self.channels.get(channel_id)) is not None and not c:
             del self.channels[channel_id]
 
+        show_nsfw_media = await UserModel.viewer_allows_nsfw_media(user)
         channel_resp = await ChatChannelModel.transform(
-            channel, user=user, server=server, includes=ChatChannel.LISTING_INCLUDES
+            channel,
+            user=user,
+            server=server,
+            includes=ChatChannel.LISTING_INCLUDES,
+            show_nsfw_media=show_nsfw_media,
         )
         await self.send_event(
             user_id,

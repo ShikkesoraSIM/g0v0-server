@@ -82,6 +82,7 @@ COUNTRIES = json.loads((STATIC_DIR / "iso3166.json").read_text())
 
 class UserDict(TypedDict):
     avatar_url: str
+    avatar_nsfw: NotRequired[bool]
     country_code: str
     id: int
     is_active: bool
@@ -98,6 +99,7 @@ class UserDict(TypedDict):
     support_level: NotRequired[int]
     badges: NotRequired[list[Badge]]
     cover: NotRequired[UserProfileCover]
+    cover_nsfw: NotRequired[bool]
     beatmap_playcounts_count: NotRequired[int]
     playmode: NotRequired[GameMode]
     discord: NotRequired[str | None]
@@ -161,6 +163,35 @@ class UserDict(TypedDict):
 
 
 class UserModel(DatabaseModel[UserDict]):
+    DEFAULT_AVATAR_URL: ClassVar[str] = "https://lazer-data.g0v0.top/default.jpg"
+    DEFAULT_COVER_URL: ClassVar[str] = "https://assets.ppy.sh/user-profile-covers/default.jpeg"
+
+    @classmethod
+    async def transform(
+        cls,
+        db_instance: "User",
+        *,
+        session: AsyncSession | None = None,
+        includes: list[str] | None = None,
+        show_nsfw_media: bool = False,
+        **context,
+    ) -> UserDict:
+        user_resp = await super().transform(
+            db_instance,
+            session=session,
+            includes=includes,
+            show_nsfw_media=show_nsfw_media,
+            **context,
+        )
+        if show_nsfw_media:
+            return user_resp
+        if db_instance.avatar_nsfw:
+            user_resp["avatar_url"] = cls.DEFAULT_AVATAR_URL
+        if db_instance.cover_nsfw:
+            user_resp["cover_url"] = cls.DEFAULT_COVER_URL
+            user_resp["cover"] = UserProfileCover(url=cls.DEFAULT_COVER_URL)
+        return user_resp
+
     # https://github.com/ppy/osu-web/blob/d0407b1f2846dfd8b85ec0cf20e3fe3028a7b486/app/Transformers/UserCompactTransformer.php#L22-L39
     CARD_INCLUDES: ClassVar[list[str]] = [
         "country",
@@ -261,7 +292,8 @@ class UserModel(DatabaseModel[UserDict]):
     ]
 
     # https://github.com/ppy/osu-web/blob/d0407b1f2846dfd8b85ec0cf20e3fe3028a7b486/app/Transformers/UserCompactTransformer.php#L133-L150
-    avatar_url: str = "https://lazer-data.g0v0.top/default.jpg"
+    avatar_url: str = DEFAULT_AVATAR_URL
+    avatar_nsfw: bool = False
     country_code: str = Field(default="CN", max_length=2, index=True)
     # ? default_group: str|None
     id: int = Field(
@@ -288,6 +320,7 @@ class UserModel(DatabaseModel[UserDict]):
         default=UserProfileCover(url=""),
         sa_column=Column(JSON),
     )
+    cover_nsfw: bool = False
     # kudosu
 
     # UserExtended
@@ -563,7 +596,13 @@ class UserModel(DatabaseModel[UserDict]):
 
     @ondemand
     @staticmethod
-    async def cover_url(_session: AsyncSession, obj: "User") -> str:
+    async def cover_url(
+        _session: AsyncSession,
+        obj: "User",
+        show_nsfw_media: bool = False,
+    ) -> str:
+        if obj.cover_nsfw and not show_nsfw_media:
+            return UserModel.DEFAULT_COVER_URL
         return obj.cover.get("url", "") if obj.cover else ""
 
     @ondemand
@@ -573,6 +612,26 @@ class UserModel(DatabaseModel[UserDict]):
         if obj.user_preference:
             return list(obj.user_preference.extras_order)
         return list(DEFAULT_ORDER)
+
+    @classmethod
+    def apply_nsfw_media_policy(cls, user_resp: "UserDict", show_nsfw_media: bool) -> "UserDict":
+        if show_nsfw_media:
+            return user_resp
+        if user_resp.get("avatar_nsfw"):
+            user_resp["avatar_url"] = cls.DEFAULT_AVATAR_URL
+        if user_resp.get("cover_nsfw"):
+            user_resp["cover_url"] = cls.DEFAULT_COVER_URL
+            # Some clients may read `cover.custom_url` / `cover.id`; replace the whole
+            # object to avoid leaking NSFW cover URLs through alternate keys.
+            user_resp["cover"] = UserProfileCover(url=cls.DEFAULT_COVER_URL)
+        return user_resp
+
+    @staticmethod
+    async def viewer_allows_nsfw_media(user: "User | None") -> bool:
+        if user is None:
+            return False
+        await user.awaitable_attrs.user_preference
+        return bool(user.user_preference and user.user_preference.profile_media_show_nsfw)
 
     @ondemand
     @staticmethod

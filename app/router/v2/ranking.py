@@ -1,7 +1,8 @@
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from app.config import settings
 from app.database import Team, TeamMember, User, UserStatistics
+from app.database.user import UserModel
 from app.database.statistics import UserStatisticsModel
 from app.dependencies.database import Database, get_redis
 from app.dependencies.user import get_current_user
@@ -14,6 +15,47 @@ from .router import router
 from fastapi import BackgroundTasks, Path, Query, Security
 from pydantic import BaseModel, Field
 from sqlmodel import col, func, select
+
+
+async def _apply_nsfw_policy_to_rankings(
+    session: Database,
+    ranking_rows: list[dict[str, Any]],
+    show_nsfw_media: bool,
+) -> list[dict[str, Any]]:
+    if show_nsfw_media:
+        return ranking_rows
+
+    users_missing_flags: set[int] = set()
+    for row in ranking_rows:
+        user = row.get("user")
+        if not isinstance(user, dict):
+            continue
+        if "avatar_nsfw" not in user or "cover_nsfw" not in user:
+            user_id = user.get("id")
+            if isinstance(user_id, int):
+                users_missing_flags.add(user_id)
+
+    flag_by_user: dict[int, tuple[bool, bool]] = {}
+    if users_missing_flags:
+        rows = (
+            await session.exec(
+                select(User.id, User.avatar_nsfw, User.cover_nsfw).where(col(User.id).in_(users_missing_flags))
+            )
+        ).all()
+        flag_by_user = {uid: (bool(avatar_nsfw), bool(cover_nsfw)) for uid, avatar_nsfw, cover_nsfw in rows}
+
+    for row in ranking_rows:
+        user = row.get("user")
+        if not isinstance(user, dict):
+            continue
+        user_id = user.get("id")
+        if isinstance(user_id, int) and user_id in flag_by_user:
+            avatar_nsfw, cover_nsfw = flag_by_user[user_id]
+            user["avatar_nsfw"] = avatar_nsfw
+            user["cover_nsfw"] = cover_nsfw
+        row["user"] = UserModel.apply_nsfw_media_policy(user, show_nsfw_media)
+
+    return ranking_rows
 
 
 class TeamStatistics(BaseModel):
@@ -333,6 +375,7 @@ async def get_user_ranking(
     country: Annotated[str | None, Query(description="国家代码")] = None,
     page: Annotated[int, Query(ge=1, description="页码")] = 1,
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     # 获取 Redis 连接和缓存服务
     redis = get_redis()
     cache_service = get_ranking_cache_service(redis)
@@ -342,6 +385,7 @@ async def get_user_ranking(
     cached_stats = await cache_service.get_cached_stats(ruleset, sort, country)
 
     if cached_data and cached_stats:
+        cached_data = await _apply_nsfw_policy_to_rankings(session, cached_data, show_nsfw_media)
         # 从缓存返回数据
         return {
             "ranking": cached_data,
@@ -384,7 +428,11 @@ async def get_user_ranking(
     ranking_data = []
     for statistics in statistics_list:
         user_stats_resp = await UserStatisticsModel.transform(
-            statistics, includes=include, user_country=current_user.country_code
+            statistics,
+            includes=include,
+            user_country=current_user.country_code,
+            # Cache canonical (unsanitized) payload; apply viewer policy right before response.
+            show_nsfw_media=True,
         )
         ranking_data.append(user_stats_resp)
 
@@ -413,6 +461,8 @@ async def get_user_ranking(
         country,
         ttl=settings.ranking_cache_expire_minutes * 60,
     )
+
+    ranking_data = await _apply_nsfw_policy_to_rankings(session, ranking_data, show_nsfw_media)
 
     return {
         "ranking": ranking_data,

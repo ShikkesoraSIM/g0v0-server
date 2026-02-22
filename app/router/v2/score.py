@@ -14,6 +14,7 @@ from app.database import (
     ScoreTokenResp,
     User,
 )
+from app.database.user import UserModel
 from app.database.achievement import process_achievements
 from app.database.counts import ReplayWatchedCount
 from app.database.daily_challenge import process_daily_challenge_score
@@ -348,6 +349,7 @@ async def get_beatmap_scores(
     ] = LeaderboardType.GLOBAL,
     limit: Annotated[int, Query(ge=1, le=200, description="返回条数 (1-200)")] = 50,
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     all_scores, user_score, count = await get_leaderboard(
         db,
         beatmap_id,
@@ -358,9 +360,26 @@ async def get_beatmap_scores(
         mods=sorted(mods),
     )
 
-    user_score_resp = await user_score.to_resp(db, api_version, includes=DEFAULT_SCORE_INCLUDES) if user_score else None
+    user_score_resp = (
+        await user_score.to_resp(
+            db,
+            api_version,
+            includes=DEFAULT_SCORE_INCLUDES,
+            show_nsfw_media=show_nsfw_media,
+        )
+        if user_score
+        else None
+    )
     return {
-        "scores": [await score.to_resp(db, api_version, includes=DEFAULT_SCORE_INCLUDES) for score in all_scores],
+        "scores": [
+            await score.to_resp(
+                db,
+                api_version,
+                includes=DEFAULT_SCORE_INCLUDES,
+                show_nsfw_media=show_nsfw_media,
+            )
+            for score in all_scores
+        ],
         "user_score": (
             {
                 "score": user_score_resp,
@@ -409,6 +428,7 @@ async def get_user_beatmap_score(
     mode: Annotated[GameMode | None, Query(description="指定 ruleset (可选)")] = None,
     mods: Annotated[str | None, Query(description="筛选使用的 Mods (暂未实现)")] = None,
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     user_score = (
         await db.exec(
             select(Score)
@@ -429,7 +449,12 @@ async def get_user_beatmap_score(
             detail=f"Cannot find user {user_id}'s score on this beatmap",
         )
     else:
-        resp = await user_score.to_resp(db, api_version=api_version, includes=DEFAULT_SCORE_INCLUDES)
+        resp = await user_score.to_resp(
+            db,
+            api_version=api_version,
+            includes=DEFAULT_SCORE_INCLUDES,
+            show_nsfw_media=show_nsfw_media,
+        )
         return {
             "position": (
                 await get_score_position_by_id(
@@ -471,6 +496,7 @@ async def get_user_all_beatmap_scores(
     legacy_only: Annotated[bool | None, Query(description="是否只查询 Stable 分数")] = None,
     ruleset: Annotated[GameMode | None, Query(description="指定 ruleset (可选)")] = None,
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     all_user_scores = (
         await db.exec(
             select(Score)
@@ -485,7 +511,15 @@ async def get_user_all_beatmap_scores(
         )
     ).all()
 
-    return [await score.to_resp(db, api_version, includes=DEFAULT_SCORE_INCLUDES) for score in all_user_scores]
+    return [
+        await score.to_resp(
+            db,
+            api_version,
+            includes=DEFAULT_SCORE_INCLUDES,
+            show_nsfw_media=show_nsfw_media,
+        )
+        for score in all_user_scores
+    ]
 
 
 @router.post(

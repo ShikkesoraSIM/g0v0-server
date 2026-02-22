@@ -10,7 +10,7 @@ from app.database.chat import (
     SilenceUser,
     UserSilenceResp,
 )
-from app.database.user import User
+from app.database.user import User, UserModel
 from app.dependencies.database import Database, Redis, redis_message_client
 from app.dependencies.param import BodyOrForm
 from app.dependencies.user import get_current_user
@@ -165,6 +165,7 @@ async def get_message(
     since: Annotated[int, Query(ge=0, description="获取自此消息 ID 之后的消息（向前加载新消息）")] = 0,
     until: Annotated[int | None, Query(description="获取自此消息 ID 之前的消息（向后翻历史）")] = None,
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     # 1) 查频道
     if channel.isdigit():
         db_channel = (await session.exec(select(ChatChannel).where(ChatChannel.channel_id == int(channel)))).first()
@@ -190,7 +191,7 @@ async def get_message(
         # 向前加载新消息 → 直接 ASC
         query = base.where(col(ChatMessage.message_id) > since).order_by(col(ChatMessage.message_id).asc()).limit(limit)
         rows = (await session.exec(query)).all()
-        resp = await ChatMessageModel.transform_many(rows, includes=["sender"])
+        resp = await ChatMessageModel.transform_many(rows, includes=["sender"], show_nsfw_media=show_nsfw_media)
         # 已经 ASC，无需反转
         return resp
 
@@ -203,14 +204,14 @@ async def get_message(
         rows = (await session.exec(query)).all()
         rows = list(rows)
         rows.reverse()  # 反转为 ASC
-        resp = await ChatMessageModel.transform_many(rows, includes=["sender"])
+        resp = await ChatMessageModel.transform_many(rows, includes=["sender"], show_nsfw_media=show_nsfw_media)
         return resp
 
     query = base.order_by(col(ChatMessage.message_id).desc()).limit(limit)
     rows = (await session.exec(query)).all()
     rows = list(rows)
     rows.reverse()  # 反转为 ASC
-    resp = await ChatMessageModel.transform_many(rows, includes=["sender"])
+    resp = await ChatMessageModel.transform_many(rows, includes=["sender"], show_nsfw_media=show_nsfw_media)
     return resp
 
 
@@ -272,6 +273,7 @@ async def create_new_pm(
     current_user: Annotated[User, Security(get_current_user, scopes=["chat.write"])],
     redis: Redis,
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     if await current_user.is_restricted(session):
         raise HTTPException(status_code=403, detail="You are restricted from sending messages")
 
@@ -306,7 +308,11 @@ async def create_new_pm(
 
     await server.batch_join_channel([target, current_user], channel)
     channel_resp = await ChatChannelModel.transform(
-        channel, user=current_user, server=server, includes=["recent_messages.sender"]
+        channel,
+        user=current_user,
+        server=server,
+        includes=["recent_messages.sender"],
+        show_nsfw_media=show_nsfw_media,
     )
     msg = ChatMessage(
         channel_id=channel.channel_id,
@@ -320,7 +326,12 @@ async def create_new_pm(
     await session.refresh(msg)
     await session.refresh(current_user)
     await session.refresh(channel)
-    message_resp = await ChatMessageModel.transform(msg, user=current_user, includes=["sender"])
+    message_resp = await ChatMessageModel.transform(
+        msg,
+        user=current_user,
+        includes=["sender"],
+        show_nsfw_media=show_nsfw_media,
+    )
     await server.send_message_to_channel(message_resp)
     return {
         "channel": channel_resp,

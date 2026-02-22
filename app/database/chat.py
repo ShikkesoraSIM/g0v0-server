@@ -166,6 +166,7 @@ class ChatChannelModel(DatabaseModel[ChatChannelDict]):
     async def recent_messages(
         session: AsyncSession,
         channel: "ChatChannel",
+        show_nsfw_media: bool = False,
     ) -> list["ChatMessageDict"]:
         messages = (
             await session.exec(
@@ -178,6 +179,7 @@ class ChatChannelModel(DatabaseModel[ChatChannelDict]):
         result = [
             await ChatMessageModel.transform(
                 msg,
+                show_nsfw_media=show_nsfw_media,
             )
             for msg in reversed(messages)
         ]
@@ -258,8 +260,14 @@ class ChatMessageModel(DatabaseModel[ChatMessageDict]):
 
     @ondemand
     @staticmethod
-    async def sender(_session: AsyncSession, db_message: "ChatMessage") -> UserDict:
-        return await UserModel.transform(db_message.user)
+    async def sender(
+        _session: AsyncSession,
+        db_message: "ChatMessage",
+        show_nsfw_media: bool = False,
+    ) -> UserDict:
+        # Build canonical payload first, then apply viewer policy.
+        user_resp = await UserModel.transform(db_message.user, show_nsfw_media=True)
+        return UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media)
 
 
 class ChatMessage(ChatMessageModel, table=True):

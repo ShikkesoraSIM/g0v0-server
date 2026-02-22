@@ -17,6 +17,11 @@ from sqlmodel import select
 ME_INCLUDES = [*User.USER_INCLUDES, "session_verified", "session_verification_method", "user_preferences"]
 
 
+async def _viewer_allows_nsfw_media(user: User) -> bool:
+    await user.awaitable_attrs.user_preference
+    return bool(user.user_preference and user.user_preference.profile_media_show_nsfw)
+
+
 class BeatmapsetIds(BaseModel):
     beatmapset_ids: list[int]
 
@@ -49,9 +54,15 @@ async def get_user_info_with_ruleset(
     ruleset: Annotated[GameMode, Path(description="指定 ruleset")],
     user_and_token: Annotated[UserAndToken, Security(get_current_user_and_token, scopes=["identify"])],
 ):
+    show_nsfw_media = await _viewer_allows_nsfw_media(user_and_token[0])
     user_resp = await UserModel.transform(
-        user_and_token[0], ruleset=ruleset, token_id=user_and_token[1].id, includes=ME_INCLUDES
+        user_and_token[0],
+        ruleset=ruleset,
+        token_id=user_and_token[1].id,
+        includes=ME_INCLUDES,
+        show_nsfw_media=show_nsfw_media,
     )
+    user_resp = UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media)
     return user_resp
 
 
@@ -65,9 +76,15 @@ async def get_user_info_with_ruleset(
 async def get_user_info_default(
     user_and_token: Annotated[UserAndToken, Security(get_current_user_and_token, scopes=["identify"])],
 ):
+    show_nsfw_media = await _viewer_allows_nsfw_media(user_and_token[0])
     user_resp = await UserModel.transform(
-        user_and_token[0], ruleset=None, token_id=user_and_token[1].id, includes=ME_INCLUDES
+        user_and_token[0],
+        ruleset=None,
+        token_id=user_and_token[1].id,
+        includes=ME_INCLUDES,
+        show_nsfw_media=show_nsfw_media,
     )
+    user_resp = UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media)
     return user_resp
 
 

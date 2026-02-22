@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import copy
 import sys
 from typing import Annotated, Literal
 
@@ -61,6 +62,13 @@ async def visible_to_current_user(user: User, current_user: User | None, session
     return not await user.is_restricted(session)
 
 
+async def viewer_allows_nsfw_media(current_user: User | None) -> bool:
+    if current_user is None:
+        return False
+    await current_user.awaitable_attrs.user_preference
+    return bool(current_user.user_preference and current_user.user_preference.profile_media_show_nsfw)
+
+
 @router.get(
     "/users/",
     responses={
@@ -78,7 +86,7 @@ async def get_users(
     request: Request,
     background_task: BackgroundTasks,
     user_ids: Annotated[list[int], Query(default_factory=list, alias="ids[]", description="要查询的用户 ID 列表")],
-    # current_user: User = Security(get_current_user, scopes=["public"]),
+    current_user: User | None = Security(get_optional_user, scopes=["public"]),
     include_variant_statistics: Annotated[
         bool,
         Query(description="是否包含各模式的统计信息"),
@@ -86,6 +94,7 @@ async def get_users(
 ):
     redis = get_redis()
     cache_service = get_user_cache_service(redis)
+    show_nsfw_media = await viewer_allows_nsfw_media(current_user)
 
     if user_ids:
         # 先尝试从缓存获取
@@ -93,9 +102,13 @@ async def get_users(
         uncached_user_ids = []
 
         for user_id in user_ids[:50]:  # 限制50个
+            # When viewer allows NSFW, bypass cache to avoid stale sanitized payloads.
+            if show_nsfw_media:
+                uncached_user_ids.append(user_id)
+                continue
             cached_user = await cache_service.get_user_from_cache(user_id)
             if cached_user:
-                cached_users.append(cached_user)
+                cached_users.append(UserModel.apply_nsfw_media_policy(copy.deepcopy(cached_user), show_nsfw_media))
             else:
                 uncached_user_ids.append(user_id)
 
@@ -110,13 +123,15 @@ async def get_users(
             # 将查询到的用户添加到缓存并返回
             for searched_user in searched_users:
                 if searched_user.id != BANCHOBOT_ID:
-                    user_resp = await UserModel.transform(
+                    canonical_user_resp = await UserModel.transform(
                         searched_user,
                         includes=User.CARD_INCLUDES,
+                        show_nsfw_media=True,
                     )
+                    user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
                     cached_users.append(user_resp)
                     # 异步缓存，不阻塞响应
-                    background_task.add_task(cache_service.cache_user, user_resp)
+                    background_task.add_task(cache_service.cache_user, canonical_user_resp)
 
         response = {"users": cached_users}
         return response
@@ -128,13 +143,15 @@ async def get_users(
         for searched_user in searched_users:
             if searched_user.id == BANCHOBOT_ID:
                 continue
-            user_resp = await UserModel.transform(
+            canonical_user_resp = await UserModel.transform(
                 searched_user,
                 includes=User.CARD_INCLUDES,
+                show_nsfw_media=True,
             )
+            user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
             users.append(user_resp)
             # 异步缓存
-            background_task.add_task(cache_service.cache_user, user_resp)
+            background_task.add_task(cache_service.cache_user, canonical_user_resp)
 
         response = {"users": users}
         return response
@@ -330,13 +347,14 @@ async def get_user_info_ruleset(
     ruleset = _normalize_user_mode(ruleset)
     redis = get_redis()
     cache_service = get_user_cache_service(redis)
+    show_nsfw_media = await viewer_allows_nsfw_media(current_user)
 
-    # 如果是数字ID，先尝试从缓存获取
+    # 如果是数字ID，先尝试从缓存获取（cache stores canonical payload）
     if user_id.isdigit():
         user_id_int = int(user_id)
         cached_user = await cache_service.get_user_from_cache(user_id_int, ruleset)
         if cached_user:
-            return cached_user
+            return UserModel.apply_nsfw_media_policy(copy.deepcopy(cached_user), show_nsfw_media)
 
     searched_user = (
         await session.exec(
@@ -352,14 +370,16 @@ async def get_user_info_ruleset(
     if should_not_show:
         raise HTTPException(404, detail="User not found")
 
-    user_resp = await UserModel.transform(
+    canonical_user_resp = await UserModel.transform(
         searched_user,
         includes=User.USER_INCLUDES,
         ruleset=ruleset,
+        show_nsfw_media=True,
     )
+    user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
 
-    # 异步缓存结果
-    background_task.add_task(cache_service.cache_user, user_resp, ruleset)
+    # 异步缓存 canonical result
+    background_task.add_task(cache_service.cache_user, canonical_user_resp, ruleset)
     return user_resp
 
 
@@ -383,13 +403,14 @@ async def get_user_info(
 ):
     redis = get_redis()
     cache_service = get_user_cache_service(redis)
+    show_nsfw_media = await viewer_allows_nsfw_media(current_user)
 
-    # 如果是数字ID，先尝试从缓存获取
+    # 如果是数字ID，先尝试从缓存获取（cache stores canonical payload）
     if user_id.isdigit():
         user_id_int = int(user_id)
         cached_user = await cache_service.get_user_from_cache(user_id_int)
         if cached_user:
-            return cached_user
+            return UserModel.apply_nsfw_media_policy(copy.deepcopy(cached_user), show_nsfw_media)
 
     searched_user = (
         await session.exec(
@@ -405,13 +426,15 @@ async def get_user_info(
     if should_not_show:
         raise HTTPException(404, detail="User not found")
 
-    user_resp = await UserModel.transform(
+    canonical_user_resp = await UserModel.transform(
         searched_user,
         includes=User.USER_INCLUDES,
+        show_nsfw_media=True,
     )
+    user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
 
-    # 异步缓存结果
-    background_task.add_task(cache_service.cache_user, user_resp)
+    # 异步缓存 canonical result
+    background_task.add_task(cache_service.cache_user, canonical_user_resp)
     return user_resp
 
 
@@ -605,6 +628,7 @@ async def get_user_scores(
     offset: Annotated[int, Query(ge=0, description="偏移量")] = 0,
 ):
     is_legacy_api = api_version < 20220705
+    show_nsfw_media = await viewer_allows_nsfw_media(current_user)
     redis = get_redis()
     cache_service = get_user_cache_service(redis)
 
@@ -715,6 +739,7 @@ async def get_user_scores(
             session,
             api_version,
             includes=includes,
+            show_nsfw_media=show_nsfw_media,
         )
         for score in scores
     ]

@@ -216,6 +216,7 @@ class Preferences(BaseModel):
     beatmapset_card_size: BeatmapCardSize | None = None
     beatmap_download: BeatmapDownload | None = None
     beatmapset_show_nsfw: bool | None = None
+    profile_media_show_nsfw: bool | None = None
     profile_order: list[str] | None = None
     legacy_score_only: bool | None = None
     profile_cover_expanded: bool | None = None
@@ -279,6 +280,7 @@ PREFERENCE_FIELDS = {
     "beatmapset_card_size",
     "beatmap_download",
     "beatmapset_show_nsfw",
+    "profile_media_show_nsfw",
     "legacy_score_only",
     "profile_cover_expanded",
     "scoring_mode",
@@ -322,6 +324,7 @@ async def get_user_preference(
         beatmapset_card_size=user_pref.beatmapset_card_size,
         beatmap_download=user_pref.beatmap_download,
         beatmapset_show_nsfw=user_pref.beatmapset_show_nsfw,
+        profile_media_show_nsfw=user_pref.profile_media_show_nsfw,
         profile_order=user_pref.extras_order or DEFAULT_ORDER,
         legacy_score_only=user_pref.legacy_score_only,
         profile_cover_expanded=user_pref.profile_cover_expanded,

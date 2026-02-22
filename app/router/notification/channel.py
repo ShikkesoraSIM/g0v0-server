@@ -47,6 +47,7 @@ async def get_update(
         Query(alias="includes[]", description="要包含的更新类型"),
     ] = ["presence", "silences"],
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     resp = {
         "presence": [],
         "silences": [],
@@ -63,6 +64,7 @@ async def get_update(
                         user=current_user,
                         server=server,
                         includes=ChatChannel.LISTING_INCLUDES,
+                        show_nsfw_media=show_nsfw_media,
                     )
                 )
     if "silences" in includes:
@@ -145,11 +147,13 @@ async def get_channel_list(
     session: Database,
     current_user: Annotated[User, Security(get_current_user, scopes=["chat.read"])],
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     channels = (await session.exec(select(ChatChannel).where(ChatChannel.type == ChannelType.PUBLIC))).all()
     results = await ChatChannelModel.transform_many(
         channels,
         user=current_user,
         server=server,
+        show_nsfw_media=show_nsfw_media,
     )
 
     return results
@@ -178,6 +182,7 @@ async def get_channel(
     current_user: Annotated[User, Security(get_current_user, scopes=["chat.read"])],
     redis: Redis,
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     # 使用明确的查询避免延迟加载
     if channel.isdigit():
         db_channel = (await session.exec(select(ChatChannel).where(ChatChannel.channel_id == int(channel)))).first()
@@ -217,8 +222,12 @@ async def get_channel(
             user=current_user,
             server=server,
             includes=ChatChannel.LISTING_INCLUDES,
+            show_nsfw_media=show_nsfw_media,
         ),
-        "users": await UserModel.transform_many(users, includes=User.CARD_INCLUDES),
+        "users": [
+            UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media)
+            for user_resp in await UserModel.transform_many(users, includes=User.CARD_INCLUDES, show_nsfw_media=True)
+        ],
     }
 
 
@@ -257,6 +266,7 @@ async def create_channel(
     current_user: Annotated[User, Security(get_current_user, scopes=["chat.write_manage"])],
     redis: Redis,
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     if await current_user.is_restricted(session):
         raise HTTPException(status_code=403, detail="You are restricted from sending messages")
 
@@ -319,5 +329,9 @@ async def create_channel(
     await server.join_channel(current_user, channel)
 
     return await ChatChannelModel.transform(
-        channel, user=current_user, server=server, includes=["recent_messages.sender"]
+        channel,
+        user=current_user,
+        server=server,
+        includes=["recent_messages.sender"],
+        show_nsfw_media=show_nsfw_media,
     )

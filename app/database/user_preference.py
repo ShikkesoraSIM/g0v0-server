@@ -69,6 +69,7 @@ class UserPreference(SQLModel, table=True):
     beatmapset_card_size: BeatmapCardSize = BeatmapCardSize.NORMAL
     beatmap_download: BeatmapDownload = BeatmapDownload.ALL
     beatmapset_show_nsfw: bool = False
+    profile_media_show_nsfw: bool = False
 
     # comments_show_deleted: bool = False
     # forum_posts_show_deleted: bool = False

@@ -40,6 +40,7 @@ async def get_relationship(
     api_version: APIVersion,
     current_user: Annotated[User, Security(get_current_user, scopes=["friends.read"])],
 ):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     relationship_type = RelationshipType.FOLLOW if request.url.path.endswith("/friends") else RelationshipType.BLOCK
     relationships = await db.exec(
         select(Relationship).where(
@@ -54,18 +55,21 @@ async def get_relationship(
                 rel,
                 includes=[f"target.{inc}" for inc in User.LIST_INCLUDES],
                 ruleset=current_user.playmode,
+                show_nsfw_media=show_nsfw_media,
             )
             for rel in relationships.unique()
         ]
     else:
-        return [
+        users = [
             await UserModel.transform(
                 rel.target,
                 ruleset=current_user.playmode,
                 includes=User.LIST_INCLUDES,
+                show_nsfw_media=True,
             )
             for rel in relationships.unique()
         ]
+        return [UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media) for user_resp in users]
 
 
 @router.post(

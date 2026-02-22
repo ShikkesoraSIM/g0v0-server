@@ -10,7 +10,7 @@ from app.utils import check_image
 
 from .router import router
 
-from fastapi import File, HTTPException
+from fastapi import File, Form, HTTPException
 
 
 @router.post("/cover/upload", name="上传头图", tags=["用户", "g0v0 API"])
@@ -20,6 +20,7 @@ async def upload_cover(
     current_user: ClientUser,
     storage: StorageService,
     cache_service: UserCacheService,
+    is_nsfw: Annotated[bool, Form()] = False,
 ):
     """上传用户头图
 
@@ -50,10 +51,13 @@ async def upload_cover(
         await storage.write_file(storage_path, content, f"image/{format_}")
     url = await storage.get_file_url(storage_path)
     current_user.cover = UserProfileCover(url=url)
+    current_user.cover_nsfw = is_nsfw
     await cache_service.invalidate_user_cache(current_user.id)
     await session.commit()
 
     return {
         "url": url,
+        "cover_url": url,
+        "is_nsfw": is_nsfw,
         "filehash": filehash,
     }

@@ -83,10 +83,18 @@ class RelationshipModel(DatabaseModel[RelationshipDict]):
         relationship: "Relationship",
         ruleset: GameMode | None = None,
         includes: list[str] | None = None,
+        show_nsfw_media: bool = False,
     ) -> "UserDict":
         from .user import UserModel
 
-        return await UserModel.transform(relationship.target, ruleset=ruleset, includes=includes)
+        # Build canonical payload first, then apply viewer policy.
+        user_resp = await UserModel.transform(
+            relationship.target,
+            ruleset=ruleset,
+            includes=includes,
+            show_nsfw_media=True,
+        )
+        return UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media)
 
 
 class Relationship(RelationshipModel, table=True):
