@@ -408,7 +408,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
             if favourite_user is None:
                 # Defensive: data may contain orphaned favourites pointing to deleted users.
                 continue
-            users.append(await User.transform(favourite_user, includes=includes))
+            users.append(await User.transform(favourite_user, includes=User.CARD_INCLUDES))
         return users
 
     @ondemand
