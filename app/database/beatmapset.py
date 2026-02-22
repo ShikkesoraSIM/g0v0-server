@@ -135,6 +135,39 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         "storyboard",
     ]
 
+    @staticmethod
+    def _fallback_covers() -> BeatmapCovers:
+        fallback_base = "https://assets.ppy.sh/beatmaps/0/covers"
+        return {
+            "cover": f"{fallback_base}/cover.jpg",
+            "card": f"{fallback_base}/card.jpg",
+            "list": f"{fallback_base}/list.jpg",
+            "slimcover": f"{fallback_base}/slimcover.jpg",
+            "cover@2x": f"{fallback_base}/cover@2x.jpg",
+            "card@2x": f"{fallback_base}/card@2x.jpg",
+            "list@2x": f"{fallback_base}/list@2x.jpg",
+            "slimcover@2x": f"{fallback_base}/slimcover@2x.jpg",
+        }
+
+    @classmethod
+    async def transform(
+        cls,
+        db_instance: "Beatmapset",
+        *,
+        session: AsyncSession | None = None,
+        includes: list[str] | None = None,
+        **context,
+    ) -> BeatmapsetDict:
+        beatmapset_resp = await super().transform(
+            db_instance,
+            session=session,
+            includes=includes,
+            **context,
+        )
+        if not beatmapset_resp.get("covers"):
+            beatmapset_resp["covers"] = cls._fallback_covers()
+        return beatmapset_resp
+
     @field_validator("last_updated", "ranked_date", "submitted_date", mode="before")
     @classmethod
     def _parse_dt(cls, v):
@@ -154,17 +187,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         if v:
             return v
 
-        fallback_base = "https://assets.ppy.sh/beatmaps/0/covers"
-        return {
-            "cover": f"{fallback_base}/cover.jpg",
-            "card": f"{fallback_base}/card.jpg",
-            "list": f"{fallback_base}/list.jpg",
-            "slimcover": f"{fallback_base}/slimcover.jpg",
-            "cover@2x": f"{fallback_base}/cover@2x.jpg",
-            "card@2x": f"{fallback_base}/card@2x.jpg",
-            "list@2x": f"{fallback_base}/list@2x.jpg",
-            "slimcover@2x": f"{fallback_base}/slimcover@2x.jpg",
-        }
+        return cls._fallback_covers()
 
     API_INCLUDES: ClassVar[list[str]] = [
         *BEATMAPSET_TRANSFORMER_INCLUDES,

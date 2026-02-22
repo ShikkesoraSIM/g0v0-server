@@ -167,6 +167,16 @@ class UserModel(DatabaseModel[UserDict]):
     DEFAULT_COVER_URL: ClassVar[str] = "https://assets.ppy.sh/user-profile-covers/default.jpeg"
 
     @classmethod
+    def _masked_cover(cls, current_cover: dict | None = None) -> UserProfileCover:
+        masked: UserProfileCover = UserProfileCover(url=cls.DEFAULT_COVER_URL)
+        if isinstance(current_cover, dict):
+            if "custom_url" in current_cover:
+                masked["custom_url"] = cls.DEFAULT_COVER_URL
+            if "id" in current_cover:
+                masked["id"] = current_cover["id"]
+        return masked
+
+    @classmethod
     async def transform(
         cls,
         db_instance: "User",
@@ -189,7 +199,7 @@ class UserModel(DatabaseModel[UserDict]):
             user_resp["avatar_url"] = cls.DEFAULT_AVATAR_URL
         if db_instance.cover_nsfw:
             user_resp["cover_url"] = cls.DEFAULT_COVER_URL
-            user_resp["cover"] = UserProfileCover(url=cls.DEFAULT_COVER_URL)
+            user_resp["cover"] = cls._masked_cover(user_resp.get("cover"))
         return user_resp
 
     # https://github.com/ppy/osu-web/blob/d0407b1f2846dfd8b85ec0cf20e3fe3028a7b486/app/Transformers/UserCompactTransformer.php#L22-L39
@@ -621,9 +631,7 @@ class UserModel(DatabaseModel[UserDict]):
             user_resp["avatar_url"] = cls.DEFAULT_AVATAR_URL
         if user_resp.get("cover_nsfw"):
             user_resp["cover_url"] = cls.DEFAULT_COVER_URL
-            # Some clients may read `cover.custom_url` / `cover.id`; replace the whole
-            # object to avoid leaking NSFW cover URLs through alternate keys.
-            user_resp["cover"] = UserProfileCover(url=cls.DEFAULT_COVER_URL)
+            user_resp["cover"] = cls._masked_cover(user_resp.get("cover"))
         return user_resp
 
     @staticmethod

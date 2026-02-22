@@ -22,38 +22,57 @@ async def _apply_nsfw_policy_to_rankings(
     ranking_rows: list[dict[str, Any]],
     show_nsfw_media: bool,
 ) -> list[dict[str, Any]]:
-    if show_nsfw_media:
-        return ranking_rows
-
-    users_missing_flags: set[int] = set()
+    users_to_hydrate: set[int] = set()
     for row in ranking_rows:
         user = row.get("user")
         if not isinstance(user, dict):
             continue
-        if "avatar_nsfw" not in user or "cover_nsfw" not in user:
-            user_id = user.get("id")
-            if isinstance(user_id, int):
-                users_missing_flags.add(user_id)
+        user_id = user.get("id")
+        if not isinstance(user_id, int):
+            continue
 
-    flag_by_user: dict[int, tuple[bool, bool]] = {}
-    if users_missing_flags:
+        missing_flags = "avatar_nsfw" not in user or "cover_nsfw" not in user
+        likely_sanitized = (
+            user.get("avatar_url") == UserModel.DEFAULT_AVATAR_URL
+            or user.get("cover_url") == UserModel.DEFAULT_COVER_URL
+            or (isinstance(user.get("cover"), dict) and user["cover"].get("url") == UserModel.DEFAULT_COVER_URL)
+        )
+        if missing_flags or (show_nsfw_media and likely_sanitized):
+            users_to_hydrate.add(user_id)
+
+    hydrate_by_user: dict[int, tuple[str, dict | None, bool, bool]] = {}
+    if users_to_hydrate:
         rows = (
             await session.exec(
-                select(User.id, User.avatar_nsfw, User.cover_nsfw).where(col(User.id).in_(users_missing_flags))
+                select(User.id, User.avatar_url, User.cover, User.avatar_nsfw, User.cover_nsfw).where(
+                    col(User.id).in_(users_to_hydrate)
+                )
             )
         ).all()
-        flag_by_user = {uid: (bool(avatar_nsfw), bool(cover_nsfw)) for uid, avatar_nsfw, cover_nsfw in rows}
+        hydrate_by_user = {
+            uid: (
+                avatar_url or UserModel.DEFAULT_AVATAR_URL,
+                cover if isinstance(cover, dict) else None,
+                bool(avatar_nsfw),
+                bool(cover_nsfw),
+            )
+            for uid, avatar_url, cover, avatar_nsfw, cover_nsfw in rows
+        }
 
     for row in ranking_rows:
         user = row.get("user")
         if not isinstance(user, dict):
             continue
         user_id = user.get("id")
-        if isinstance(user_id, int) and user_id in flag_by_user:
-            avatar_nsfw, cover_nsfw = flag_by_user[user_id]
+        if isinstance(user_id, int) and user_id in hydrate_by_user:
+            avatar_url, cover, avatar_nsfw, cover_nsfw = hydrate_by_user[user_id]
+            user["avatar_url"] = avatar_url
+            if cover:
+                user["cover"] = dict(cover)
+                user["cover_url"] = str(cover.get("url") or user.get("cover_url") or "")
             user["avatar_nsfw"] = avatar_nsfw
             user["cover_nsfw"] = cover_nsfw
-        row["user"] = UserModel.apply_nsfw_media_policy(user, show_nsfw_media)
+        row["user"] = user if show_nsfw_media else UserModel.apply_nsfw_media_policy(user, show_nsfw_media)
 
     return ranking_rows
 

@@ -130,8 +130,6 @@ async def get_users(
                     )
                     user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
                     cached_users.append(user_resp)
-                    # 异步缓存，不阻塞响应
-                    background_task.add_task(cache_service.cache_user, canonical_user_resp)
 
         response = {"users": cached_users}
         return response
@@ -150,8 +148,6 @@ async def get_users(
             )
             user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
             users.append(user_resp)
-            # 异步缓存
-            background_task.add_task(cache_service.cache_user, canonical_user_resp)
 
         response = {"users": users}
         return response
@@ -353,7 +349,7 @@ async def get_user_info_ruleset(
     if user_id.isdigit():
         user_id_int = int(user_id)
         cached_user = await cache_service.get_user_from_cache(user_id_int, ruleset)
-        if cached_user:
+        if cached_user and "statistics" in cached_user:
             return UserModel.apply_nsfw_media_policy(copy.deepcopy(cached_user), show_nsfw_media)
 
     searched_user = (
@@ -409,7 +405,7 @@ async def get_user_info(
     if user_id.isdigit():
         user_id_int = int(user_id)
         cached_user = await cache_service.get_user_from_cache(user_id_int)
-        if cached_user:
+        if cached_user and "statistics" in cached_user:
             return UserModel.apply_nsfw_media_policy(copy.deepcopy(cached_user), show_nsfw_media)
 
     searched_user = (
