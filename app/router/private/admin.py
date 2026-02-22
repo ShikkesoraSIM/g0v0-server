@@ -1,10 +1,11 @@
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, cast, Any
 
 from app.database.auth import OAuthToken
 from app.database.beatmap import Beatmap, BannedBeatmaps
 from app.database.beatmapset import Beatmapset
+from app.database.chat import ChannelType, ChatChannel, ChatMessage, ChatMessageModel, MessageType
 from app.database.score import Score
 from app.database.statistics import UserStatistics
 from app.database.daily_challenge_model import DailyChallenge, DailyChallengeCreate, DailyChallengeUpdate, DailyChallengeResponse
@@ -13,10 +14,13 @@ from app.database.user import User
 from app.database.user_account_history import UserAccountHistory, UserAccountHistoryType
 from app.database.user_badge import UserBadge, UserBadgeCreate, UserBadgeUpdate, UserBadgeResponse
 from app.database.verification import LoginSession, LoginSessionResp, TrustedDevice, TrustedDeviceResp
+from app.const import BANCHOBOT_ID
 from app.dependencies.database import Database, get_redis
 from app.dependencies.geoip import GeoIPService
 from app.dependencies.user import UserAndToken, get_client_user_and_token
 from app.models.mods import APIMod, get_available_mods
+from app.models.notification import ChannelMessage, GlobalAnnouncement
+from app.router.notification.server import server
 from app.tasks.daily_challenge import create_daily_challenge_room
 from app.utils import utcnow
 
@@ -24,7 +28,6 @@ from .router import router
 
 import json
 import httpx
-from datetime import datetime, timedelta
 from fastapi import HTTPException, Query, Security
 from pydantic import BaseModel
 from sqlalchemy import or_ as sql_or
@@ -151,6 +154,24 @@ class BadgeUpdateRequest(BaseModel):
     image_2x_url: str | None = None
     url: str | None = None
     awarded_at: str | None = None  # ISO format string
+
+
+class GlobalAnnouncementReq(BaseModel):
+    title: str = "Server Announcement"
+    message: str
+    severity: str = "warning"
+    also_send_pm: bool = True
+    online_only: bool = True
+    sender_username: str | None = None
+    sender_user_id: int | None = None
+
+
+class GlobalAnnouncementResp(BaseModel):
+    sent_to: int
+    severity: str
+    title: str
+    online_only: bool
+    sender_username: str
 
 
 @router.get(
@@ -351,11 +372,22 @@ async def get_admin_stats(
 
     # Check server status
     performance_server_status = "offline"
+    perf_urls = (
+        "http://performance-server:8080/health",
+        "http://performance-server:8080/",
+        "http://localhost:8080/health",
+        "http://localhost:8080/",
+    )
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get("http://localhost:5223/", timeout=1.0)
-            if resp.status_code == 200:
-                performance_server_status = "online"
+            for url in perf_urls:
+                try:
+                    resp = await client.get(url, timeout=1.5)
+                    if resp.status_code < 500:
+                        performance_server_status = "online"
+                        break
+                except Exception:
+                    continue
     except Exception:
         pass
 
@@ -371,6 +403,134 @@ async def get_admin_stats(
         blacklisted_beatmaps=blacklisted_beatmaps,
         performance_server_status=performance_server_status,
         api_server_status=api_server_status,
+    )
+
+
+@router.post(
+    "/admin/global-announcement",
+    name="å‘é€å…¨æœå…¬å‘Š",
+    tags=["ç®¡ç†", "g0v0 API", "é€šçŸ¥"],
+    response_model=GlobalAnnouncementResp,
+)
+async def send_global_announcement(
+    session: Database,
+    req: GlobalAnnouncementReq,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    """Send a global in-app announcement, optionally mirrored as PM from a bot/admin account."""
+    current_user = await require_admin(session, user_and_token)
+
+    message = req.message.strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="message cannot be empty")
+
+    severity = req.severity.lower()
+    if severity not in {"info", "warning", "error"}:
+        raise HTTPException(status_code=422, detail="severity must be one of: info, warning, error")
+
+    sender: User | None = None
+    if req.sender_user_id is not None:
+        sender = await session.get(User, req.sender_user_id)
+    elif req.sender_username:
+        sender = (
+            await session.exec(
+                select(User).where(col(User.username) == req.sender_username.strip()).limit(1)
+            )
+        ).first()
+    if sender is None:
+        sender = await session.get(User, BANCHOBOT_ID)
+    if sender is None:
+        raise HTTPException(status_code=500, detail="Announcement sender user not found")
+    sender_username = sender.username
+
+    if req.online_only:
+        connected_user_ids = [uid for uid, sockets in server.connect_client.items() if sockets]
+        if not connected_user_ids:
+            receivers: list[int] = []
+        else:
+            receivers = (
+                await session.exec(
+                    select(User.id).where(
+                        col(User.id).in_(connected_user_ids),
+                        User.id != BANCHOBOT_ID,
+                        User.id != sender.id,
+                        ~User.is_restricted_query(col(User.id)),
+                    )
+                )
+            ).all()
+    else:
+        receivers = (
+            await session.exec(
+                select(User.id).where(
+                    User.id != BANCHOBOT_ID,
+                    User.id != sender.id,
+                    ~User.is_restricted_query(col(User.id)),
+                )
+            )
+        ).all()
+
+    announcement = GlobalAnnouncement.init(
+        source_user_id=current_user.id,
+        title=req.title.strip() or "Server Announcement",
+        message=message,
+        severity=severity,  # pyright: ignore[reportArgumentType]
+        receiver_ids=receivers,
+    )
+    await server.new_private_notification(announcement)
+
+    if req.also_send_pm and receivers:
+        targets = (
+            await session.exec(
+                select(User).where(
+                    col(User.id).in_(receivers),
+                )
+            )
+        ).all()
+
+        for target in targets:
+            channel = await ChatChannel.get_pm_channel(target.id, sender.id, session)
+            if channel is None:
+                user_min = min(target.id, sender.id)
+                user_max = max(target.id, sender.id)
+                channel = ChatChannel(
+                    channel_name=f"pm_{user_min}_{user_max}",
+                    description="Private message channel",
+                    type=ChannelType.PM,
+                )
+                session.add(channel)
+                await session.flush()
+                await session.refresh(channel)
+
+            await server.batch_join_channel([target, sender], channel)
+
+            chat_msg = ChatMessage(
+                channel_id=channel.channel_id,
+                sender_id=sender.id,
+                type=MessageType.PLAIN,
+                content=f"[{announcement.title}] {message}",
+            )
+            session.add(chat_msg)
+            await session.flush()
+            await session.refresh(chat_msg)
+
+            chat_resp = await ChatMessageModel.transform(chat_msg, includes=["sender"])
+            await server.send_message_to_channel(chat_resp)
+            pm_detail = ChannelMessage.init(
+                message=chat_msg,
+                user=sender,
+                receiver=[target.id],
+                channel_type=ChannelType.PM,
+            )
+            await server.new_private_notification(pm_detail)
+
+        await session.commit()
+
+    return GlobalAnnouncementResp(
+        sent_to=len(receivers),
+        severity=severity,
+        title=announcement.title,
+        online_only=req.online_only,
+        sender_username=sender_username,
     )
 
 
