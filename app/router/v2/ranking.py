@@ -35,9 +35,17 @@ async def _apply_nsfw_policy_to_rankings(
         likely_sanitized = (
             user.get("avatar_url") == UserModel.DEFAULT_AVATAR_URL
             or user.get("cover_url") == UserModel.DEFAULT_COVER_URL
-            or (isinstance(user.get("cover"), dict) and user["cover"].get("url") == UserModel.DEFAULT_COVER_URL)
+            or (
+                isinstance(user.get("cover"), dict)
+                and (
+                    user["cover"].get("url") == UserModel.DEFAULT_COVER_URL
+                    or user["cover"].get("custom_url") == UserModel.DEFAULT_COVER_URL
+                )
+            )
         )
-        if missing_flags or (show_nsfw_media and likely_sanitized):
+        # Always hydrate rows that look sanitized/defaulted, regardless of viewer preference.
+        # Viewer-specific NSFW masking is applied afterwards via apply_nsfw_media_policy.
+        if missing_flags or likely_sanitized:
             users_to_hydrate.add(user_id)
 
     hydrate_by_user: dict[int, tuple[str, dict | None, bool, bool]] = {}
