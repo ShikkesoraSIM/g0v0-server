@@ -77,6 +77,17 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 READ_SCORE_TIMEOUT = 10
 DEFAULT_SCORE_INCLUDES = ["user", "user.country", "user.cover", "user.team"]
+SCORE_DETAIL_INCLUDES = [
+    "beatmap",
+    "beatmapset",
+    "position",
+    "rank_global",
+    "rank_country",
+    "user",
+    "user.country",
+    "user.cover",
+    "user.team",
+]
 logger = log("Score")
 
 
@@ -303,6 +314,7 @@ async def _preload_beatmap_for_pp_calculation(beatmap_id: int) -> None:
 
 
 LeaderboardScoreType = ScoreModel.generate_typeddict(tuple(DEFAULT_SCORE_INCLUDES)) | LegacyScoreResp
+ScoreDetailType = ScoreModel.generate_typeddict(tuple(SCORE_DETAIL_INCLUDES)) | LegacyScoreResp
 
 
 class BeatmapUserScore(BaseModel):
@@ -314,6 +326,46 @@ class BeatmapScores(BaseModel):
     scores: list[LeaderboardScoreType]  # pyright: ignore[reportInvalidTypeForm]
     user_score: BeatmapUserScore | None = None
     score_count: int = 0
+
+
+@router.get(
+    "/scores/{score_id}",
+    tags=["成绩"],
+    responses={
+        200: api_doc(
+            "获取指定成绩详情。",
+            ScoreDetailType,
+            SCORE_DETAIL_INCLUDES,
+        )
+    },
+    name="获取成绩详情",
+    description="根据成绩 ID 获取完整成绩信息（含玩家、谱面与排行位置）。",
+)
+async def get_score_by_id(
+    db: Database,
+    api_version: APIVersion,
+    score_id: Annotated[int, Path(description="成绩 ID")],
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+    legacy_only: Annotated[bool | None, Query(description="是否只查询 Stable 分数")] = None,
+):
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
+    score = (
+        await db.exec(
+            select(Score).where(
+                Score.id == score_id,
+                ~User.is_restricted_query(col(Score.user_id)),
+            )
+        )
+    ).first()
+    if not score:
+        raise HTTPException(status_code=404, detail="Score not found")
+
+    return await score.to_resp(
+        db,
+        api_version,
+        includes=SCORE_DETAIL_INCLUDES,
+        show_nsfw_media=show_nsfw_media,
+    )
 
 
 @router.get(
