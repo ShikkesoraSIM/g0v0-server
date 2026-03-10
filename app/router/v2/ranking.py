@@ -172,114 +172,123 @@ async def get_team_ranking(
         SortType,
         Path(
             ...,
-            description="排名类型：performance 表现分 / score 计分成绩总分 "
-            "**这个参数是本服务器额外添加的，不属于 v2 API 的一部分**",
+            description="Sort type: performance points / ranked score total "
+            "**This parameter is a server extension and is not part of v2 API.**",
         ),
     ],
-    ruleset: Annotated[GameMode, Path(..., description="指定 ruleset")],
+    ruleset: Annotated[GameMode, Path(..., description="Target ruleset")],
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
-    page: Annotated[int, Query(ge=1, description="页码")] = 1,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
 ):
-    # 获取 Redis 连接和缓存服务
+    # Keep current auth contract for compatibility.
+    _ = current_user
+
     redis = get_redis()
     cache_service = get_ranking_cache_service(redis)
 
-    # 尝试从缓存获取数据（战队排行榜）
-    cached_data = await cache_service.get_cached_team_ranking(ruleset, page)
-    cached_stats = await cache_service.get_cached_team_stats(ruleset)
+    cached_data = await cache_service.get_cached_team_ranking(ruleset, sort, page)
+    cached_stats = await cache_service.get_cached_team_stats(ruleset, sort)
 
-    if cached_data and cached_stats:
-        # 从缓存返回数据
+    if cached_data is not None and cached_stats is not None:
         return TeamResponse(
             ranking=[TeamStatistics.model_validate(item) for item in cached_data],
             total=cached_stats.get("total", 0),
         )
 
-    # 缓存未命中，从数据库查询
     response = TeamResponse(ranking=[], total=0)
     teams = (await session.exec(select(Team))).all()
-    valid_teams = []  # 存储有效的战队统计
 
-    for team in teams:
-        statistics = (
-            await session.exec(
-                select(UserStatistics).where(
-                    UserStatistics.mode == ruleset,
-                    UserStatistics.pp > 0,
-                    col(UserStatistics.user).has(col(User.team_membership).has(col(TeamMember.team_id) == team.id)),
-                    ~User.is_restricted_query(col(UserStatistics.user_id)),
-                )
+    team_memberships = (
+        await session.exec(
+            select(TeamMember.team_id, TeamMember.user_id).where(
+                ~User.is_restricted_query(col(TeamMember.user_id))
             )
-        ).all()
+        )
+    ).all()
 
-        if not statistics:
-            continue
+    members_by_team: dict[int, set[int]] = {}
+    for team_id, user_id in team_memberships:
+        members_by_team.setdefault(team_id, set()).add(user_id)
 
-        pp = 0
+    statistics_rows = (
+        await session.exec(
+            select(UserStatistics).where(
+                UserStatistics.mode == ruleset,
+                ~User.is_restricted_query(col(UserStatistics.user_id)),
+            )
+        )
+    ).all()
+    stats_by_user = {stat.user_id: stat for stat in statistics_rows}
+
+    ranked_teams: list[TeamStatistics] = []
+    for team in teams:
+        member_user_ids = members_by_team.get(team.id, set())
+        member_count = len(member_user_ids)
+
+        total_pp = 0.0
         total_ranked_score = 0
         total_play_count = 0
-        member_count = 0
 
-        for stat in statistics:
+        for user_id in member_user_ids:
+            stat = stats_by_user.get(user_id)
+            if stat is None:
+                continue
+            total_pp += stat.pp
             total_ranked_score += stat.ranked_score
             total_play_count += stat.play_count
-            pp += stat.pp
-            member_count += 1
 
-        stats = TeamStatistics(
-            team_id=team.id,
-            ruleset_id=int(ruleset),
-            play_count=total_play_count,
-            ranked_score=total_ranked_score,
-            performance=round(pp),
-            team=team,
-            member_count=member_count,
+        ranked_teams.append(
+            TeamStatistics(
+                team_id=team.id,
+                ruleset_id=int(ruleset),
+                play_count=total_play_count,
+                ranked_score=total_ranked_score,
+                performance=round(total_pp),
+                team=team,
+                member_count=member_count,
+            )
         )
-        valid_teams.append(stats)
 
-    # 排序
     if sort == "performance":
-        valid_teams.sort(key=lambda x: x.performance, reverse=True)
+        ranked_teams.sort(
+            key=lambda x: (x.performance, x.ranked_score, x.member_count, x.team.id),
+            reverse=True,
+        )
     else:
-        valid_teams.sort(key=lambda x: x.ranked_score, reverse=True)
+        ranked_teams.sort(
+            key=lambda x: (x.ranked_score, x.performance, x.member_count, x.team.id),
+            reverse=True,
+        )
 
-    # 计算总数
-    total_count = len(valid_teams)
-
-    # 分页处理
+    total_count = len(ranked_teams)
     page_size = 50
     start_idx = (page - 1) * page_size
     end_idx = start_idx + page_size
+    current_page_data = ranked_teams[start_idx:end_idx]
 
-    # 获取当前页的数据
-    current_page_data = valid_teams[start_idx:end_idx]
-
-    # 异步缓存数据（不等待完成）
     cache_data = [item.model_dump() for item in current_page_data]
     stats_data = {"total": total_count}
 
-    # 创建后台任务来缓存数据
     background_tasks.add_task(
         cache_service.cache_team_ranking,
         ruleset,
+        sort,
         cache_data,
         page,
         ttl=settings.ranking_cache_expire_minutes * 60,
     )
 
-    # 缓存统计信息
     background_tasks.add_task(
         cache_service.cache_team_stats,
         ruleset,
+        sort,
         stats_data,
         ttl=settings.ranking_cache_expire_minutes * 60,
     )
 
-    # 返回当前页的结果
     response.ranking = current_page_data
     response.total = total_count
     return response
-
 
 class CountryStatistics(BaseModel):
     code: str
@@ -532,3 +541,5 @@ async def get_user_ranking(
         "ranking": ranking_data,
         "total": total_count,
     }
+
+

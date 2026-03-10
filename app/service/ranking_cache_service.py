@@ -83,13 +83,13 @@ class RankingCacheService:
         """生成地区排行榜统计信息缓存键"""
         return f"country_ranking:stats:{ruleset}"
 
-    def _get_team_cache_key(self, ruleset: GameMode, page: int = 1) -> str:
+    def _get_team_cache_key(self, ruleset: GameMode, type: Literal["performance", "score"], page: int = 1) -> str:
         """生成战队排行榜缓存键"""
-        return f"team_ranking:{ruleset}:page:{page}"
+        return f"team_ranking:{ruleset}:{type}:page:{page}"
 
-    def _get_team_stats_cache_key(self, ruleset: GameMode) -> str:
+    def _get_team_stats_cache_key(self, ruleset: GameMode, type: Literal["performance", "score"]) -> str:
         """生成战队排行榜统计信息缓存键"""
-        return f"team_ranking:stats:{ruleset}"
+        return f"team_ranking:stats:{ruleset}:{type}"
 
     async def get_cached_ranking(
         self,
@@ -204,11 +204,12 @@ class RankingCacheService:
     async def get_cached_team_ranking(
         self,
         ruleset: GameMode,
+        type: Literal["performance", "score"],
         page: int = 1,
     ) -> list[dict] | None:
         """获取缓存的战队排行榜数据"""
         try:
-            cache_key = self._get_team_cache_key(ruleset, page)
+            cache_key = self._get_team_cache_key(ruleset, type, page)
             cached_data = await self.redis.get(cache_key)
 
             if cached_data:
@@ -221,13 +222,14 @@ class RankingCacheService:
     async def cache_team_ranking(
         self,
         ruleset: GameMode,
+        type: Literal["performance", "score"],
         ranking_data: list[dict],
         page: int = 1,
         ttl: int | None = None,
     ) -> None:
         """缓存战队排行榜数据"""
         try:
-            cache_key = self._get_team_cache_key(ruleset, page)
+            cache_key = self._get_team_cache_key(ruleset, type, page)
             if ttl is None:
                 ttl = settings.ranking_cache_expire_minutes * 60
             await self.redis.set(cache_key, safe_json_dumps(ranking_data), ex=ttl)
@@ -235,10 +237,10 @@ class RankingCacheService:
         except Exception as e:
             logger.error(f"Error caching team ranking: {e}")
 
-    async def get_cached_team_stats(self, ruleset: GameMode) -> dict | None:
+    async def get_cached_team_stats(self, ruleset: GameMode, type: Literal["performance", "score"]) -> dict | None:
         """获取缓存的战队排行榜统计信息"""
         try:
-            cache_key = self._get_team_stats_cache_key(ruleset)
+            cache_key = self._get_team_stats_cache_key(ruleset, type)
             cached_data = await self.redis.get(cache_key)
 
             if cached_data:
@@ -251,12 +253,13 @@ class RankingCacheService:
     async def cache_team_stats(
         self,
         ruleset: GameMode,
+        type: Literal["performance", "score"],
         stats: dict,
         ttl: int | None = None,
     ) -> None:
         """缓存战队排行榜统计信息"""
         try:
-            cache_key = self._get_team_stats_cache_key(ruleset)
+            cache_key = self._get_team_stats_cache_key(ruleset, type)
             if ttl is None:
                 ttl = settings.ranking_cache_expire_minutes * 60 * 6
             await self.redis.set(cache_key, safe_json_dumps(stats), ex=ttl)
@@ -684,3 +687,4 @@ async def schedule_ranking_refresh_task(session: AsyncSession, redis: Redis):
         await cache_service.refresh_all_rankings(session)
     except Exception as e:
         logger.error(f"Scheduled ranking refresh task failed: {e}")
+
