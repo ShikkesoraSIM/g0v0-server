@@ -235,9 +235,6 @@ DEFAULT_RANKED_MODS = {
         "9K": {},
     },
 }
-
-# Mods that should never grant PP, even if config/ranked_mods.json is permissive.
-HARD_BLOCKED_PP_MODS: set[str] = {"AS"}
 TYPE_TO_PY = {
     "number": int | float,
     "boolean": bool,
@@ -336,34 +333,8 @@ def check_settings(mod: APIMod, ranked_mods: RulesetRankedMods) -> bool:
         return False
 
 
-def _check_against_default_mod_settings(ruleset_id: int, mod: APIMod) -> bool:
-    """Validate a mod against built-in vanilla defaults for its ruleset."""
-    ruleset_defaults = DEFAULT_RANKED_MODS.get(ruleset_id, {})
-    mod_settings = ruleset_defaults.get(mod["acronym"])
-    if mod_settings is None:
-        return False
-    if mod_settings == {}:
-        return True
-    model = _generate_model(mod_settings)
-    try:
-        model.model_validate(mod.get("settings", {}))
-        return True
-    except ValueError:
-        return False
-
-
 def _mods_can_get_pp(ruleset_id: int, mods: list[APIMod], ranked_mods: RankedMods) -> bool:
     for mod in mods:
-        acronym = mod["acronym"]
-
-        # Adaptive Speed is considered too abusable for PP.
-        if acronym in HARD_BLOCKED_PP_MODS:
-            return False
-
-        # Flashlight must stay vanilla-default only; custom parameters should not award PP.
-        if acronym == "FL" and not _check_against_default_mod_settings(ruleset_id, mod):
-            return False
-
         if app_settings.enable_rx and mod["acronym"] == "RX" and ruleset_id in {0, 1, 2}:
             continue
         if app_settings.enable_ap and mod["acronym"] == "AP" and ruleset_id == 0:
