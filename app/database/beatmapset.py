@@ -553,11 +553,15 @@ class Beatmapset(AsyncAttrs, BeatmapsetModel, table=True):
         ranked = resp.get("ranked")
         if ranked is None:
             raise ValueError("ranked field is required")
+        try:
+            rank_status = BeatmapRankStatus(int(ranked))
+        except (TypeError, ValueError):
+            rank_status = BeatmapRankStatus.PENDING
 
         beatmapset = Beatmapset.model_validate(
             {
                 **d,
-                "beatmap_status": BeatmapRankStatus(ranked),
+                "beatmap_status": rank_status,
                 "availability_info": availability.more_information if availability is not None else None,
                 "download_disabled": bool(availability.download_disabled) if availability is not None else False,
             }

@@ -286,12 +286,16 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
         ranked = resp.get("ranked")
         if beatmapset_id is None or bid is None or ranked is None:
             raise ValueError("beatmapset_id, id and ranked are required")
+        try:
+            rank_status = BeatmapRankStatus(int(ranked))
+        except (TypeError, ValueError):
+            rank_status = BeatmapRankStatus.PENDING
         beatmap = cls.model_validate(
             {
                 **d,
                 "beatmapset_id": beatmapset_id,
                 "id": bid,
-                "beatmap_status": BeatmapRankStatus(ranked),
+                "beatmap_status": rank_status,
             }
         )
         return beatmap
@@ -319,6 +323,10 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             ranked = resp_dict.get("ranked")
             if beatmapset_id is None or ranked is None:
                 continue
+            try:
+                rank_status = BeatmapRankStatus(int(ranked))
+            except (TypeError, ValueError):
+                rank_status = BeatmapRankStatus.PENDING
 
             # Build beatmap payload without nested beatmapset object.
             d = {k: v for k, v in resp_dict.items() if k != "beatmapset"}
@@ -328,7 +336,7 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
                     **d,
                     "beatmapset_id": beatmapset_id,
                     "id": bid,
-                    "beatmap_status": BeatmapRankStatus(ranked),
+                    "beatmap_status": rank_status,
                 }
             )
             if not (await session.exec(select(exists()).where(Beatmap.id == bid))).first():
@@ -370,9 +378,59 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             # Check if set exists, if not fetch it
             r = await session.exec(select(Beatmapset.id).where(Beatmapset.id == beatmapset_id))
             if not r.first():
-                set_resp = await fetcher.get_beatmapset(beatmapset_id)
-                resp_id = resp.get("id")
-                await Beatmapset.from_resp(session, set_resp, from_=resp_id or 0)
+                try:
+                    set_resp = await fetcher.get_beatmapset(beatmapset_id)
+                    resp_id = resp.get("id")
+                    await Beatmapset.from_resp(session, set_resp, from_=resp_id or 0)
+                except Exception as set_error:
+                    from app.log import logger
+
+                    nested_beatmapset = resp.get("beatmapset") if isinstance(resp.get("beatmapset"), dict) else {}
+                    ranked = resp.get("ranked")
+                    try:
+                        ranked_value = int(ranked) if ranked is not None else int(BeatmapRankStatus.PENDING)
+                    except (TypeError, ValueError):
+                        ranked_value = int(BeatmapRankStatus.PENDING)
+
+                    now = datetime.utcnow()
+                    placeholder_payload = {
+                        "id": beatmapset_id,
+                        "artist": nested_beatmapset.get("artist") or resp.get("artist") or "Unknown",
+                        "artist_unicode": nested_beatmapset.get("artist_unicode")
+                        or nested_beatmapset.get("artist")
+                        or resp.get("artist")
+                        or "Unknown",
+                        "covers": nested_beatmapset.get("covers"),
+                        "creator": nested_beatmapset.get("creator") or resp.get("creator") or "Unknown",
+                        "nsfw": bool(nested_beatmapset.get("nsfw", False)),
+                        "source": nested_beatmapset.get("source") or resp.get("source") or "",
+                        "title": nested_beatmapset.get("title") or resp.get("title") or "Unknown",
+                        "title_unicode": nested_beatmapset.get("title_unicode")
+                        or nested_beatmapset.get("title")
+                        or resp.get("title")
+                        or "Unknown",
+                        "track_id": nested_beatmapset.get("track_id"),
+                        "user_id": nested_beatmapset.get("user_id") or resp.get("user_id") or 0,
+                        "video": bool(nested_beatmapset.get("video") or resp.get("video") or False),
+                        "current_nominations": nested_beatmapset.get("current_nominations"),
+                        "description": nested_beatmapset.get("description"),
+                        "pack_tags": nested_beatmapset.get("pack_tags") or [],
+                        "last_updated": nested_beatmapset.get("last_updated") or now,
+                        "submitted_date": nested_beatmapset.get("submitted_date") or now,
+                        "ranked": ranked_value,
+                        "status": nested_beatmapset.get("status") or BeatmapRankStatus(ranked_value).name.lower(),
+                    }
+
+                    logger.warning(
+                        "Failed to fetch beatmapset {} for beatmap {} ({}). Creating placeholder set.",
+                        beatmapset_id,
+                        bid or md5,
+                        set_error,
+                    )
+                    placeholder_set = await Beatmapset.from_resp_no_save(placeholder_payload)
+                    placeholder_set.is_local = False
+                    session.add(placeholder_set)
+                    await session.commit()
 
             return await Beatmap.from_resp(session, resp)
         except Exception as e:

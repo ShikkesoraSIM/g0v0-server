@@ -437,6 +437,31 @@ async def get_user_info(
 beatmapset_includes = [*BeatmapsetModel.BEATMAPSET_TRANSFORMER_INCLUDES, "beatmaps"]
 
 
+def _ensure_beatmapset_status(item: dict, beatmapset_type: BeatmapsetType) -> dict:
+    if item.get("status"):
+        return item
+
+    beatmap_status = item.get("beatmap_status")
+    if isinstance(beatmap_status, str) and beatmap_status:
+        item["status"] = beatmap_status.lower()
+        return item
+    if isinstance(beatmap_status, int):
+        try:
+            item["status"] = BeatmapRankStatus(beatmap_status).name.lower()
+            return item
+        except ValueError:
+            pass
+
+    fallback = {
+        BeatmapsetType.RANKED: "ranked",
+        BeatmapsetType.PENDING: "pending",
+        BeatmapsetType.LOVED: "loved",
+        BeatmapsetType.GRAVEYARD: "graveyard",
+    }
+    item["status"] = fallback.get(beatmapset_type, "pending")
+    return item
+
+
 @router.get(
     "/users/{user_id}/beatmapsets/{type}",
     name="获取用户谱面集列表",
@@ -517,15 +542,15 @@ async def get_user_beatmapsets(
                 .limit(limit)
             )
             beatmapsets = (await session.exec(stmt)).all()
-            resp = [
-                await BeatmapsetModel.transform(
+            resp = []
+            for beatmapset in beatmapsets:
+                transformed = await BeatmapsetModel.transform(
                     beatmapset,
                     session=session,
                     user=current_user,
                     includes=beatmapset_includes,
                 )
-                for beatmapset in beatmapsets
-            ]
+                resp.append(_ensure_beatmapset_status(transformed, type))
         else:
             resp = []
 
@@ -553,8 +578,11 @@ async def get_user_beatmapsets(
             )
         ).all()
         resp = [
-            await BeatmapsetModel.transform(
-                favourite.beatmapset, session=session, user=user, includes=beatmapset_includes
+            _ensure_beatmapset_status(
+                await BeatmapsetModel.transform(
+                    favourite.beatmapset, session=session, user=user, includes=beatmapset_includes
+                ),
+                type,
             )
             for favourite in favourites
         ]

@@ -14,6 +14,7 @@ from app.database.user import UserDict, UserModel
 from app.dependencies.database import with_db
 from app.helpers.asset_proxy_helper import replace_asset_urls
 from app.log import logger
+from app.models.beatmap import BeatmapRankStatus
 from app.models.score import GameMode
 from app.utils import safe_json_dumps
 
@@ -111,6 +112,36 @@ class UserCacheService:
         """生成用户谱面集缓存键"""
         return f"user:{user_id}:beatmapsets:{beatmapset_type}:limit:{limit}:offset:{offset}"
 
+    @staticmethod
+    def _normalize_cached_beatmapset_status(beatmapsets: list[Any], beatmapset_type: str) -> list[Any]:
+        fallback_by_type = {
+            "ranked": "ranked",
+            "pending": "pending",
+            "loved": "loved",
+            "graveyard": "graveyard",
+        }
+        fallback_status = fallback_by_type.get(beatmapset_type)
+
+        for row in beatmapsets:
+            if not isinstance(row, dict):
+                continue
+            if row.get("status"):
+                continue
+
+            beatmap_status = row.get("beatmap_status")
+            normalized_status = None
+            if isinstance(beatmap_status, str) and beatmap_status:
+                normalized_status = beatmap_status.lower()
+            elif isinstance(beatmap_status, int):
+                try:
+                    normalized_status = BeatmapRankStatus(beatmap_status).name.lower()
+                except ValueError:
+                    normalized_status = None
+
+            row["status"] = normalized_status or fallback_status or "pending"
+
+        return beatmapsets
+
     async def get_user_from_cache(self, user_id: int, ruleset: GameMode | None = None) -> UserDict | None:
         """从缓存获取用户信息"""
         try:
@@ -207,7 +238,10 @@ class UserCacheService:
             cached_data = await self.redis.get(cache_key)
             if cached_data:
                 logger.debug(f"User beatmapsets cache hit for user {user_id}, type {beatmapset_type}")
-                return json.loads(cached_data)
+                payload = json.loads(cached_data)
+                if isinstance(payload, list):
+                    return self._normalize_cached_beatmapset_status(payload, beatmapset_type)
+                return payload
             return None
         except Exception as e:
             logger.error(f"Error getting user beatmapsets from cache: {e}")
@@ -227,6 +261,8 @@ class UserCacheService:
             if expire_seconds is None:
                 expire_seconds = settings.user_beatmapsets_cache_expire_seconds
             cache_key = self._get_user_beatmapsets_cache_key(user_id, beatmapset_type, limit, offset)
+            if isinstance(beatmapsets, list):
+                beatmapsets = self._normalize_cached_beatmapset_status(beatmapsets, beatmapset_type)
             # 使用 model_dump_json() 处理有 model_dump_json 方法的对象，否则使用 safe_json_dumps
             serialized_beatmapsets = []
             for bms in beatmapsets:
