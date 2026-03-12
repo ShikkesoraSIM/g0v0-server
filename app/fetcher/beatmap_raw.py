@@ -13,9 +13,8 @@ from httpx import AsyncClient, HTTPError, Limits
 import redis.asyncio as redis
 
 urls = [
-    "https://catboy.best/osu/{beatmap_id}",
-    "https://osu.ppy.sh/osu/{beatmap_id}",
     "https://osu.direct/api/osu/{beatmap_id}",
+    "https://osu.ppy.sh/osu/{beatmap_id}",
 ]
 
 logger = fetcher_logger("BeatmapRawFetcher")
@@ -324,6 +323,7 @@ class BeatmapRawFetcher(BaseFetcher):
         client = await self._get_client()
         last_error = None
         beatmapset_id, checksum, is_local = await self._resolve_beatmap_context(beatmap_id)
+        expected_checksum = checksum.lower() if checksum else None
 
         # Local maps: use local .osz first. This avoids relying on external mirrors for local uploads.
         local_raw = await self._fetch_local_osz_beatmap_raw(beatmap_id, beatmapset_id, checksum)
@@ -342,7 +342,21 @@ class BeatmapRawFetcher(BaseFetcher):
                     last_error = NoBeatmapError(f"HTTP {resp.status_code}")
                     continue
 
-                body = resp.text
+                raw_bytes = resp.content
+                if expected_checksum:
+                    payload_checksum = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest().lower()
+                    if payload_checksum != expected_checksum:
+                        logger.warning(
+                            "Beatmap {} from {}: checksum mismatch (expected {}, got {})",
+                            beatmap_id,
+                            req_url,
+                            expected_checksum,
+                            payload_checksum,
+                        )
+                        last_error = NoBeatmapError("Checksum mismatch")
+                        continue
+
+                body = raw_bytes.decode("utf-8-sig", errors="ignore")
                 if not body or not body.strip():
                     logger.warning(f"Beatmap {beatmap_id} from {req_url}: empty response")
                     last_error = NoBeatmapError("Empty response")

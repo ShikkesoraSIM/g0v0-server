@@ -53,19 +53,10 @@ class BeatmapDownloadService:
         # 国外区域端点
         self.international_endpoints = [
             DownloadEndpoint(
-                name="Catboy",
-                base_url="https://api.gatari.pw",
-                health_check_url="https://api.gatari.pw",
-                url_template="https://osu.gatari.pw/d/{sid}",
-                is_china=False,
-                priority=2,
-                timeout=10,
-            ),
-            DownloadEndpoint(
-                name="Nerinyan",
-                base_url="https://api.nerinyan.moe",
-                health_check_url="https://catboy.best/api",
-                url_template="https://catboy.best/d/{sid}",
+                name="OsuDirect",
+                base_url="https://osu.direct",
+                health_check_url="https://osu.direct/api/status",
+                url_template="https://osu.direct/api/d/{sid}?noVideo={no_video}",
                 is_china=False,
                 priority=0,
                 timeout=10,
@@ -77,15 +68,6 @@ class BeatmapDownloadService:
                 url_template="https://storage.ripple.moe/d/{sid}",
                 is_china=False,
                 priority=1,
-                timeout=10,
-            ),
-            DownloadEndpoint(
-                name="OsuDirect",
-                base_url="https://osu.direct",
-                health_check_url="https://osu.direct/api/status",
-                url_template="https://osu.direct/api/d/{sid}?noVideo={no_video}",
-                is_china=False,
-                priority=2,
                 timeout=10,
             ),
         ]
