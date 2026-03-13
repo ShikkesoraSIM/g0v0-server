@@ -92,6 +92,7 @@ class ScoreDict(TypedDict):
     user_id: int
     accuracy: float
     build_id: int | None
+    client_version: str | None
     ended_at: datetime
     has_replay: bool
     max_combo: int
@@ -152,6 +153,7 @@ class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
     )
     accuracy: float
     build_id: int | None = Field(default=None)
+    client_version: str | None = Field(default=None, max_length=255)
     ended_at: datetime = Field(sa_column=Column(DateTime))
     has_replay: bool = Field(sa_column=Column(Boolean))
     max_combo: int
@@ -1120,6 +1122,7 @@ async def process_score(
         total_score=info.total_score,
         total_score_without_mods=info.total_score_without_mods,
         beatmap_id=beatmap_id,
+        client_version=score_token.client_version,
         ended_at=utcnow(),
         gamemode=gamemode,
         started_at=score_token.created_at,

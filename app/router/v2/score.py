@@ -51,6 +51,7 @@ from app.models.score import (
     Rank,
     SoloScoreSubmissionInfo,
 )
+from app.models.version import VersionCheckResult
 from app.service.beatmap_cache_service import get_beatmap_cache_service
 from app.service.user_cache_service import refresh_user_cache_background
 from app.utils import api_doc, utcnow
@@ -89,6 +90,18 @@ SCORE_DETAIL_INCLUDES = [
     "user.team",
 ]
 logger = log("Score")
+
+
+def _format_client_version_label(client_version_result: VersionCheckResult) -> str | None:
+    name = (client_version_result.client_name or "").strip()
+    version = (client_version_result.version or "").strip()
+    os_name = (client_version_result.os or "").strip()
+    if not any((name, version, os_name)):
+        return None
+    base = " ".join(part for part in (name, version) if part).strip()
+    if os_name:
+        return f"{base} ({os_name})" if base else os_name
+    return base or None
 
 
 async def _process_user_achievement(score_id: int):
@@ -643,10 +656,12 @@ async def create_solo_score(
 
     background_task.add_task(_preload_beatmap_for_pp_calculation, beatmap_id)
     async with db:
+        client_version_label = _format_client_version_label(client_version)
         score_token = ScoreToken(
             user_id=user_id,
             beatmap_id=beatmap_id,
             ruleset_id=GameMode.from_int(ruleset_id),
+            client_version=client_version_label,
         )
         db.add(score_token)
         await db.commit()
@@ -658,7 +673,7 @@ async def create_solo_score(
             score_token=score_token.id,
             beatmap_id=beatmap_id,
             mode=ruleset_id,
-            client_version=str(client_version),
+            client_version=client_version_label or "unknown",
         )
         return ScoreTokenResp.from_db(score_token)
 
@@ -772,12 +787,14 @@ async def create_playlist_score(
         raise HTTPException(status_code=400, detail="Playlist item has already been played")
     # 这里应该不用验证mod了吧。。。
     background_task.add_task(_preload_beatmap_for_pp_calculation, beatmap_id)
+    client_version_label = _format_client_version_label(client_version)
     score_token = ScoreToken(
         user_id=user_id,
         beatmap_id=beatmap_id,
         ruleset_id=GameMode.from_int(ruleset_id),
         playlist_item_id=playlist_id,
         room_id=room_id,
+        client_version=client_version_label,
     )
     session.add(score_token)
     await session.commit()
@@ -791,7 +808,7 @@ async def create_playlist_score(
         mode=ruleset_id,
         room_id=room_id,
         playlist_id=playlist_id,
-        client_version=str(client_version),
+        client_version=client_version_label or "unknown",
     )
     return ScoreTokenResp.from_db(score_token)
 

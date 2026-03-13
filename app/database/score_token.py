@@ -28,6 +28,7 @@ class ScoreTokenBase(SQLModel, UTCBaseModel):
     beatmap_id: int = Field(foreign_key="beatmaps.id")
     room_id: int | None = Field(default=None)
     playlist_item_id: int | None = Field(default=None)  # playlist
+    client_version: str | None = Field(default=None, max_length=255)
     created_at: datetime = Field(default_factory=utcnow, sa_column=Column(DateTime))
     updated_at: datetime = Field(default_factory=utcnow, sa_column=Column(DateTime))
 
