@@ -688,6 +688,7 @@ CALCULATOR_CONFIG='{}'
                 "btmc",
                 "cookiezi",
                 "peppy",
+                "torii",
                 "saragi",
                 "chocomint",
             ],
