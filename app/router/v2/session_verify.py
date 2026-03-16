@@ -75,6 +75,15 @@ async def verify_session(
     user_id = current_user.id
 
     if not await LoginSessionService.check_is_need_verification(db, user_id, token_id):
+        raw_user_agent = user_agent.raw_ua
+        await LoginLogService.record_session_resume_if_due(
+            db=db,
+            user_id=user_id,
+            request=request,
+            user_agent=raw_user_agent,
+            client_label=(raw_user_agent or "").strip()[:180] or None,
+            lookback_minutes=20,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     verify_method: str | None = (

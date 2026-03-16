@@ -262,6 +262,70 @@ class LoginLogService:
 
         return changed
 
+    @staticmethod
+    async def record_session_resume_if_due(
+        db: AsyncSession,
+        user_id: int,
+        request: Request,
+        user_agent: str | None = None,
+        client_hash: str | None = None,
+        client_label: str | None = None,
+        lookback_minutes: int = 20,
+    ) -> bool:
+        """
+        Record a lightweight 'session_resume' event when a client reconnects
+        with an already-verified session.
+
+        To avoid log spam, skip if a similar successful event exists recently
+        for the same user/ip and (when available) same hash.
+        """
+        now = utcnow()
+        since_time = now - timedelta(minutes=max(1, lookback_minutes))
+        current_ip = normalize_ip(get_client_ip(request))
+        normalized_hash = (client_hash or "").strip().lower() or None
+        if normalized_hash:
+            normalized_hash = normalized_hash[:128]
+
+        recent_rows = (
+            await db.exec(
+                select(UserLoginLog)
+                .where(
+                    UserLoginLog.user_id == user_id,
+                    UserLoginLog.login_success.is_(True),
+                    UserLoginLog.ip_address == current_ip,
+                    col(UserLoginLog.login_time) >= since_time,
+                )
+                .order_by(col(UserLoginLog.login_time).desc())
+                .limit(20)
+            )
+        ).all()
+
+        for row in recent_rows:
+            row_hash = (row.client_hash or "").strip().lower() or None
+            same_hash = (not normalized_hash) or (row_hash == normalized_hash)
+            if same_hash and row.login_method in {
+                "session_resume",
+                "password",
+                "password_pending_verification",
+                "totp",
+                "mail",
+                "totp_backup_code",
+            }:
+                return False
+
+        await LoginLogService.record_login(
+            db=db,
+            user_id=user_id,
+            request=request,
+            user_agent=user_agent,
+            client_hash=normalized_hash,
+            client_label=client_label,
+            login_success=True,
+            login_method="session_resume",
+            notes="Session resumed with existing token",
+        )
+        return True
+
 
 def get_request_info(request: Request) -> dict:
     """
