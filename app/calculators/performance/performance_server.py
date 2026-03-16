@@ -6,8 +6,14 @@ from app.models.mods import APIMod
 from app.models.performance import (
     DifficultyAttributes,
     DifficultyAttributesUnion,
+    ManiaDifficultyAttributes,
+    ManiaPerformanceAttributes,
+    OsuDifficultyAttributes,
+    OsuPerformanceAttributes,
     PerformanceAttributes,
     PerformanceAttributesUnion,
+    TaikoDifficultyAttributes,
+    TaikoPerformanceAttributes,
 )
 from app.models.score import GameMode
 
@@ -111,7 +117,15 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
                 )
                 if resp.status_code != 200:
                     raise PerformanceError(f"Failed to calculate performance: {resp.text}")
-                return TypeAdapter(PerformanceAttributesUnion).validate_json(resp.text)
+                payload = resp.json()
+                base_mode = score.gamemode.to_base_ruleset()
+                if base_mode == GameMode.OSU:
+                    return TypeAdapter(OsuPerformanceAttributes).validate_python(payload)
+                if base_mode == GameMode.TAIKO:
+                    return TypeAdapter(TaikoPerformanceAttributes).validate_python(payload)
+                if base_mode == GameMode.MANIA:
+                    return TypeAdapter(ManiaPerformanceAttributes).validate_python(payload)
+                return TypeAdapter(PerformanceAttributesUnion).validate_python(payload)
             except HTTPError as e:
                 raise PerformanceError(f"Failed to calculate performance: {e}") from e
             except Exception as e:
@@ -133,7 +147,15 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
                 )
                 if resp.status_code != 200:
                     raise DifficultyError(f"Failed to calculate difficulty: {resp.text}")
-                return TypeAdapter(DifficultyAttributesUnion).validate_json(resp.text)
+                payload = resp.json()
+                base_mode = gamemode.to_base_ruleset() if gamemode is not None else None
+                if base_mode == GameMode.OSU:
+                    return TypeAdapter(OsuDifficultyAttributes).validate_python(payload)
+                if base_mode == GameMode.TAIKO:
+                    return TypeAdapter(TaikoDifficultyAttributes).validate_python(payload)
+                if base_mode == GameMode.MANIA:
+                    return TypeAdapter(ManiaDifficultyAttributes).validate_python(payload)
+                return TypeAdapter(DifficultyAttributesUnion).validate_python(payload)
             except HTTPError as e:
                 raise DifficultyError(f"Failed to calculate difficulty: {e}") from e
             except Exception as e:

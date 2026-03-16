@@ -6,6 +6,7 @@ from app.calculator import clamp
 from app.models.mods import APIMod
 from app.models.performance import (
     DifficultyAttributes,
+    ManiaDifficultyAttributes,
     ManiaPerformanceAttributes,
     OsuDifficultyAttributes,
     OsuPerformanceAttributes,
@@ -45,6 +46,7 @@ PERFORMANCE_CLASS = {
 DIFFICULTY_CLASS = {
     GameMode.OSU: OsuDifficultyAttributes,
     GameMode.TAIKO: TaikoDifficultyAttributes,
+    GameMode.MANIA: ManiaDifficultyAttributes,
 }
 
 _enum_to_str = {
@@ -198,6 +200,15 @@ class RosuPerformanceCalculator(BasePerformanceCalculator):
                 rhythm_difficulty=diff.rhythm or 0,
                 mono_stamina_factor=diff.stamina or 0,
                 consistency_factor=0,
+            )
+        elif attr_class is ManiaDifficultyAttributes:
+            return ManiaDifficultyAttributes(
+                star_rating=diff.stars,
+                max_combo=diff.max_combo,
+                great_hit_window=getattr(diff, "great_hit_window", None),
+                variety=getattr(diff, "variety", None),
+                acc_scalar=getattr(diff, "acc_scalar", None),
+                total_notes=getattr(diff, "total_notes", float(diff.max_combo)),
             )
         else:
             return DifficultyAttributes(

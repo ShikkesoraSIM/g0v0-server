@@ -154,6 +154,7 @@ async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> f
     base_mode = score.gamemode.to_base_ruleset()
     if settings.mania_pp_rework == "sunny_wip" and base_mode == GameMode.MANIA:
         star_rating = -1.0
+        diff_attrs = None
         if await get_calculator().can_calculate_difficulty(score.gamemode):
             try:
                 diff_attrs = await get_calculator().calculate_difficulty(beatmap, score.mods, score.gamemode)
@@ -167,7 +168,7 @@ async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> f
             else:
                 star_rating = (await score.awaitable_attrs.beatmap).difficulty_rating
 
-        pp = calculate_sunny_mania_pp(star_rating, score)
+        pp = calculate_sunny_mania_pp(star_rating, score, diff_attrs=diff_attrs)
     elif not (await get_calculator().can_calculate_performance(score.gamemode)):
         if not settings.fallback_no_calculator_pp:
             return 0

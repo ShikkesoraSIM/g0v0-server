@@ -88,7 +88,11 @@ class ManiaPerformanceAttributes(PerformanceAttributes):
     difficulty: float
 
 
-ManiaDifficultyAttributes = DifficultyAttributes
+class ManiaDifficultyAttributes(DifficultyAttributes):
+    great_hit_window: float | None = None
+    variety: float | None = None
+    acc_scalar: float | None = None
+    total_notes: float | None = None
 
 
 SentakkiPerformanceAttributes = PerformanceAttributes
@@ -134,5 +138,9 @@ PerformanceAttributesUnion = (
     OsuPerformanceAttributes | TaikoPerformanceAttributes | ManiaPerformanceAttributes | PerformanceAttributes
 )
 DifficultyAttributesUnion = (
-    OsuDifficultyAttributes | TaikoDifficultyAttributes | TauDifficultyAttributes | DifficultyAttributes
+    OsuDifficultyAttributes
+    | TaikoDifficultyAttributes
+    | ManiaDifficultyAttributes
+    | TauDifficultyAttributes
+    | DifficultyAttributes
 )

@@ -1,5 +1,5 @@
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.models.mods import APIMod
 
@@ -37,23 +37,42 @@ def _mania_custom_accuracy(score: "Score") -> float:
 
 
 def _performance_proportion(acc: float) -> float:
-    if acc > 0.99:
-        return (1.00 - 0.85) * (acc - 0.99) / 0.01 + 0.85
-    if acc > 0.96:
-        return (0.85 - 0.64) * (acc - 0.96) / 0.03 + 0.64
+    # author-port @ c2f5ac3
     if acc > 0.80:
-        return (0.64 - 0.00) * (acc - 0.80) / 0.16
+        return 4.5 * (acc - 0.8) / math.pow(100 * (1 - acc) + math.pow(0.9, 20), 0.05)
     return 0.0
 
 
-def calculate_sunny_mania_pp(star_rating: float, score: "Score") -> float:
+def _variety_multiplier(variety: float) -> float:
+    # author-port @ c2f5ac3
+    floor = 0.945
+    cap = 1.055
+    span = cap - floor
+    v0 = 3.25
+    k = 3.0
+    return floor + span / (1.0 + math.exp(-k * (variety - v0)))
+
+
+def _acc_multiplier(acc: float, acc_scalar: float) -> float:
+    # author-port @ c2f5ac3
+    sigmoid_scaler = 0.87 + 0.26 / (1.0 + math.exp(-20.0 * (acc_scalar - 1.0)))
+    pow_acc = math.pow(acc, 20)
+    return sigmoid_scaler * (2 * pow_acc - 1) + 2 - 2 * pow_acc
+
+
+def _length_multiplier(total_notes: float, star_rating: float) -> float:
+    # author-port @ c2f5ac3
+    safe_total_notes = max(total_notes, 1.0)
+    return 1.1 / (1.0 + math.sqrt(star_rating / (2.0 * safe_total_notes)))
+
+
+def calculate_sunny_mania_pp(star_rating: float, score: "Score", diff_attrs: Any | None = None) -> float:
     """
     Server-side Sunny Rework (WIP) mania pp formula.
 
-    Notes:
-    - Uses Sunny's public pp curve and accuracy weighting.
-    - Expects star_rating from the active difficulty calculator.
-    - This intentionally keeps implementation backend-only and toggleable.
+    Ported from vernonlim/osu branch author-port @ c2f5ac34625264846a4379e313b96fc4debd06ac.
+    This is backend-only and keeps fallback defaults if some custom difficulty
+    attributes are missing from the active calculator build.
     """
     count_perfect = max(score.ngeki, 0)
     count_great = max(score.n300, 0)
@@ -68,19 +87,26 @@ def calculate_sunny_mania_pp(star_rating: float, score: "Score") -> float:
     score_accuracy = _mania_custom_accuracy(score)
     proportion = _performance_proportion(score_accuracy)
 
-    # Difficulty part
-    difficulty_value = (
-        math.pow(max(star_rating - 0.15, 0.05), 2.2)
-        * 1.1
-        / (1.0 + (1.5 / math.sqrt(total_hits)))
-        * proportion
-        * 1.18
-    )
+    difficulty_value = 9.8 * math.pow(max(star_rating - 0.15, 0.05), 2.2) * proportion
 
-    multiplier = 8.0
+    multiplier = 1.0
     if _has_mod(score.mods, "NF"):
         multiplier *= 0.75
     if _has_mod(score.mods, "EZ"):
-        multiplier *= 0.5
+        multiplier *= 0.90
 
-    return max(0.0, difficulty_value * multiplier)
+    # If these attributes are not available in the current rosu build, keep sane
+    # defaults so Sunny can still run without crashing.
+    variety = float(getattr(diff_attrs, "variety", 3.25) or 3.25)
+    acc_scalar = float(getattr(diff_attrs, "acc_scalar", 1.0) or 1.0)
+    total_notes_raw = getattr(diff_attrs, "total_notes", None)
+    total_notes = float(total_notes_raw) if total_notes_raw is not None else float(total_hits)
+
+    total_value = (
+        difficulty_value
+        * multiplier
+        * _variety_multiplier(variety)
+        * _acc_multiplier(score_accuracy, acc_scalar)
+        * _length_multiplier(total_notes, star_rating)
+    )
+    return max(0.0, total_value)
