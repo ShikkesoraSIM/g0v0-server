@@ -8,6 +8,7 @@ import zipfile
 from typing import TYPE_CHECKING
 
 from app.calculators.performance import PerformanceCalculator
+from app.calculators.performance.sunny_mania import calculate_sunny_mania_pp
 from app.config import settings
 from app.const import MAX_SCORE
 from app.dependencies.storage import get_storage_service
@@ -150,7 +151,24 @@ async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> f
         except Exception:
             logger.exception(f"Error checking if beatmap {score.beatmap_id} is suspicious")
 
-    if not (await get_calculator().can_calculate_performance(score.gamemode)):
+    base_mode = score.gamemode.to_base_ruleset()
+    if settings.mania_pp_rework == "sunny_wip" and base_mode == GameMode.MANIA:
+        star_rating = -1.0
+        if await get_calculator().can_calculate_difficulty(score.gamemode):
+            try:
+                diff_attrs = await get_calculator().calculate_difficulty(beatmap, score.mods, score.gamemode)
+                star_rating = diff_attrs.star_rating
+            except Exception:
+                logger.exception(f"Failed to calculate difficulty for sunny mania pp ({score.id=}, {score.beatmap_id=})")
+
+        if star_rating < 0:
+            if db_beatmap is not None:
+                star_rating = db_beatmap.difficulty_rating
+            else:
+                star_rating = (await score.awaitable_attrs.beatmap).difficulty_rating
+
+        pp = calculate_sunny_mania_pp(star_rating, score)
+    elif not (await get_calculator().can_calculate_performance(score.gamemode)):
         if not settings.fallback_no_calculator_pp:
             return 0
         star_rating = -1

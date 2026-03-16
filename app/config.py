@@ -549,7 +549,11 @@ CALCULATOR_CONFIG='{}'
         Field(default=False, description="当计算器不支持某个模式时，使用简化的 pp 计算方法作为后备"),
         "表现计算设置",
     ]
-
+    mania_pp_rework: Annotated[
+        Literal["off", "sunny_wip"],
+        Field(default="off", description="osu!mania pp rework mode"),
+        "Performance Settings",
+    ]
     # 谱面缓存设置
     enable_beatmap_preload: Annotated[
         bool,
