@@ -7,7 +7,9 @@ from app.database.beatmap import Beatmap, BannedBeatmaps
 from app.database.beatmapset import Beatmapset
 from app.database.chat import ChannelType, ChatChannel, ChatMessage, ChatMessageModel, MessageType
 from app.database.score import Score
+from app.database.score_token import ScoreToken
 from app.database.statistics import UserStatistics
+from app.database.user_login_log import UserLoginLog
 from app.database.daily_challenge_model import DailyChallenge, DailyChallengeCreate, DailyChallengeUpdate, DailyChallengeResponse
 from app.database.team import Team, TeamMember
 from app.database.user import User
@@ -16,6 +18,7 @@ from app.database.user_badge import UserBadge, UserBadgeCreate, UserBadgeUpdate,
 from app.database.verification import LoginSession, LoginSessionResp, TrustedDevice, TrustedDeviceResp
 from app.const import BANCHOBOT_ID
 from app.dependencies.database import Database, get_redis
+from app.dependencies.client_verification import ClientVerificationService
 from app.dependencies.geoip import GeoIPService
 from app.dependencies.storage import StorageService
 from app.dependencies.user import UserAndToken, get_client_user_and_token
@@ -37,7 +40,6 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_ as sql_or
 from sqlmodel import col, func, select
-
 
 async def require_admin(session: Database, user_and_token: UserAndToken) -> User:
     """Helper function to check if user is admin"""
@@ -130,6 +132,57 @@ class AdminStatsResp(BaseModel):
     blacklisted_beatmaps: int
     performance_server_status: str
     api_server_status: str
+
+
+class AdminLoginLogItemResp(BaseModel):
+    id: int
+    user_id: int
+    username: str | None = None
+    ip_address: str
+    user_agent: str | None = None
+    login_time: datetime
+    login_success: bool
+    login_method: str
+    client_label: str | None = None
+    client_hash: str | None = None
+    notes: str | None = None
+    country_code: str | None = None
+    country_name: str | None = None
+    city_name: str | None = None
+    organization: str | None = None
+
+
+class AdminLoginLogListResp(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    logs: list[AdminLoginLogItemResp]
+
+
+class UnknownClientHashResp(BaseModel):
+    hash: str
+    count: int
+    first_seen: str | None = None
+    last_seen: str | None = None
+    last_user_id: int | None = None
+    last_user_agent: str | None = None
+    last_detected_os: str | None = None
+    last_source: str | None = None
+
+
+class UnknownClientHashListResp(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    hashes: list[UnknownClientHashResp]
+
+
+class AssignClientHashReq(BaseModel):
+    client_hash: str
+    client_name: str
+    version: str = ""
+    os: str = ""
+    remove_from_unknown: bool = True
 
 
 async def _count_online_users(redis) -> int:
@@ -437,6 +490,257 @@ async def get_admin_stats(
         performance_server_status=performance_server_status,
         api_server_status=api_server_status,
     )
+
+
+@router.get(
+    "/admin/login-logs",
+    name="Get login history logs",
+    tags=["管理", "g0v0 API"],
+    response_model=AdminLoginLogListResp,
+)
+async def get_admin_login_logs(
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    search: str = Query(""),
+    user_id: int | None = Query(None, ge=0),
+    login_success: bool | None = Query(None),
+    login_method: str | None = Query(None),
+):
+    await require_admin(session, user_and_token)
+
+    conditions = []
+    search_value = search.strip()
+
+    if user_id is not None:
+        conditions.append(col(UserLoginLog.user_id) == user_id)
+
+    if login_success is not None:
+        conditions.append(col(UserLoginLog.login_success) == login_success)
+
+    if login_method:
+        conditions.append(col(UserLoginLog.login_method).ilike(f"%{login_method.strip()}%"))
+
+    if search_value:
+        username_ids = (
+            await session.exec(
+                select(User.id).where(col(User.username).ilike(f"%{search_value}%")).limit(500)
+            )
+        ).all()
+
+        text_condition = sql_or(
+            col(UserLoginLog.ip_address).ilike(f"%{search_value}%"),
+            col(UserLoginLog.user_agent).ilike(f"%{search_value}%"),
+            col(UserLoginLog.client_label).ilike(f"%{search_value}%"),
+            col(UserLoginLog.client_hash).ilike(f"%{search_value}%"),
+            col(UserLoginLog.notes).ilike(f"%{search_value}%"),
+            col(UserLoginLog.country_name).ilike(f"%{search_value}%"),
+            col(UserLoginLog.city_name).ilike(f"%{search_value}%"),
+            col(UserLoginLog.organization).ilike(f"%{search_value}%"),
+            col(UserLoginLog.login_method).ilike(f"%{search_value}%"),
+        )
+
+        if search_value.isdigit():
+            text_condition = sql_or(text_condition, col(UserLoginLog.user_id) == int(search_value))
+
+        if username_ids:
+            text_condition = sql_or(text_condition, col(UserLoginLog.user_id).in_(username_ids))
+
+        conditions.append(text_condition)
+
+    count_stmt = select(func.count()).select_from(UserLoginLog)
+    data_stmt = select(UserLoginLog)
+    if conditions:
+        count_stmt = count_stmt.where(*conditions)
+        data_stmt = data_stmt.where(*conditions)
+
+    total = (await session.exec(count_stmt)).one()
+    rows = (
+        await session.exec(
+            data_stmt.order_by(col(UserLoginLog.login_time).desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+    ).all()
+
+    user_ids = sorted({row.user_id for row in rows if row.user_id > 0})
+    username_map: dict[int, str] = {}
+    if user_ids:
+        users = (
+            await session.exec(
+                select(User.id, User.username).where(col(User.id).in_(user_ids))
+            )
+        ).all()
+        username_map = {uid: uname for uid, uname in users}
+
+    logs = [
+        AdminLoginLogItemResp(
+            id=row.id or 0,
+            user_id=row.user_id,
+            username=username_map.get(row.user_id),
+            ip_address=row.ip_address,
+            user_agent=row.user_agent,
+            login_time=row.login_time,
+            login_success=row.login_success,
+            login_method=row.login_method,
+            client_label=row.client_label,
+            client_hash=row.client_hash,
+            notes=row.notes,
+            country_code=row.country_code,
+            country_name=row.country_name,
+            city_name=row.city_name,
+            organization=row.organization,
+        )
+        for row in rows
+    ]
+
+    return AdminLoginLogListResp(total=total, page=page, per_page=per_page, logs=logs)
+
+
+@router.get(
+    "/admin/client-hashes/unknown",
+    name="Get unknown client hashes",
+    tags=["管理", "g0v0 API"],
+    response_model=UnknownClientHashListResp,
+)
+async def get_unknown_client_hashes(
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    verification_service: ClientVerificationService,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    search: str = Query(""),
+):
+    await require_admin(session, user_and_token)
+
+    unknown = await verification_service.get_unknown_hashes()
+    items: list[UnknownClientHashResp] = []
+    search_value = search.strip().lower()
+
+    for hash_value, data in unknown.items():
+        entry = UnknownClientHashResp(
+            hash=hash_value,
+            count=int(data.get("count", 0) or 0),
+            first_seen=str(data.get("first_seen")) if data.get("first_seen") else None,
+            last_seen=str(data.get("last_seen")) if data.get("last_seen") else None,
+            last_user_id=int(data["last_user_id"]) if data.get("last_user_id") is not None else None,
+            last_user_agent=str(data.get("last_user_agent")) if data.get("last_user_agent") else None,
+            last_detected_os=str(data.get("last_detected_os")) if data.get("last_detected_os") else None,
+            last_source=str(data.get("last_source")) if data.get("last_source") else None,
+        )
+        if search_value:
+            search_blob = " ".join(
+                [
+                    entry.hash,
+                    entry.last_user_agent or "",
+                    entry.last_source or "",
+                    str(entry.last_user_id or ""),
+                ]
+            ).lower()
+            if search_value not in search_blob:
+                continue
+        items.append(entry)
+
+    items.sort(key=lambda x: (x.last_seen or "", x.count), reverse=True)
+    total = len(items)
+    start = (page - 1) * per_page
+    end = start + per_page
+    return UnknownClientHashListResp(total=total, page=page, per_page=per_page, hashes=items[start:end])
+
+
+@router.post(
+    "/admin/client-hashes/assign",
+    name="Assign unknown client hash",
+    tags=["管理", "g0v0 API"],
+)
+async def assign_unknown_client_hash(
+    req: AssignClientHashReq,
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    verification_service: ClientVerificationService,
+):
+    await require_admin(session, user_and_token)
+    input_hash = req.client_hash.strip().lower()
+    normalized_hash, ambiguous = await verification_service.resolve_hash_input(input_hash)
+    if ambiguous:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Hash prefix is ambiguous; provide a longer hash.",
+                "input_hash": input_hash,
+                "candidates": ambiguous[:10],
+            },
+        )
+
+    try:
+        await verification_service.assign_hash_override(
+            normalized_hash,
+            client_name=req.client_name,
+            version=req.version,
+            os_name=req.os,
+            remove_from_unknown=req.remove_from_unknown,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    resolved = await verification_service.validate_client_version(normalized_hash)
+    resolved_name = (resolved.client_name or "").strip()
+    resolved_version = (resolved.version or "").strip()
+    resolved_os = (resolved.os or "").strip()
+    resolved_label = " ".join(part for part in (resolved_name, resolved_version) if part).strip()
+    if resolved_os:
+        resolved_label = f"{resolved_label} ({resolved_os})" if resolved_label else resolved_os
+
+    updated_login_logs = 0
+    if resolved_label:
+        login_rows = (
+            await session.exec(
+                select(UserLoginLog).where(
+                    col(UserLoginLog.client_hash) == normalized_hash,
+                )
+            )
+        ).all()
+        for row in login_rows:
+            if row.client_label != resolved_label:
+                row.client_label = resolved_label
+                session.add(row)
+                updated_login_logs += 1
+
+    updated_score_tokens = 0
+    hash_prefix20 = normalized_hash[:20]
+    hash_prefix12 = normalized_hash[:12]
+    score_rows = (
+        await session.exec(
+            select(ScoreToken).where(
+                sql_or(
+                    col(ScoreToken.client_version).like(f"hash:{hash_prefix20}%"),
+                    col(ScoreToken.client_version).like(f"%(hash:{hash_prefix12}%)%"),
+                )
+            )
+        )
+    ).all()
+    for token_row in score_rows:
+        current = (token_row.client_version or "").strip()
+        if (
+            current.startswith(f"hash:{hash_prefix20}")
+            or f"(hash:{hash_prefix12})" in current
+        ):
+            token_row.client_version = resolved_label or current
+            session.add(token_row)
+            updated_score_tokens += 1
+
+    if updated_login_logs or updated_score_tokens:
+        await session.commit()
+
+    return {
+        "ok": True,
+        "input_hash": input_hash,
+        "hash": normalized_hash,
+        "resolved_os": resolved_os or None,
+        "updated_login_logs": updated_login_logs,
+        "updated_score_tokens": updated_score_tokens,
+    }
 
 
 @router.post(

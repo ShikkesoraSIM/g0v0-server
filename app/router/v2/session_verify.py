@@ -138,6 +138,7 @@ async def verify_session(
             request=request,
             login_method=login_method,
             user_agent=user_agent.raw_ua,
+            client_label=(user_agent.raw_ua or "").strip()[:180] or None,
             login_success=True,
             notes=f"{login_method} 验证成功",
         )
@@ -151,6 +152,8 @@ async def verify_session(
             request=request,
             attempted_username=current_user.username,
             login_method=login_method,
+            user_agent=user_agent.raw_ua,
+            client_label=(user_agent.raw_ua or "").strip()[:180] or None,
             notes=str(e),
         )
 

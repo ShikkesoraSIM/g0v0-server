@@ -53,6 +53,7 @@ from app.models.score import (
 )
 from app.models.version import VersionCheckResult
 from app.service.beatmap_cache_service import get_beatmap_cache_service
+from app.service.login_log_service import LoginLogService
 from app.service.user_cache_service import refresh_user_cache_background
 from app.utils import api_doc, utcnow
 
@@ -66,6 +67,7 @@ from fastapi import (
     HTTPException,
     Path,
     Query,
+    Request,
     Security,
 )
 from fastapi.responses import RedirectResponse
@@ -90,6 +92,21 @@ SCORE_DETAIL_INCLUDES = [
     "user.team",
 ]
 logger = log("Score")
+LAST_CLIENT_HASH_KEY = "metadata:user:last_client_hash:{user_id}"
+
+
+async def _store_last_client_hash(redis: Redis, user_id: int, version_hash: str) -> None:
+    hash_value = (version_hash or "").strip().lower()
+    if not hash_value:
+        return
+    try:
+        await redis.set(
+            LAST_CLIENT_HASH_KEY.format(user_id=user_id),
+            hash_value,
+            ex=60 * 60 * 24 * 120,  # 120 days
+        )
+    except Exception as e:
+        logger.debug(f"Failed to store last client hash for user {user_id}: {e}")
 
 
 def _format_client_version_label(client_version_result: VersionCheckResult) -> str | None:
@@ -102,6 +119,54 @@ def _format_client_version_label(client_version_result: VersionCheckResult) -> s
     if os_name:
         return f"{base} ({os_name})" if base else os_name
     return base or None
+
+
+def _extract_user_agent_client_hint(user_agent: str) -> str | None:
+    ua = (user_agent or "").strip()
+    if not ua:
+        return None
+
+    lower = ua.lower()
+    compact = "".join(lower.split())
+    # Generic client UAs have no useful build information.
+    if compact in {"osu!", "osu", "osu!lazer", "lazer"}:
+        return None
+
+    # Skip common browser UAs to avoid polluting DB with irrelevant long strings.
+    if "mozilla/" in lower and all(marker not in lower for marker in ("osu", "tachyon", "shigetiro")):
+        return None
+
+    return ua[:180]
+
+
+def _derive_client_version_label(
+    client_version_result: VersionCheckResult,
+    request: Request,
+    version_hash: str,
+) -> str | None:
+    mapped = _format_client_version_label(client_version_result)
+
+    user_agent_hint = _extract_user_agent_client_hint(request.headers.get("user-agent") or "")
+    hash_value = (version_hash or "").strip()
+
+    # If verification only produced a generic name (e.g. "osu!") and no explicit
+    # version, prefer a richer client hint from user-agent when available.
+    has_explicit_version = bool((client_version_result.version or "").strip())
+    if mapped and has_explicit_version:
+        return mapped
+    if mapped and user_agent_hint and user_agent_hint.lower() != mapped.lower():
+        return user_agent_hint
+    if mapped and hash_value:
+        return f"{mapped} (hash:{hash_value[:12]})"
+    if mapped:
+        return mapped
+    if user_agent_hint:
+        return user_agent_hint
+
+    if hash_value:
+        return f"hash:{hash_value[:20]}"
+
+    return None
 
 
 async def _process_user_achievement(score_id: int):
@@ -603,7 +668,9 @@ async def get_user_all_beatmap_scores(
 )
 async def create_solo_score(
     background_task: BackgroundTasks,
+    request: Request,
     db: Database,
+    redis: Redis,
     fetcher: Fetcher,
     verification_service: ClientVerificationService,
     beatmap_id: Annotated[int, Path(description="谱面 ID")],
@@ -626,11 +693,27 @@ async def create_solo_score(
             version_hash,
         )
     ):
+        if version_hash:
+            await verification_service.record_unknown_hash(
+                version_hash,
+                user_agent=request.headers.get("user-agent") or "",
+                user_id=user_id,
+                source="create_solo_score_blocked",
+            )
         logger.info(
             f"Client version check failed for user {current_user.id} on beatmap {beatmap_id} "
             f"(version hash: {version_hash})"
         )
         raise HTTPException(status_code=422, detail="invalid client hash")
+    if not any((client_version.client_name, client_version.version, client_version.os)) and version_hash:
+        await verification_service.record_unknown_hash(
+            version_hash,
+            user_agent=request.headers.get("user-agent") or "",
+            user_id=user_id,
+            source="create_solo_score",
+        )
+
+    await _store_last_client_hash(redis, user_id, version_hash)
 
     beatmap = await Beatmap.get_or_fetch(db, fetcher, bid=beatmap_id)
     if not beatmap:
@@ -655,8 +738,19 @@ async def create_solo_score(
     await Beatmap.get_or_fetch(db, fetcher, bid=beatmap_id)
 
     background_task.add_task(_preload_beatmap_for_pp_calculation, beatmap_id)
+    client_version_label = _derive_client_version_label(client_version, request, version_hash)
+    try:
+        await LoginLogService.attach_client_identity_to_recent_login(
+            db=db,
+            user_id=user_id,
+            request=request,
+            client_hash=version_hash,
+            client_label=client_version_label,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to backfill login client identity for user {user_id}: {e}")
+
     async with db:
-        client_version_label = _format_client_version_label(client_version)
         score_token = ScoreToken(
             user_id=user_id,
             beatmap_id=beatmap_id,
@@ -708,6 +802,8 @@ async def submit_solo_score(
 async def create_playlist_score(
     session: Database,
     background_task: BackgroundTasks,
+    request: Request,
+    redis: Redis,
     fetcher: Fetcher,
     room_id: int,
     playlist_id: int,
@@ -729,11 +825,27 @@ async def create_playlist_score(
             version_hash,
         )
     ):
+        if version_hash:
+            await verification_service.record_unknown_hash(
+                version_hash,
+                user_agent=request.headers.get("user-agent") or "",
+                user_id=current_user.id,
+                source="create_playlist_score_blocked",
+            )
         logger.info(
             f"Client version check failed for user {current_user.id} on room {room_id}, playlist {playlist_id} "
             f"(version hash: {version_hash})"
         )
         raise HTTPException(status_code=422, detail="invalid client hash")
+    if not any((client_version.client_name, client_version.version, client_version.os)) and version_hash:
+        await verification_service.record_unknown_hash(
+            version_hash,
+            user_agent=request.headers.get("user-agent") or "",
+            user_id=current_user.id,
+            source="create_playlist_score",
+        )
+
+    await _store_last_client_hash(redis, current_user.id, version_hash)
 
     if not (result := gamemode.check_ruleset_version(ruleset_hash)):
         logger.info(
@@ -787,7 +899,18 @@ async def create_playlist_score(
         raise HTTPException(status_code=400, detail="Playlist item has already been played")
     # 这里应该不用验证mod了吧。。。
     background_task.add_task(_preload_beatmap_for_pp_calculation, beatmap_id)
-    client_version_label = _format_client_version_label(client_version)
+    client_version_label = _derive_client_version_label(client_version, request, version_hash)
+    try:
+        await LoginLogService.attach_client_identity_to_recent_login(
+            db=session,
+            user_id=user_id,
+            request=request,
+            client_hash=version_hash,
+            client_label=client_version_label,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to backfill login client identity for user {user_id}: {e}")
+
     score_token = ScoreToken(
         user_id=user_id,
         beatmap_id=beatmap_id,

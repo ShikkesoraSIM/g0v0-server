@@ -18,6 +18,8 @@ class UserLoginLog(SQLModel, table=True):
     user_id: int = Field(index=True, description="User ID")
     ip_address: str = Field(max_length=45, index=True, description="IP address (supports IPv4 and IPv6)")
     user_agent: str | None = Field(default=None, max_length=500, description="User agent information")
+    client_hash: str | None = Field(default=None, max_length=128, description="Client version hash")
+    client_label: str | None = Field(default=None, max_length=255, description="Resolved client label")
     login_time: datetime = Field(default_factory=utcnow, description="Login time")
 
     # GeoIP information

@@ -76,10 +76,14 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     await init_calculator()
 
 
-    #print("CHECK_CLIENT_VERSION setting:", settings.check_client_version)
-
-    if settings.check_client_version:
+    # Always initialize client-version metadata so we can display client details
+    # even when strict validation is disabled.
+    try:
         await init_client_verification_service()
+    except Exception as e:
+        system_logger("ClientVerificationService").warning(
+            f"Initialization failed, continuing without version metadata: {e}"
+        )
 
     # init rate limiter
     await FastAPILimiter.init(redis_rate_limit_client)

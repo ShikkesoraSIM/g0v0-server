@@ -1,4 +1,4 @@
-from datetime import timedelta
+﻿from datetime import timedelta
 import re
 from typing import Annotated, Literal
 
@@ -20,6 +20,7 @@ from app.database.auth import TotpKeys
 from app.database.statistics import UserStatistics
 from app.dependencies.api_version import APIVersion
 from app.dependencies.database import Database, Redis
+from app.dependencies.client_verification import ClientVerificationService
 from app.dependencies.geoip import GeoIPService, IPAddress
 from app.dependencies.user_agent import UserAgentInfo
 from app.log import log
@@ -46,23 +47,182 @@ from sqlalchemy import text
 from sqlmodel import exists, select
 
 logger = log("Auth")
+LAST_CLIENT_HASH_KEY = "metadata:user:last_client_hash:{user_id}"
+CLIENT_BUILD_PATTERN = re.compile(r"\d{4}\.\d+\.\d+(?:-[\w.]+)?", re.IGNORECASE)
+HEX_HASH_PATTERN = re.compile(r"^[0-9a-f]{8,128}$", re.IGNORECASE)
+CLIENT_HASH_FORM_KEYS = (
+    "version_hash",
+    "versionHash",
+    "client_hash",
+    "clientHash",
+    "client_version_hash",
+    "clientVersionHash",
+    "build_hash",
+    "buildHash",
+    "hash",
+)
+CLIENT_VERSION_FORM_KEYS = (
+    "version",
+    "client_version",
+    "clientVersion",
+    "build",
+    "build_version",
+    "buildVersion",
+)
+CLIENT_HASH_HEADER_KEYS = (
+    "x-version-hash",
+    "x-client-version-hash",
+    "x-client-hash",
+)
+CLIENT_VERSION_HEADER_KEYS = (
+    "x-client-version",
+    "x-build-version",
+)
+
+
+def _format_client_label_from_validation(validation) -> str | None:
+    if validation is None:
+        return None
+    name = (validation.client_name or "").strip()
+    version = (validation.version or "").strip()
+    os_name = (validation.os or "").strip()
+    if not any((name, version, os_name)):
+        return None
+    base = " ".join(part for part in (name, version) if part).strip()
+    if os_name:
+        return f"{base} ({os_name})" if base else os_name
+    return base or None
+
+
+def _extract_client_label_from_user_agent(raw_user_agent: str) -> str | None:
+    ua = (raw_user_agent or "").strip()
+    if not ua:
+        return None
+
+    ua_lower = ua.lower()
+    if "mozilla/" in ua_lower and all(marker not in ua_lower for marker in ("osu", "tachyon", "shigetiro")):
+        return None
+
+    if ua_lower in {"osu!", "osu", "osu!lazer", "lazer"}:
+        return "osu!"
+
+    return ua[:180]
+
+
+def _derive_login_client_label(
+    validation,
+    raw_user_agent: str,
+    fallback_display_name: str = "",
+    version_hint: str = "",
+) -> str | None:
+    mapped_label = _format_client_label_from_validation(validation)
+    ua_label = _extract_client_label_from_user_agent(raw_user_agent)
+    clean_version_hint = (version_hint or "").strip()
+    has_version_hint = bool(clean_version_hint and CLIENT_BUILD_PATTERN.search(clean_version_hint))
+
+    # Prefer richer UA labels with explicit build numbers, because some custom
+    # clients can share hashes across versions.
+    if ua_label and CLIENT_BUILD_PATTERN.search(ua_label):
+        return ua_label
+
+    if has_version_hint:
+        name = ""
+        os_name = ""
+        if validation is not None:
+            name = (validation.client_name or "").strip()
+            os_name = (validation.os or "").strip()
+        if not name:
+            name = (fallback_display_name or "").strip() or "osu!"
+        base = f"{name} {clean_version_hint}".strip()
+        return f"{base} ({os_name})" if os_name else base
+
+    if mapped_label:
+        return mapped_label
+    if ua_label:
+        return ua_label
+
+    fallback = (fallback_display_name or "").strip()
+    if fallback and fallback.lower() != "unknown":
+        return fallback
+    return None
+
+
+async def _extract_client_hints_from_request(
+    request: Request,
+    explicit_version_hash: str | None,
+) -> tuple[str | None, str | None, list[str]]:
+    form_values: dict[str, str] = {}
+    try:
+        form_data = await request.form()
+        for key, value in form_data.multi_items():
+            if key not in form_values and value is not None:
+                form_values[key] = str(value).strip()
+    except Exception:
+        form_values = {}
+
+    observed_keys = sorted(
+        {
+            key
+            for key in form_values
+            if any(token in key.lower() for token in ("version", "hash", "client", "build"))
+        }
+    )[:20]
+
+    hash_candidates: list[str] = []
+    if explicit_version_hash:
+        hash_candidates.append(explicit_version_hash)
+
+    for key in CLIENT_HASH_FORM_KEYS:
+        value = form_values.get(key)
+        if value:
+            hash_candidates.append(value)
+    for key in CLIENT_HASH_HEADER_KEYS:
+        value = request.headers.get(key)
+        if value:
+            hash_candidates.append(value)
+
+    normalized_hash: str | None = None
+    for candidate in hash_candidates:
+        value = (candidate or "").strip().lower()
+        if value and HEX_HASH_PATTERN.fullmatch(value):
+            normalized_hash = value
+            break
+
+    version_candidates: list[str] = []
+    for key in CLIENT_VERSION_FORM_KEYS:
+        value = form_values.get(key)
+        if value:
+            version_candidates.append(value)
+    for key in CLIENT_VERSION_HEADER_KEYS:
+        value = request.headers.get(key)
+        if value:
+            version_candidates.append(value)
+
+    version_hint: str | None = None
+    for candidate in version_candidates:
+        value = (candidate or "").strip()
+        if value and CLIENT_BUILD_PATTERN.search(value):
+            version_hint = value[:64]
+            break
+
+    return normalized_hash, version_hint, observed_keys
 
 
 def create_oauth_error_response(error: str, description: str, hint: str, status_code: int = 400):
-    """创建标准的 OAuth 错误响应"""
+    """åˆ›å»ºæ ‡å‡†çš„ OAuth é”™è¯¯å“åº”"""
     error_data = OAuthErrorResponse(error=error, error_description=description, hint=hint, message=description)
     return JSONResponse(status_code=status_code, content=error_data.model_dump())
 
 
 def validate_email(email: str) -> list[str]:
-    """验证邮箱"""
+    """éªŒè¯é‚®ç®±"""
     errors = []
 
     if not email:
         errors.append("Email is required")
         return errors
 
-    # 基本的邮箱格式验证
+    # åŸºæœ¬çš„é‚®ç®±æ ¼å¼éªŒè¯
     email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
     if not re.match(email_pattern, email):
         errors.append("Please enter a valid email address")
@@ -70,27 +230,27 @@ def validate_email(email: str) -> list[str]:
     return errors
 
 
-router = APIRouter(tags=["osu! OAuth 认证"])
+router = APIRouter(tags=["osu! OAuth è®¤è¯"])
 
 
 @router.post(
     "/users",
-    name="注册用户",
-    description="用户注册接口",
+    name="æ³¨å†Œç”¨æˆ·",
+    description="ç”¨æˆ·æ³¨å†ŒæŽ¥å£",
 )
 async def register_user(
     db: Database,
-    user_username: Annotated[str, Form(..., alias="user[username]", description="用户名")],
-    user_email: Annotated[str, Form(..., alias="user[user_email]", description="电子邮箱")],
-    user_password: Annotated[str, Form(..., alias="user[password]", description="密码")],
+    user_username: Annotated[str, Form(..., alias="user[username]", description="ç”¨æˆ·å")],
+    user_email: Annotated[str, Form(..., alias="user[user_email]", description="ç”µå­é‚®ç®±")],
+    user_password: Annotated[str, Form(..., alias="user[password]", description="å¯†ç ")],
     geoip: GeoIPService,
     client_ip: IPAddress,
     user_agent: UserAgentInfo,
     cf_turnstile_response: Annotated[
-        str, Form(description="Cloudflare Turnstile 响应 token")
+        str, Form(description="Cloudflare Turnstile å“åº” token")
     ] = "XXXX.DUMMY.TOKEN.XXXX",
 ):
-    # Turnstile 验证（仅对非 osu! 客户端）
+    # Turnstile éªŒè¯ï¼ˆä»…å¯¹éž osu! å®¢æˆ·ç«¯ï¼‰
     if settings.enable_turnstile_verification and not user_agent.is_client:
         success, error_msg = await turnstile_service.verify_token(cf_turnstile_response, client_ip)
         logger.info(f"Turnstile verification result: {success}, error_msg: {error_msg}")
@@ -124,11 +284,11 @@ async def register_user(
         return JSONResponse(status_code=422, content={"form_error": errors.model_dump()})
 
     try:
-        # 获取客户端 IP 并查询地理位置
-        country_code = None  # 默认国家代码
+        # èŽ·å–å®¢æˆ·ç«¯ IP å¹¶æŸ¥è¯¢åœ°ç†ä½ç½®
+        country_code = None  # é»˜è®¤å›½å®¶ä»£ç 
 
         try:
-            # 查询 IP 地理位置
+            # æŸ¥è¯¢ IP åœ°ç†ä½ç½®
             geo_info = geoip.lookup(client_ip)
             if geo_info and (country_code := geo_info.get("country_iso")):
                 logger.info(f"User {user_username} registering from {client_ip}, country: {country_code}")
@@ -139,8 +299,8 @@ async def register_user(
         if country_code is None:
             country_code = "CN"
 
-        # 创建新用户
-        # 确保 AUTO_INCREMENT 值从3开始（ID=2是BanchoBot）
+        # åˆ›å»ºæ–°ç”¨æˆ·
+        # ç¡®ä¿ AUTO_INCREMENT å€¼ä»Ž3å¼€å§‹ï¼ˆID=2æ˜¯BanchoBotï¼‰
         result = await db.execute(
             text(
                 "SELECT AUTO_INCREMENT FROM information_schema.TABLES "
@@ -156,7 +316,7 @@ async def register_user(
             username=user_username,
             email=user_email,
             pw_bcrypt=get_password_hash(user_password),
-            priv=1,  # 普通用户权限
+            priv=1,  # æ™®é€šç”¨æˆ·æƒé™
             country_code=country_code,
             join_date=utcnow(),
             last_visit=utcnow(),
@@ -181,10 +341,10 @@ async def register_user(
         await db.commit()
     except Exception:
         await db.rollback()
-        # 打印详细错误信息用于调试
+        # æ‰“å°è¯¦ç»†é”™è¯¯ä¿¡æ¯ç”¨äºŽè°ƒè¯•
         logger.exception(f"Registration error for user {user_username}")
 
-        # 返回通用错误
+        # è¿”å›žé€šç”¨é”™è¯¯
         errors = RegistrationRequestErrors(message="An error occurred while creating your account. Please try again.")
 
         return JSONResponse(status_code=500, content={"form_error": errors.model_dump()})
@@ -193,34 +353,36 @@ async def register_user(
 @router.post(
     "/oauth/token",
     response_model=TokenResponse | ExtendedTokenResponse,
-    name="获取访问令牌",
-    description="OAuth 令牌端点，支持密码、刷新令牌和授权码三种授权方式。",
+    name="èŽ·å–è®¿é—®ä»¤ç‰Œ",
+    description="OAuth ä»¤ç‰Œç«¯ç‚¹ï¼Œæ”¯æŒå¯†ç ã€åˆ·æ–°ä»¤ç‰Œå’ŒæŽˆæƒç ä¸‰ç§æŽˆæƒæ–¹å¼ã€‚",
 )
 async def oauth_token(
     db: Database,
     request: Request,
     user_agent: UserAgentInfo,
     ip_address: IPAddress,
+    verification_service: ClientVerificationService,
     grant_type: Annotated[
         Literal["authorization_code", "refresh_token", "password", "client_credentials"],
-        Form(..., description="授权类型：密码、刷新令牌和授权码三种授权方式。"),
+        Form(..., description="æŽˆæƒç±»åž‹ï¼šå¯†ç ã€åˆ·æ–°ä»¤ç‰Œå’ŒæŽˆæƒç ä¸‰ç§æŽˆæƒæ–¹å¼ã€‚"),
     ],
-    client_id: Annotated[int, Form(..., description="客户端 ID")],
-    client_secret: Annotated[str, Form(..., description="客户端密钥")],
+    client_id: Annotated[int, Form(..., description="å®¢æˆ·ç«¯ ID")],
+    client_secret: Annotated[str, Form(..., description="å®¢æˆ·ç«¯å¯†é’¥")],
     redis: Redis,
     geoip: GeoIPService,
     api_version: APIVersion,
-    code: Annotated[str | None, Form(description="授权码（仅授权码模式需要）")] = None,
-    scope: Annotated[str, Form(description="权限范围（空格分隔，默认为 '*'）")] = "*",
-    username: Annotated[str | None, Form(description="用户名（仅密码模式需要）")] = None,
-    password: Annotated[str | None, Form(description="密码（仅密码模式需要）")] = None,
-    refresh_token: Annotated[str | None, Form(description="刷新令牌（仅刷新令牌模式需要）")] = None,
+    code: Annotated[str | None, Form(description="æŽˆæƒç ï¼ˆä»…æŽˆæƒç æ¨¡å¼éœ€è¦ï¼‰")] = None,
+    version_hash: Annotated[str | None, Form(description="Client version hash (optional)")] = None,
+    scope: Annotated[str, Form(description="æƒé™èŒƒå›´ï¼ˆç©ºæ ¼åˆ†éš”ï¼Œé»˜è®¤ä¸º '*'ï¼‰")] = "*",
+    username: Annotated[str | None, Form(description="ç”¨æˆ·åï¼ˆä»…å¯†ç æ¨¡å¼éœ€è¦ï¼‰")] = None,
+    password: Annotated[str | None, Form(description="å¯†ç ï¼ˆä»…å¯†ç æ¨¡å¼éœ€è¦ï¼‰")] = None,
+    refresh_token: Annotated[str | None, Form(description="åˆ·æ–°ä»¤ç‰Œï¼ˆä»…åˆ·æ–°ä»¤ç‰Œæ¨¡å¼éœ€è¦ï¼‰")] = None,
     web_uuid: Annotated[str | None, Header(include_in_schema=False, alias="X-UUID")] = None,
     cf_turnstile_response: Annotated[
-        str, Form(description="Cloudflare Turnstile 响应 token")
+        str, Form(description="Cloudflare Turnstile å“åº” token")
     ] = "XXXX.DUMMY.TOKEN.XXXX",
 ):
-    # Turnstile 验证（仅对非 osu! 客户端的密码授权模式）
+    # Turnstile éªŒè¯ï¼ˆä»…å¯¹éž osu! å®¢æˆ·ç«¯çš„å¯†ç æŽˆæƒæ¨¡å¼ï¼‰
     if grant_type == "password" and settings.enable_turnstile_verification and not user_agent.is_client:
         logger.debug(
             f"Turnstile check: grant_type={grant_type}, token={cf_turnstile_response[:20]}..., "
@@ -285,15 +447,34 @@ async def oauth_token(
                 hint="Only '*' scope is allowed for password grant type",
             )
 
-        # 验证用户
+        raw_user_agent = request.headers.get("user-agent") or user_agent.raw_ua or ""
+        normalized_version_hash, request_version_hint, observed_hint_keys = await _extract_client_hints_from_request(
+            request,
+            version_hash,
+        )
+        version_validation = None
+        if normalized_version_hash:
+            version_validation = await verification_service.validate_client_version(normalized_version_hash)
+
+        client_label_for_log = _derive_login_client_label(
+            version_validation,
+            raw_user_agent,
+            fallback_display_name=user_agent.displayed_name,
+            version_hint=request_version_hint or "",
+        )
+
+        # éªŒè¯ç”¨æˆ·
         user = await authenticate_user(db, username, password)
         if not user:
-            # 记录失败的登录尝试
+            # è®°å½•å¤±è´¥çš„ç™»å½•å°è¯•
             await LoginLogService.record_failed_login(
                 db=db,
                 request=request,
                 attempted_username=username,
                 login_method="password",
+                user_agent=raw_user_agent,
+                client_hash=normalized_version_hash or None,
+                client_label=client_label_for_log,
                 notes="Invalid credentials",
             )
 
@@ -309,13 +490,36 @@ async def oauth_token(
                 hint="Incorrect sign in",
             )
 
-        # 确保用户对象与当前会话关联
+        # ç¡®ä¿ç”¨æˆ·å¯¹è±¡ä¸Žå½“å‰ä¼šè¯å…³è”
         await db.refresh(user)
 
         user_id = user.id
         totp_key: TotpKeys | None = await user.awaitable_attrs.totp_key
+        if normalized_version_hash:
+            validation = version_validation or await verification_service.validate_client_version(normalized_version_hash)
+            if not any((validation.client_name, validation.version, validation.os)):
+                await verification_service.record_unknown_hash(
+                    normalized_version_hash,
+                    user_agent=raw_user_agent,
+                    user_id=user_id,
+                    source="oauth_token",
+                )
+            try:
+                await redis.set(
+                    LAST_CLIENT_HASH_KEY.format(user_id=user_id),
+                    normalized_version_hash,
+                    ex=60 * 60 * 24 * 120,
+                )
+            except Exception:
+                logger.debug(f"Failed to store login hash for user {user_id}")
+        elif user_agent.is_client:
+            logger.info(
+                "Client login without version hash: "
+                f"user_id={user_id} client_id={client_id} ua={raw_user_agent!r} "
+                f"hint_keys={observed_hint_keys} version_hint={request_version_hint!r}",
+            )
 
-        # 生成令牌
+        # ç”Ÿæˆä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
         access_token = create_access_token(data={"sub": str(user_id)}, expires_delta=access_token_expires)
         refresh_token_str = generate_refresh_token()
@@ -328,36 +532,39 @@ async def oauth_token(
             refresh_token_str,
             settings.access_token_expire_minutes * 60,
             settings.refresh_token_expire_minutes * 60,
-            allow_multiple_devices=settings.enable_multi_device_login,  # 使用配置决定是否启用多设备支持
+            allow_multiple_devices=settings.enable_multi_device_login,  # ä½¿ç”¨é…ç½®å†³å®šæ˜¯å¦å¯ç”¨å¤šè®¾å¤‡æ”¯æŒ
         )
         token_id = token.id
 
-        # 获取国家代码
+        # èŽ·å–å›½å®¶ä»£ç 
         geo_info = geoip.lookup(ip_address)
         country_code = geo_info.get("country_iso", "XX")
 
-        # 检查是否为新位置登录
+        # æ£€æŸ¥æ˜¯å¦ä¸ºæ–°ä½ç½®ç™»å½•
         trusted_device = await LoginSessionService.check_trusted_device(db, user_id, ip_address, user_agent, web_uuid)
 
-        # 根据 osu-web 逻辑确定验证方法：
-        # 1. 如果 API 版本支持 TOTP 且用户启用了 TOTP，则始终要求 TOTP 验证（无论是否为信任设备）
-        # 2. 否则，如果是新设备且启用了邮件验证，则要求邮件验证
-        # 3. 否则，不需要验证或自动验证
+        # æ ¹æ® osu-web é€»è¾‘ç¡®å®šéªŒè¯æ–¹æ³•ï¼š
+        # 1. å¦‚æžœ API ç‰ˆæœ¬æ”¯æŒ TOTP ä¸”ç”¨æˆ·å¯ç”¨äº† TOTPï¼Œåˆ™å§‹ç»ˆè¦æ±‚ TOTP éªŒè¯ï¼ˆæ— è®ºæ˜¯å¦ä¸ºä¿¡ä»»è®¾å¤‡ï¼‰
+        # 2. å¦åˆ™ï¼Œå¦‚æžœæ˜¯æ–°è®¾å¤‡ä¸”å¯ç”¨äº†é‚®ä»¶éªŒè¯ï¼Œåˆ™è¦æ±‚é‚®ä»¶éªŒè¯
+        # 3. å¦åˆ™ï¼Œä¸éœ€è¦éªŒè¯æˆ–è‡ªåŠ¨éªŒè¯
         session_verification_method = None
         if api_version >= SUPPORT_TOTP_VERIFICATION_VER and settings.enable_totp_verification and totp_key is not None:
-            # TOTP 验证优先（参考 osu-web State.php:36）
+            # TOTP éªŒè¯ä¼˜å…ˆï¼ˆå‚è€ƒ osu-web State.php:36ï¼‰
             session_verification_method = "totp"
             await LoginLogService.record_login(
                 db=db,
                 user_id=user_id,
                 request=request,
+                user_agent=raw_user_agent,
+                client_hash=normalized_version_hash or None,
+                client_label=client_label_for_log,
                 login_success=True,
                 login_method="password_pending_verification",
-                notes="需要 TOTP 验证",
+                notes="éœ€è¦ TOTP éªŒè¯",
             )
         elif not trusted_device and settings.enable_email_verification:
-            # 如果是新设备登录，需要邮件验证
-            # 刷新用户对象以确保属性已加载
+            # å¦‚æžœæ˜¯æ–°è®¾å¤‡ç™»å½•ï¼Œéœ€è¦é‚®ä»¶éªŒè¯
+            # åˆ·æ–°ç”¨æˆ·å¯¹è±¡ä»¥ç¡®ä¿å±žæ€§å·²åŠ è½½
             await db.refresh(user)
             session_verification_method = "mail"
             await EmailVerificationService.send_verification_email(
@@ -371,33 +578,39 @@ async def oauth_token(
                 user.country_code,
             )
 
-            # 记录需要二次验证的登录尝试
+            # è®°å½•éœ€è¦äºŒæ¬¡éªŒè¯çš„ç™»å½•å°è¯•
             await LoginLogService.record_login(
                 db=db,
                 user_id=user_id,
                 request=request,
+                user_agent=raw_user_agent,
+                client_hash=normalized_version_hash or None,
+                client_label=client_label_for_log,
                 login_success=True,
                 login_method="password_pending_verification",
                 notes=(
-                    f"邮箱验证: User-Agent: {user_agent.raw_ua}, 客户端: {user_agent.displayed_name} "
-                    f"IP: {ip_address}, 国家: {country_code}"
+                    f"é‚®ç®±éªŒè¯: User-Agent: {user_agent.raw_ua}, å®¢æˆ·ç«¯: {user_agent.displayed_name} "
+                    f"IP: {ip_address}, å›½å®¶: {country_code}"
                 ),
             )
         elif not trusted_device:
-            # 新设备登录但邮件验证功能被禁用，直接标记会话为已验证
+            # æ–°è®¾å¤‡ç™»å½•ä½†é‚®ä»¶éªŒè¯åŠŸèƒ½è¢«ç¦ç”¨ï¼Œç›´æŽ¥æ ‡è®°ä¼šè¯ä¸ºå·²éªŒè¯
             await LoginSessionService.mark_session_verified(
                 db, redis, user_id, token_id, ip_address, user_agent, web_uuid
             )
             logger.debug(f"New location login detected but email verification disabled, auto-verifying user {user_id}")
         else:
-            # 不是新设备登录，正常登录
+            # ä¸æ˜¯æ–°è®¾å¤‡ç™»å½•ï¼Œæ­£å¸¸ç™»å½•
             await LoginLogService.record_login(
                 db=db,
                 user_id=user_id,
                 request=request,
+                user_agent=raw_user_agent,
+                client_hash=normalized_version_hash or None,
+                client_label=client_label_for_log,
                 login_success=True,
                 login_method="password",
-                notes=f"正常登录 - IP: {ip_address}, 国家: {country_code}",
+                notes=f"æ­£å¸¸ç™»å½• - IP: {ip_address}, å›½å®¶: {country_code}",
             )
 
         if session_verification_method:
@@ -419,7 +632,7 @@ async def oauth_token(
         )
 
     elif grant_type == "refresh_token":
-        # 刷新令牌流程
+        # åˆ·æ–°ä»¤ç‰Œæµç¨‹
         if not refresh_token:
             return create_oauth_error_response(
                 error="invalid_request",
@@ -431,7 +644,7 @@ async def oauth_token(
                 hint="Refresh token required",
             )
 
-        # 验证刷新令牌
+        # éªŒè¯åˆ·æ–°ä»¤ç‰Œ
         token_record = await get_token_by_refresh_token(db, refresh_token)
         if not token_record:
             return create_oauth_error_response(
@@ -446,12 +659,12 @@ async def oauth_token(
                 hint="Invalid refresh token",
             )
 
-        # 生成新的访问令牌
+        # ç”Ÿæˆæ–°çš„è®¿é—®ä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
         access_token = create_access_token(data={"sub": str(token_record.user_id)}, expires_delta=access_token_expires)
         new_refresh_token = generate_refresh_token()
 
-        # 更新令牌
+        # æ›´æ–°ä»¤ç‰Œ
         await store_token(
             db,
             token_record.user_id,
@@ -461,7 +674,7 @@ async def oauth_token(
             new_refresh_token,
             settings.access_token_expire_minutes * 60,
             settings.refresh_token_expire_minutes * 60,
-            allow_multiple_devices=settings.enable_multi_device_login,  # 使用配置决定是否启用多设备支持
+            allow_multiple_devices=settings.enable_multi_device_login,  # ä½¿ç”¨é…ç½®å†³å®šæ˜¯å¦å¯ç”¨å¤šè®¾å¤‡æ”¯æŒ
         )
         return TokenResponse(
             access_token=access_token,
@@ -508,16 +721,16 @@ async def oauth_token(
             )
         user, scopes = code_result
 
-        # 确保用户对象与当前会话关联
+        # ç¡®ä¿ç”¨æˆ·å¯¹è±¡ä¸Žå½“å‰ä¼šè¯å…³è”
         await db.refresh(user)
 
-        # 生成令牌
+        # ç”Ÿæˆä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
         user_id = user.id
         access_token = create_access_token(data={"sub": str(user_id)}, expires_delta=access_token_expires)
         refresh_token_str = generate_refresh_token()
 
-        # 存储令牌
+        # å­˜å‚¨ä»¤ç‰Œ
         await store_token(
             db,
             user_id,
@@ -527,10 +740,10 @@ async def oauth_token(
             refresh_token_str,
             settings.access_token_expire_minutes * 60,
             settings.refresh_token_expire_minutes * 60,
-            allow_multiple_devices=settings.enable_multi_device_login,  # 使用配置决定是否启用多设备支持
+            allow_multiple_devices=settings.enable_multi_device_login,  # ä½¿ç”¨é…ç½®å†³å®šæ˜¯å¦å¯ç”¨å¤šè®¾å¤‡æ”¯æŒ
         )
 
-        # 打印jwt
+        # æ‰“å°jwt
         logger.info(f"Generated JWT for user {user_id}: {access_token}")
 
         return TokenResponse(
@@ -560,12 +773,12 @@ async def oauth_token(
                 status_code=400,
             )
 
-        # 生成令牌
+        # ç”Ÿæˆä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
         access_token = create_access_token(data={"sub": "3"}, expires_delta=access_token_expires)
         refresh_token_str = generate_refresh_token()
 
-        # 存储令牌
+        # å­˜å‚¨ä»¤ç‰Œ
         await store_token(
             db,
             BANCHOBOT_ID,
@@ -575,7 +788,7 @@ async def oauth_token(
             refresh_token_str,
             settings.access_token_expire_minutes * 60,
             settings.refresh_token_expire_minutes * 60,
-            allow_multiple_devices=settings.enable_multi_device_login,  # 使用配置决定是否启用多设备支持
+            allow_multiple_devices=settings.enable_multi_device_login,  # ä½¿ç”¨é…ç½®å†³å®šæ˜¯å¦å¯ç”¨å¤šè®¾å¤‡æ”¯æŒ
         )
 
         return TokenResponse(
@@ -589,23 +802,22 @@ async def oauth_token(
 
 @router.post(
     "/password-reset/request",
-    name="请求密码重置",
-    description="通过邮箱请求密码重置验证码",
+    name="è¯·æ±‚å¯†ç é‡ç½®",
+    description="é€šè¿‡é‚®ç®±è¯·æ±‚å¯†ç é‡ç½®éªŒè¯ç ",
 )
 async def request_password_reset(
     request: Request,
-    email: Annotated[str, Form(..., description="邮箱地址")],
-    redis: Redis,
-    ip_address: IPAddress,
+    email: Annotated[str, Form(..., description="é‚®ç®±åœ°å€")],
+    redis: Redis,    verification_service: ClientVerificationService,
     user_agent: UserAgentInfo,
     cf_turnstile_response: Annotated[
-        str, Form(description="Cloudflare Turnstile 响应 token")
+        str, Form(description="Cloudflare Turnstile å“åº” token")
     ] = "XXXX.DUMMY.TOKEN.XXXX",
 ):
     """
-    请求密码重置
+    è¯·æ±‚å¯†ç é‡ç½®
     """
-    # Turnstile 验证（仅对非 osu! 客户端）
+    # Turnstile éªŒè¯ï¼ˆä»…å¯¹éž osu! å®¢æˆ·ç«¯ï¼‰
     if settings.enable_turnstile_verification and not user_agent.is_client:
         success, error_msg = await turnstile_service.verify_token(cf_turnstile_response, ip_address)
         if not success:
@@ -614,10 +826,10 @@ async def request_password_reset(
                 content={"success": False, "error": f"Verification failed: {error_msg}"},
             )
 
-    # 获取客户端信息
+    # èŽ·å–å®¢æˆ·ç«¯ä¿¡æ¯
     user_agent_str = request.headers.get("User-Agent", "")
 
-    # 请求密码重置
+    # è¯·æ±‚å¯†ç é‡ç½®
     success, message = await password_reset_service.request_password_reset(
         email=email.lower().strip(),
         ip_address=ip_address,
@@ -631,19 +843,18 @@ async def request_password_reset(
         return JSONResponse(status_code=400, content={"success": False, "error": message})
 
 
-@router.post("/password-reset/reset", name="重置密码", description="使用验证码重置密码")
+@router.post("/password-reset/reset", name="é‡ç½®å¯†ç ", description="ä½¿ç”¨éªŒè¯ç é‡ç½®å¯†ç ")
 async def reset_password(
-    email: Annotated[str, Form(..., description="邮箱地址")],
-    reset_code: Annotated[str, Form(..., description="重置验证码")],
-    new_password: Annotated[str, Form(..., description="新密码")],
-    redis: Redis,
-    ip_address: IPAddress,
+    email: Annotated[str, Form(..., description="é‚®ç®±åœ°å€")],
+    reset_code: Annotated[str, Form(..., description="é‡ç½®éªŒè¯ç ")],
+    new_password: Annotated[str, Form(..., description="æ–°å¯†ç ")],
+    redis: Redis,    verification_service: ClientVerificationService,
 ):
     """
-    重置密码
+    é‡ç½®å¯†ç 
     """
-    # 获取客户端信息
-    # 重置密码
+    # èŽ·å–å®¢æˆ·ç«¯ä¿¡æ¯
+    # é‡ç½®å¯†ç 
     success, message = await password_reset_service.reset_password(
         email=email.lower().strip(),
         reset_code=reset_code.strip(),
@@ -656,3 +867,4 @@ async def reset_password(
         return JSONResponse(status_code=200, content={"success": True, "message": message})
     else:
         return JSONResponse(status_code=400, content={"success": False, "error": message})
+
