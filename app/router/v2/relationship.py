@@ -44,13 +44,14 @@ async def _ensure_target_exists(db: Database, target: int) -> None:
 async def _transform_user_relation(
     db: Database,
     relationship_type: RelationshipType,
-    current_user: User,
+    current_user_id: int,
     target: int,
+    ruleset=None,
 ) -> dict[str, Any]:
     relationship = (
         await db.exec(
             select(RelationshipTable).where(
-                RelationshipTable.user_id == current_user.id,
+                RelationshipTable.user_id == current_user_id,
                 RelationshipTable.target_id == target,
                 RelationshipTable.type == relationship_type,
             )
@@ -62,7 +63,7 @@ async def _transform_user_relation(
         "user_relation": await RelationshipModel.transform(
             relationship,
             includes=[],
-            ruleset=current_user.playmode,
+            ruleset=ruleset,
         )
     }
 
@@ -75,14 +76,17 @@ async def _upsert_relationship(
 ) -> dict[str, Any]:
     if await current_user.is_restricted(db):
         raise HTTPException(403, "Your account is restricted and cannot perform this action.")
-    if target == current_user.id:
+    current_user_id = current_user.id
+    current_user_ruleset = current_user.playmode
+
+    if target == current_user_id:
         raise HTTPException(422, "Cannot add relationship to yourself")
     await _ensure_target_exists(db, target)
 
     relationship = (
         await db.exec(
             select(RelationshipTable).where(
-                RelationshipTable.user_id == current_user.id,
+                RelationshipTable.user_id == current_user_id,
                 RelationshipTable.target_id == target,
             )
         )
@@ -92,7 +96,7 @@ async def _upsert_relationship(
         relationship.type = relationship_type
     else:
         relationship = RelationshipTable(
-            user_id=current_user.id,
+            user_id=current_user_id,
             target_id=target,
             type=relationship_type,
         )
@@ -104,7 +108,7 @@ async def _upsert_relationship(
             await db.exec(
                 select(RelationshipTable).where(
                     RelationshipTable.user_id == target,
-                    RelationshipTable.target_id == current_user.id,
+                    RelationshipTable.target_id == current_user_id,
                     RelationshipTable.type == RelationshipType.FOLLOW,
                 )
             )
@@ -113,7 +117,7 @@ async def _upsert_relationship(
             await db.delete(reverse_follow)
 
     await db.commit()
-    return await _transform_user_relation(db, relationship_type, current_user, target)
+    return await _transform_user_relation(db, relationship_type, current_user_id, target, current_user_ruleset)
 
 
 async def _delete_relationship(
@@ -207,7 +211,7 @@ async def get_relationship_by_target(
 ):
     relationship_type = _relationship_type_from_path(str(request.url.path))
     await _ensure_target_exists(db, target)
-    return await _transform_user_relation(db, relationship_type, current_user, target)
+    return await _transform_user_relation(db, relationship_type, current_user.id, target, current_user.playmode)
 
 
 @router.post(
