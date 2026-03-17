@@ -346,6 +346,9 @@ def _mods_can_get_pp(ruleset_id: int, mods: list[APIMod], ranked_mods: RankedMod
             od_value = mod.get("settings", {}).get("overall_difficulty")
             if isinstance(od_value, (int, float)) and od_value <= 6:
                 return False
+        # Hard safety rule for mania: Invert is always non-pp.
+        if ruleset_id == 3 and mod["acronym"] == "IN":
+            return False
         if app_settings.enable_rx and mod["acronym"] == "RX" and ruleset_id in {0, 1, 2}:
             continue
         if app_settings.enable_ap and mod["acronym"] == "AP" and ruleset_id == 0:
