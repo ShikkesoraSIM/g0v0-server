@@ -205,7 +205,7 @@ DEFAULT_RANKED_MODS = {
         "EZ": {"retries": {"type": "number", "eq": 2}},
         "NF": {},
         "DA": {
-            "overall_difficulty": {"type": "number", "ge": 6},
+            "overall_difficulty": {"type": "number", "gt": 6},
             "drain_rate": {"check": False, "type": "number"},
             "extended_limits": {"check": False, "type": "boolean"},
         },

@@ -36,7 +36,7 @@ import json
 import httpx
 import hashlib
 from fastapi import File, Form, HTTPException, Query, Security
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_ as sql_or
 from sqlmodel import col, func, select
@@ -1176,7 +1176,16 @@ async def get_blacklisted_beatmaps(
 
 
 class BeatmapBlacklistRequest(BaseModel):
-    beatmapset_id: int
+    beatmapset_id: int | None = None
+    beatmap_id: int | None = None
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if self.beatmapset_id is None and self.beatmap_id is None:
+            raise ValueError("Either beatmapset_id or beatmap_id is required")
+        if self.beatmapset_id is not None and self.beatmap_id is not None:
+            raise ValueError("Provide only one of beatmapset_id or beatmap_id")
+        return self
 
 
 @router.post(
@@ -1190,10 +1199,34 @@ async def add_blacklisted_beatmap(
     request: BeatmapBlacklistRequest,
     user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
 ):
-    """Add a beatmapset to blacklist (admin only)"""
+    """Add a beatmap or beatmapset to blacklist (admin only)"""
     await require_admin(session, user_and_token)
 
+    if request.beatmap_id is not None:
+        beatmap_id = request.beatmap_id
+        beatmap = await session.get(Beatmap, beatmap_id)
+        if not beatmap:
+            raise HTTPException(status_code=404, detail="Beatmap not found")
+
+        existing_banned = (
+            await session.exec(
+                select(BannedBeatmaps).where(BannedBeatmaps.beatmap_id == beatmap_id)
+            )
+        ).first()
+        if existing_banned:
+            raise HTTPException(status_code=400, detail="Beatmap is already blacklisted")
+
+        session.add(BannedBeatmaps(beatmap_id=beatmap_id))
+        await session.commit()
+        return {
+            "beatmap_id": beatmap_id,
+            "beatmapset_id": beatmap.beatmapset_id,
+            "message": "Beatmap added to blacklist",
+        }
+
     beatmapset_id = request.beatmapset_id
+    if beatmapset_id is None:
+        raise HTTPException(status_code=422, detail="beatmapset_id is required")
 
     # Verify beatmapset exists
     beatmapset = await session.get(Beatmapset, beatmapset_id)
@@ -1229,6 +1262,32 @@ async def add_blacklisted_beatmap(
     await session.commit()
 
     return {"beatmapset_id": beatmapset_id, "message": "Beatmapset added to blacklist"}
+
+
+@router.delete(
+    "/admin/beatmaps/blacklist/beatmap/{beatmap_id}",
+    name="ä»Žé»‘åå•ç§»é™¤å•ä¸ªè°±é¢",
+    tags=["ç®¡ç†", "g0v0 API"],
+    status_code=204,
+)
+async def remove_blacklisted_single_beatmap(
+    session: Database,
+    beatmap_id: int,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    """Remove a single beatmap from blacklist (admin only)"""
+    await require_admin(session, user_and_token)
+
+    banned_item = (
+        await session.exec(
+            select(BannedBeatmaps).where(BannedBeatmaps.beatmap_id == beatmap_id)
+        )
+    ).first()
+    if not banned_item:
+        raise HTTPException(status_code=404, detail="Beatmap not in blacklist")
+
+    await session.delete(banned_item)
+    await session.commit()
 
 
 @router.delete(
