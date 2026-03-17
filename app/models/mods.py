@@ -204,6 +204,11 @@ DEFAULT_RANKED_MODS = {
     3: {
         "EZ": {"retries": {"type": "number", "eq": 2}},
         "NF": {},
+        "DA": {
+            "overall_difficulty": {"type": "number", "ge": 6},
+            "drain_rate": {"check": False, "type": "number"},
+            "extended_limits": {"check": False, "type": "boolean"},
+        },
         "HT": {"speed_change": {"type": "number", "eq": 0.75}, "adjust_pitch": {"check": False, "type": "boolean"}},
         "DC": {"speed_change": {"type": "number", "eq": 0.75}},
         "SD": {"restart": {"check": False, "type": "boolean"}},
