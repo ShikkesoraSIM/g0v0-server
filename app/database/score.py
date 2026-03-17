@@ -1190,12 +1190,10 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
         )
         if attrs.star_rating > 14:
             logger.warning(
-                "PP BLOCKED: beatmap star rating %.2f exceeds limit (score_id=%s)",
+                "High star rating detected %.2f (score_id=%s) - continuing PP calc",
                 attrs.star_rating,
                 score.id,
             )
-            score.pp = 0.0
-            return
     except Exception as e:
         # Don't block the PP pipeline if star calc fails; proceed to normal PP calc.
         logger.warning(
@@ -1260,6 +1258,7 @@ async def _process_score_events(score: "Score", session: AsyncSession):
         rank_global=rank_global,
         total_users=total_users,
     )
+    beatmap_url = f"{str(settings.web_url).rstrip('/')}/beatmaps/{score.beatmap_id}"
     if rank_global <= min(math.ceil(float(total_users) * 0.01), 50):
         rank_event = Event(
             created_at=utcnow(),
@@ -1275,7 +1274,7 @@ async def _process_score_events(score: "Score", session: AsyncSession):
                 "title": (
                     f"{score.beatmap.beatmapset.artist} - {score.beatmap.beatmapset.title} [{score.beatmap.version}]"
                 ),
-                "url": score.beatmap.url.replace("https://osu.ppy.sh/", settings.web_url),
+                "url": beatmap_url,
             },
             "user": {
                 "username": score.user.username,
@@ -1317,7 +1316,7 @@ async def _process_score_events(score: "Score", session: AsyncSession):
                         f"{score.beatmap.beatmapset.artist} - {score.beatmap.beatmapset.title} "
                         f"[{score.beatmap.version}]"
                     ),
-                    "url": score.beatmap.url.replace("https://osu.ppy.sh/", settings.web_url),
+                    "url": beatmap_url,
                 },
                 "user": {
                     "username": username,

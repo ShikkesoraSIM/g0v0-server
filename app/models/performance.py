@@ -29,38 +29,42 @@ class OsuPerformanceAttributes(PerformanceAttributes):
     accuracy: float
     flashlight: float
     effective_miss_count: float
-    speed_deviation: float | None
-    combo_based_estimated_miss_count: float
-    score_based_estimated_miss_count: float | None
-    aim_estimated_slider_breaks: float
-    speed_estimated_slider_breaks: float
+    speed_deviation: float | None = None
+    combo_based_estimated_miss_count: float | None = None
+    score_based_estimated_miss_count: float | None = None
+    aim_estimated_slider_breaks: float | None = None
+    speed_estimated_slider_breaks: float | None = None
 
 
 class OsuDifficultyAttributes(DifficultyAttributes):
     aim_difficulty: float = Field(..., description="The difficulty corresponding to the aim skill.")
-    aim_difficult_slider_count: float = Field(..., description="The number of Sliders weighted by difficulty.")
+    aim_difficult_slider_count: float | None = Field(
+        default=None, description="The number of Sliders weighted by difficulty."
+    )
     speed_difficulty: float = Field(..., description="The difficulty corresponding to the speed skill.")
     speed_note_count: float = Field(
         ..., description="The number of clickable objects weighted by difficulty.\nRelated to SpeedDifficulty"
     )
-    flashlight_difficulty: float = Field(..., description="The difficulty corresponding to the flashlight skill.")
+    flashlight_difficulty: float | None = Field(
+        default=None, description="The difficulty corresponding to the flashlight skill."
+    )
     slider_factor: float = Field(
         ...,
         description="Describes how much of AimDifficulty is contributed to by hitcircles or sliders.\nA value closer to 1.0 indicates most of AimDifficulty is contributed by hitcircles.\nA value closer to 0.0 indicates most of AimDifficulty is contributed by sliders.",
     )
-    aim_top_weighted_slider_factor: float = Field(
-        ...,
+    aim_top_weighted_slider_factor: float | None = Field(
+        default=None,
         description="Describes how much of AimDifficultStrainCount is contributed to by hitcircles or sliders\nA value closer to 0.0 indicates most of AimDifficultStrainCount is contributed by hitcircles\nA value closer to Infinity indicates most of AimDifficultStrainCount is contributed by sliders",
     )
-    speed_top_weighted_slider_factor: float = Field(
-        ...,
+    speed_top_weighted_slider_factor: float | None = Field(
+        default=None,
         description="Describes how much of SpeedDifficultStrainCount is contributed to by hitcircles or sliders\nA value closer to 0.0 indicates most of SpeedDifficultStrainCount is contributed by hitcircles\nA value closer to Infinity indicates most of SpeedDifficultStrainCount is contributed by sliders",
     )
     aim_difficult_strain_count: float
     speed_difficult_strain_count: float
-    nested_score_per_object: float
-    legacy_score_base_multiplier: float
-    maximum_legacy_combo_score: float
+    nested_score_per_object: float | None = None
+    legacy_score_base_multiplier: float | None = None
+    maximum_legacy_combo_score: float | None = None
 
 
 class TaikoPerformanceAttributes(PerformanceAttributes):

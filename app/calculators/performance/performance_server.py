@@ -120,7 +120,12 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
                 payload = resp.json()
                 base_mode = score.gamemode.to_base_ruleset()
                 if base_mode == GameMode.OSU:
-                    return TypeAdapter(OsuPerformanceAttributes).validate_python(payload)
+                    try:
+                        return TypeAdapter(OsuPerformanceAttributes).validate_python(payload)
+                    except Exception:
+                        # Some performance-server builds omit advanced osu fields.
+                        # Fallback to generic payload to avoid dropping score PP pipeline.
+                        return TypeAdapter(PerformanceAttributesUnion).validate_python(payload)
                 if base_mode == GameMode.TAIKO:
                     return TypeAdapter(TaikoPerformanceAttributes).validate_python(payload)
                 if base_mode == GameMode.MANIA:
@@ -150,7 +155,11 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
                 payload = resp.json()
                 base_mode = gamemode.to_base_ruleset() if gamemode is not None else None
                 if base_mode == GameMode.OSU:
-                    return TypeAdapter(OsuDifficultyAttributes).validate_python(payload)
+                    try:
+                        return TypeAdapter(OsuDifficultyAttributes).validate_python(payload)
+                    except Exception:
+                        # Keep working with partial osu difficulty payloads.
+                        return TypeAdapter(DifficultyAttributesUnion).validate_python(payload)
                 if base_mode == GameMode.TAIKO:
                     return TypeAdapter(TaikoDifficultyAttributes).validate_python(payload)
                 if base_mode == GameMode.MANIA:
