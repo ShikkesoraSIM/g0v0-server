@@ -13,8 +13,9 @@ from httpx import AsyncClient, HTTPError, Limits
 import redis.asyncio as redis
 
 urls = [
-    "https://osu.direct/api/osu/{beatmap_id}",
     "https://osu.ppy.sh/osu/{beatmap_id}",
+    "https://old.ppy.sh/osu/{beatmap_id}",
+    "https://osu.direct/api/osu/{beatmap_id}",
 ]
 
 logger = fetcher_logger("BeatmapRawFetcher")
@@ -343,19 +344,6 @@ class BeatmapRawFetcher(BaseFetcher):
                     continue
 
                 raw_bytes = resp.content
-                if expected_checksum:
-                    payload_checksum = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest().lower()
-                    if payload_checksum != expected_checksum:
-                        logger.warning(
-                            "Beatmap {} from {}: checksum mismatch (expected {}, got {})",
-                            beatmap_id,
-                            req_url,
-                            expected_checksum,
-                            payload_checksum,
-                        )
-                        last_error = NoBeatmapError("Checksum mismatch")
-                        continue
-
                 body = raw_bytes.decode("utf-8-sig", errors="ignore")
                 if not body or not body.strip():
                     logger.warning(f"Beatmap {beatmap_id} from {req_url}: empty response")
@@ -374,6 +362,31 @@ class BeatmapRawFetcher(BaseFetcher):
                     )
                     last_error = NoBeatmapError("Mismatched BeatmapID")
                     continue
+
+                if expected_checksum:
+                    payload_checksum = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest().lower()
+                    if payload_checksum != expected_checksum:
+                        if is_local:
+                            # Local beatmaps can collide with upstream IDs; checksum must match.
+                            logger.warning(
+                                "Beatmap {} from {}: checksum mismatch for local map (expected {}, got {})",
+                                beatmap_id,
+                                req_url,
+                                expected_checksum,
+                                payload_checksum,
+                            )
+                            last_error = NoBeatmapError("Checksum mismatch")
+                            continue
+
+                        # For upstream maps, checksum can drift when DB metadata is stale.
+                        # Prefer using a valid payload over dropping PP calculation.
+                        logger.warning(
+                            "Beatmap {} from {}: checksum mismatch (expected {}, got {}), accepting payload",
+                            beatmap_id,
+                            req_url,
+                            expected_checksum,
+                            payload_checksum,
+                        )
 
                 logger.debug(f"Successfully fetched beatmap {beatmap_id} from {req_url}")
                 return body

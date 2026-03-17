@@ -483,8 +483,40 @@ def is_2b(hit_objects: list[HitObject]) -> bool:
     return any(hit_objects[i] == hit_objects[i + 1].start_time for i in range(0, len(hit_objects) - 1))
 
 
+def _normalize_colours_section(content: str) -> str:
+    """Normalize malformed [Colours] entries like `Combo1:255,0,0` to `Combo1 : 255,0,0`."""
+    lines = content.splitlines()
+    in_colours = False
+    out: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_colours = stripped.lower() == "[colours]"
+            out.append(line)
+            continue
+
+        if in_colours and stripped and not stripped.startswith("//") and ":" in line and " : " not in line:
+            key, value = line.split(":", 1)
+            line = f"{key.strip()} : {value.strip()}"
+
+        out.append(line)
+
+    return "\n".join(out)
+
+
 def is_suspicious_beatmap(content: str) -> bool:
-    osufile = OsuFile(content=content.encode("utf-8")).parse_file()
+    try:
+        osufile = OsuFile(content=content.encode("utf-8")).parse_file()
+    except Exception:
+        # Some beatmaps contain non-standard [Colours] formatting that osupyparser
+        # can't parse directly. Try once with normalized colours.
+        try:
+            normalized = _normalize_colours_section(content)
+            osufile = OsuFile(content=normalized.encode("utf-8")).parse_file()
+        except Exception:
+            # Don't fail PP calculation because suspicious-check parser is strict.
+            return False
 
     if osufile.hit_objects[-1].start_time - osufile.hit_objects[0].start_time > 24 * 60 * 60 * 1000:
         return True
