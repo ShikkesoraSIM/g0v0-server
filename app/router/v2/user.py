@@ -3,6 +3,7 @@ import copy
 import sys
 from typing import Annotated, Literal
 
+from app.calculator import calculate_pp_weight
 from app.config import settings
 from app.const import BANCHOBOT_ID
 from app.database import (
@@ -660,6 +661,7 @@ async def get_user_scores(
 ):
     is_legacy_api = api_version < 20220705
     show_nsfw_media = await viewer_allows_nsfw_media(current_user)
+    add_weight = type == "best" and not is_legacy_api
     redis = get_redis()
     cache_service = get_user_cache_service(redis)
 
@@ -712,7 +714,6 @@ async def get_user_scores(
 
     elif type == "best":
         where_clause &= exists().where(col(BestScore.score_id) == Score.id)
-        includes.append("weight")
 
         if offset == 0:
             cursor = sys.maxsize, sys.maxsize
@@ -774,6 +775,34 @@ async def get_user_scores(
         )
         for score in scores
     ]
+
+    # Avoid N per-score window-function queries in Score.weight while keeping
+    # identical ranking semantics (including pp ties) as get_best_id().
+    if add_weight and scores:
+        score_ids = [score.id for score in scores]
+        rownum = (
+            func.row_number()
+            .over(partition_by=(col(BestScore.user_id), col(BestScore.gamemode)), order_by=col(BestScore.pp).desc())
+            .label("rn")
+        )
+        ranked_subq = (
+            select(BestScore.score_id.label("score_id"), rownum)
+            .where(BestScore.user_id == db_user.id, BestScore.gamemode == gamemode)
+            .subquery()
+        )
+        ranked_best_scores = (
+            await session.exec(
+                select(ranked_subq.c.score_id, ranked_subq.c.rn).where(ranked_subq.c.score_id.in_(score_ids))
+            )
+        ).all()
+        rank_by_score_id = {score_id: rank for score_id, rank in ranked_best_scores}
+
+        for score, score_resp in zip(scores, score_responses):
+            if not isinstance(score_resp, dict):
+                continue
+            rank = rank_by_score_id.get(score.id)
+            if rank is not None:
+                score_resp["weight"] = calculate_pp_weight(rank - 1)
 
     # 异步缓存结果
     background_task.add_task(
