@@ -323,12 +323,13 @@ async def submit_score(
 
     # _process_user runs in a dedicated session.
     # Commit before re-reading to avoid stale snapshots (e.g. MySQL REPEATABLE READ).
+    response_score_id = score.id
     t_commit2 = time.time()
     await db.commit()
     logger.info(
         "[submit_score] pre-response db.commit done in {:.3f}s score_id={}",
         time.time() - t_commit2,
-        score.id,
+        response_score_id,
     )
 
     # Build response from final score object (after processing).
