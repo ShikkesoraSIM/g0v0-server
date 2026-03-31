@@ -23,6 +23,7 @@ from app.database.user import UserModel
 from app.dependencies.api_version import APIVersion
 from app.dependencies.cache import UserCacheService
 from app.dependencies.database import Database, get_redis
+from app.dependencies.fetcher import get_fetcher
 from app.dependencies.user import get_current_user, get_optional_user
 from app.helpers.asset_proxy_helper import asset_proxy_response
 from app.log import log
@@ -30,6 +31,13 @@ from app.models.mods import API_MODS
 from app.models.beatmap import BeatmapRankStatus
 from app.models.score import GameMode
 from app.models.user import BeatmapsetType
+from app.service.pp_variant_service import (
+    apply_pp_variant_to_score_responses,
+    apply_pp_variant_to_user_response,
+    get_score_pp_variant,
+    get_score_pp_variant_batch,
+    normalize_pp_variant,
+)
 from app.service.user_cache_service import get_user_cache_service
 from app.utils import api_doc, utcnow
 
@@ -74,11 +82,11 @@ async def viewer_allows_nsfw_media(current_user: User | None) -> bool:
 @router.get(
     "/users/",
     responses={
-        200: api_doc("批量获取用户信息", {"users": list[UserModel]}, User.CARD_INCLUDES, name="UsersLookupResponse")
+        200: api_doc("æ‰¹é‡èŽ·å–ç”¨æˆ·ä¿¡æ¯", {"users": list[UserModel]}, User.CARD_INCLUDES, name="UsersLookupResponse")
     },
-    name="批量获取用户信息",
-    description="通过用户 ID 列表批量获取用户信息。",
-    tags=["用户"],
+    name="æ‰¹é‡èŽ·å–ç”¨æˆ·ä¿¡æ¯",
+    description="é€šè¿‡ç”¨æˆ· ID åˆ—è¡¨æ‰¹é‡èŽ·å–ç”¨æˆ·ä¿¡æ¯ã€‚",
+    tags=["ç”¨æˆ·"],
 )
 @router.get("/users/lookup", include_in_schema=False)
 @router.get("/users/lookup/", include_in_schema=False)
@@ -87,11 +95,11 @@ async def get_users(
     session: Database,
     request: Request,
     background_task: BackgroundTasks,
-    user_ids: Annotated[list[int], Query(default_factory=list, alias="ids[]", description="要查询的用户 ID 列表")],
+    user_ids: Annotated[list[int], Query(default_factory=list, alias="ids[]", description="è¦æŸ¥è¯¢çš„ç”¨æˆ· ID åˆ—è¡¨")],
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
     include_variant_statistics: Annotated[
         bool,
-        Query(description="是否包含各模式的统计信息"),
+        Query(description="æ˜¯å¦åŒ…å«å„æ¨¡å¼çš„ç»Ÿè®¡ä¿¡æ¯"),
     ] = False,  # TODO: future use
 ):
     redis = get_redis()
@@ -99,11 +107,11 @@ async def get_users(
     show_nsfw_media = await viewer_allows_nsfw_media(current_user)
 
     if user_ids:
-        # 先尝试从缓存获取
+        # å…ˆå°è¯•ä»Žç¼“å­˜èŽ·å–
         cached_users = []
         uncached_user_ids = []
 
-        for user_id in user_ids[:50]:  # 限制50个
+        for user_id in user_ids[:50]:  # é™åˆ¶50ä¸ª
             # When viewer allows NSFW, bypass cache to avoid stale sanitized payloads.
             if show_nsfw_media:
                 uncached_user_ids.append(user_id)
@@ -114,7 +122,7 @@ async def get_users(
             else:
                 uncached_user_ids.append(user_id)
 
-        # 查询未缓存的用户
+        # æŸ¥è¯¢æœªç¼“å­˜çš„ç”¨æˆ·
         if uncached_user_ids:
             searched_users = (
                 await session.exec(
@@ -122,7 +130,7 @@ async def get_users(
                 )
             ).all()
 
-            # 将查询到的用户添加到缓存并返回
+            # å°†æŸ¥è¯¢åˆ°çš„ç”¨æˆ·æ·»åŠ åˆ°ç¼“å­˜å¹¶è¿”å›ž
             for searched_user in searched_users:
                 if searched_user.id != BANCHOBOT_ID:
                     canonical_user_resp = await UserModel.transform(
@@ -157,16 +165,16 @@ async def get_users(
 
 @router.get(
     "/users/{user_id}/recent_activity",
-    tags=["用户"],
+    tags=["ç”¨æˆ·"],
     response_model=list[Event],
-    name="获取用户最近活动",
-    description="获取用户在最近 30 天内的活动日志。",
+    name="èŽ·å–ç”¨æˆ·æœ€è¿‘æ´»åŠ¨",
+    description="èŽ·å–ç”¨æˆ·åœ¨æœ€è¿‘ 30 å¤©å†…çš„æ´»åŠ¨æ—¥å¿—ã€‚",
 )
 async def get_user_events(
     session: Database,
-    user_id: Annotated[int, Path(description="用户 ID")],
-    limit: Annotated[int, Query(description="限制返回的活动数量")] = 50,
-    offset: Annotated[int | None, Query(description="活动日志的偏移量")] = None,
+    user_id: Annotated[int, Path(description="ç”¨æˆ· ID")],
+    limit: Annotated[int, Query(description="é™åˆ¶è¿”å›žçš„æ´»åŠ¨æ•°é‡")] = 50,
+    offset: Annotated[int | None, Query(description="æ´»åŠ¨æ—¥å¿—çš„åç§»é‡")] = None,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
     db_user = await session.get(User, user_id)
@@ -206,60 +214,60 @@ async def get_user_events(
 @router.get(
     "/users/{user_id}/kudosu",
     response_model=list,
-    name="获取用户 kudosu 记录",
-    description="获取指定用户的 kudosu 记录。TODO: 可能会实现",
-    tags=["用户"],
+    name="èŽ·å–ç”¨æˆ· kudosu è®°å½•",
+    description="èŽ·å–æŒ‡å®šç”¨æˆ·çš„ kudosu è®°å½•ã€‚TODO: å¯èƒ½ä¼šå®žçŽ°",
+    tags=["ç”¨æˆ·"],
 )
 async def get_user_kudosu(
     session: Database,
-    user_id: Annotated[int, Path(description="用户 ID")],
-    offset: Annotated[int, Query(description="偏移量")] = 0,
-    limit: Annotated[int, Query(description="返回记录数量限制")] = 6,
+    user_id: Annotated[int, Path(description="ç”¨æˆ· ID")],
+    offset: Annotated[int, Query(description="åç§»é‡")] = 0,
+    limit: Annotated[int, Query(description="è¿”å›žè®°å½•æ•°é‡é™åˆ¶")] = 6,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
     """
-    获取用户的 kudosu 记录
+    èŽ·å–ç”¨æˆ·çš„ kudosu è®°å½•
 
-    TODO: 可能会实现
-    目前返回空数组作为占位符
+    TODO: å¯èƒ½ä¼šå®žçŽ°
+    ç›®å‰è¿”å›žç©ºæ•°ç»„ä½œä¸ºå ä½ç¬¦
     """
-    # 验证用户是否存在
+    # éªŒè¯ç”¨æˆ·æ˜¯å¦å­˜åœ¨
     db_user = await session.get(User, user_id)
     if db_user is None or not await visible_to_current_user(db_user, current_user, session):
         raise HTTPException(404, "User not found")
 
-    # TODO: 实现 kudosu 记录获取逻辑
+    # TODO: å®žçŽ° kudosu è®°å½•èŽ·å–é€»è¾‘
     return []
 
 
 @router.get(
     "/users/{user_id}/beatmaps-passed",
-    name="获取用户已通过谱面",
-    description="获取指定用户在给定谱面集中的已通过谱面列表。",
-    tags=["用户"],
+    name="èŽ·å–ç”¨æˆ·å·²é€šè¿‡è°±é¢",
+    description="èŽ·å–æŒ‡å®šç”¨æˆ·åœ¨ç»™å®šè°±é¢é›†ä¸­çš„å·²é€šè¿‡è°±é¢åˆ—è¡¨ã€‚",
+    tags=["ç”¨æˆ·"],
     responses={
-        200: api_doc("用户已通过谱面列表", {"beatmaps_passed": list[BeatmapModel]}, name="BeatmapsPassedResponse")
+        200: api_doc("ç”¨æˆ·å·²é€šè¿‡è°±é¢åˆ—è¡¨", {"beatmaps_passed": list[BeatmapModel]}, name="BeatmapsPassedResponse")
     },
 )
 @asset_proxy_response
 async def get_user_beatmaps_passed(
     session: Database,
-    user_id: Annotated[int, Path(description="用户 ID")],
+    user_id: Annotated[int, Path(description="ç”¨æˆ· ID")],
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
     beatmapset_ids: Annotated[
         list[int],
         Query(
             alias="beatmapset_ids[]",
-            description="要查询的谱面集 ID 列表 (最多 50 个)",
+            description="è¦æŸ¥è¯¢çš„è°±é¢é›† ID åˆ—è¡¨ (æœ€å¤š 50 ä¸ª)",
         ),
     ] = [],
     ruleset_id: Annotated[
         int | None,
-        Query(description="指定 ruleset ID"),
+        Query(description="æŒ‡å®š ruleset ID"),
     ] = None,
-    exclude_converts: Annotated[bool, Query(description="是否排除转谱成绩")] = False,
-    is_legacy: Annotated[bool | None, Query(description="是否仅返回 Stable 成绩")] = None,
-    no_diff_reduction: Annotated[bool, Query(description="是否排除减难 MOD 成绩")] = True,
+    exclude_converts: Annotated[bool, Query(description="æ˜¯å¦æŽ’é™¤è½¬è°±æˆç»©")] = False,
+    is_legacy: Annotated[bool | None, Query(description="æ˜¯å¦ä»…è¿”å›ž Stable æˆç»©")] = None,
+    no_diff_reduction: Annotated[bool, Query(description="æ˜¯å¦æŽ’é™¤å‡éš¾ MOD æˆç»©")] = True,
 ):
     if not beatmapset_ids:
         return {"beatmaps_passed": []}
@@ -327,30 +335,32 @@ async def get_user_beatmaps_passed(
 
 @router.get(
     "/users/{user_id}/{ruleset}",
-    name="获取用户信息(指定ruleset)",
-    description="通过用户 ID 或用户名获取单个用户的详细信息，并指定特定 ruleset。",
-    tags=["用户"],
+    name="èŽ·å–ç”¨æˆ·ä¿¡æ¯(æŒ‡å®šruleset)",
+    description="é€šè¿‡ç”¨æˆ· ID æˆ–ç”¨æˆ·åèŽ·å–å•ä¸ªç”¨æˆ·çš„è¯¦ç»†ä¿¡æ¯ï¼Œå¹¶æŒ‡å®šç‰¹å®š rulesetã€‚",
+    tags=["ç”¨æˆ·"],
     responses={
-        200: api_doc("用户信息", UserModel, User.USER_INCLUDES),
+        200: api_doc("ç”¨æˆ·ä¿¡æ¯", UserModel, User.USER_INCLUDES),
     },
 )
 @asset_proxy_response
 async def get_user_info_ruleset(
     session: Database,
     background_task: BackgroundTasks,
-    user_id: Annotated[str, Path(description="用户 ID 或用户名")],
-    ruleset: Annotated[GameMode | None, Path(description="指定 ruleset")],
+    user_id: Annotated[str, Path(description="ç”¨æˆ· ID æˆ–ç”¨æˆ·å")],
+    ruleset: Annotated[GameMode | None, Path(description="æŒ‡å®š ruleset")],
+    pp_variant: Annotated[str | None, Query(description="pp variant: stable / pp_dev")] = None,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
     ruleset = _normalize_user_mode(ruleset)
+    resolved_pp_variant = normalize_pp_variant(pp_variant)
     redis = get_redis()
     cache_service = get_user_cache_service(redis)
     show_nsfw_media = await viewer_allows_nsfw_media(current_user)
 
-    # 如果是数字ID，先尝试从缓存获取（cache stores canonical payload）
+    # å¦‚æžœæ˜¯æ•°å­—IDï¼Œå…ˆå°è¯•ä»Žç¼“å­˜èŽ·å–ï¼ˆcache stores canonical payloadï¼‰
     if user_id.isdigit():
         user_id_int = int(user_id)
-        cached_user = await cache_service.get_user_from_cache(user_id_int, ruleset)
+        cached_user = await cache_service.get_user_from_cache(user_id_int, ruleset, resolved_pp_variant)
         if cached_user and "statistics" in cached_user:
             return UserModel.apply_nsfw_media_policy(copy.deepcopy(cached_user), show_nsfw_media)
 
@@ -374,21 +384,35 @@ async def get_user_info_ruleset(
         ruleset=ruleset,
         show_nsfw_media=True,
     )
+
+    if resolved_pp_variant == "pp_dev":
+        fetcher = await get_fetcher()
+        await apply_pp_variant_to_user_response(
+            session=session,
+            user_resp=canonical_user_resp,
+            user_id=searched_user.id,
+            mode=ruleset or searched_user.playmode,
+            pp_variant=resolved_pp_variant,
+            redis=redis,
+            fetcher=fetcher,
+            country_code=searched_user.country_code,
+        )
+
     user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
 
-    # 异步缓存 canonical result
-    background_task.add_task(cache_service.cache_user, canonical_user_resp, ruleset)
+    # å¼‚æ­¥ç¼“å­˜ canonical result
+    background_task.add_task(cache_service.cache_user, canonical_user_resp, ruleset, None, resolved_pp_variant)
     return user_resp
 
 
 @router.get("/users/{user_id}/", include_in_schema=False)
 @router.get(
     "/users/{user_id}",
-    name="获取用户信息",
-    description="通过用户 ID 或用户名获取单个用户的详细信息。",
-    tags=["用户"],
+    name="èŽ·å–ç”¨æˆ·ä¿¡æ¯",
+    description="é€šè¿‡ç”¨æˆ· ID æˆ–ç”¨æˆ·åèŽ·å–å•ä¸ªç”¨æˆ·çš„è¯¦ç»†ä¿¡æ¯ã€‚",
+    tags=["ç”¨æˆ·"],
     responses={
-        200: api_doc("用户信息", UserModel, User.USER_INCLUDES),
+        200: api_doc("ç”¨æˆ·ä¿¡æ¯", UserModel, User.USER_INCLUDES),
     },
 )
 @asset_proxy_response
@@ -396,17 +420,19 @@ async def get_user_info(
     background_task: BackgroundTasks,
     session: Database,
     request: Request,
-    user_id: Annotated[str, Path(description="用户 ID 或用户名")],
+    user_id: Annotated[str, Path(description="ç”¨æˆ· ID æˆ–ç”¨æˆ·å")],
+    pp_variant: Annotated[str | None, Query(description="pp variant: stable / pp_dev")] = None,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
+    resolved_pp_variant = normalize_pp_variant(pp_variant)
     redis = get_redis()
     cache_service = get_user_cache_service(redis)
     show_nsfw_media = await viewer_allows_nsfw_media(current_user)
 
-    # 如果是数字ID，先尝试从缓存获取（cache stores canonical payload）
+    # å¦‚æžœæ˜¯æ•°å­—IDï¼Œå…ˆå°è¯•ä»Žç¼“å­˜èŽ·å–ï¼ˆcache stores canonical payloadï¼‰
     if user_id.isdigit():
         user_id_int = int(user_id)
-        cached_user = await cache_service.get_user_from_cache(user_id_int)
+        cached_user = await cache_service.get_user_from_cache(user_id_int, None, resolved_pp_variant)
         if cached_user and "statistics" in cached_user:
             return UserModel.apply_nsfw_media_policy(copy.deepcopy(cached_user), show_nsfw_media)
 
@@ -429,10 +455,24 @@ async def get_user_info(
         includes=User.USER_INCLUDES,
         show_nsfw_media=True,
     )
+
+    if resolved_pp_variant == "pp_dev":
+        fetcher = await get_fetcher()
+        await apply_pp_variant_to_user_response(
+            session=session,
+            user_resp=canonical_user_resp,
+            user_id=searched_user.id,
+            mode=searched_user.playmode,
+            pp_variant=resolved_pp_variant,
+            redis=redis,
+            fetcher=fetcher,
+            country_code=searched_user.country_code,
+        )
+
     user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
 
-    # 异步缓存 canonical result
-    background_task.add_task(cache_service.cache_user, canonical_user_resp)
+    # å¼‚æ­¥ç¼“å­˜ canonical result
+    background_task.add_task(cache_service.cache_user, canonical_user_resp, None, None, resolved_pp_variant)
     return user_resp
 
 
@@ -466,12 +506,12 @@ def _ensure_beatmapset_status(item: dict, beatmapset_type: BeatmapsetType) -> di
 
 @router.get(
     "/users/{user_id}/beatmapsets/{type}",
-    name="获取用户谱面集列表",
-    description="获取指定用户特定类型的谱面集列表，如最常游玩、收藏等。",
-    tags=["用户"],
+    name="èŽ·å–ç”¨æˆ·è°±é¢é›†åˆ—è¡¨",
+    description="èŽ·å–æŒ‡å®šç”¨æˆ·ç‰¹å®šç±»åž‹çš„è°±é¢é›†åˆ—è¡¨ï¼Œå¦‚æœ€å¸¸æ¸¸çŽ©ã€æ”¶è—ç­‰ã€‚",
+    tags=["ç”¨æˆ·"],
     responses={
         200: api_doc(
-            "当类型为 `most_played` 时返回 `list[BeatmapPlaycountsModel]`，其他为 `list[BeatmapsetModel]`",
+            "å½“ç±»åž‹ä¸º `most_played` æ—¶è¿”å›ž `list[BeatmapPlaycountsModel]`ï¼Œå…¶ä»–ä¸º `list[BeatmapsetModel]`",
             list[BeatmapsetModel] | list[BeatmapPlaycountsModel],
             beatmapset_includes,
         )
@@ -482,13 +522,13 @@ async def get_user_beatmapsets(
     session: Database,
     background_task: BackgroundTasks,
     cache_service: UserCacheService,
-    user_id: Annotated[int, Path(description="用户 ID")],
-    type: Annotated[BeatmapsetType, Path(description="谱面集类型")],
+    user_id: Annotated[int, Path(description="ç”¨æˆ· ID")],
+    type: Annotated[BeatmapsetType, Path(description="è°±é¢é›†ç±»åž‹")],
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
-    limit: Annotated[int, Query(ge=1, le=1000, description="返回条数 (1-1000)")] = 100,
-    offset: Annotated[int, Query(ge=0, description="偏移量")] = 0,
+    limit: Annotated[int, Query(ge=1, le=1000, description="è¿”å›žæ¡æ•° (1-1000)")] = 100,
+    offset: Annotated[int, Query(ge=0, description="åç§»é‡")] = 0,
 ):
-    # 先尝试从缓存获取
+    # å…ˆå°è¯•ä»Žç¼“å­˜èŽ·å–
     cached_result = await cache_service.get_user_beatmapsets_from_cache(user_id, type.value, limit, offset)
     if cached_result is not None:
         return cached_result
@@ -621,7 +661,7 @@ async def get_user_beatmapsets(
     else:
         raise HTTPException(400, detail="Invalid beatmapset type")
 
-    # 异步缓存结果
+    # å¼‚æ­¥ç¼“å­˜ç»“æžœ
     async def cache_beatmapsets():
         try:
             await cache_service.cache_user_beatmapsets(user_id, type.value, resp, limit, offset)
@@ -635,31 +675,35 @@ async def get_user_beatmapsets(
 
 @router.get(
     "/users/{user_id}/scores/{type}",
-    name="获取用户成绩列表",
+    name="èŽ·å–ç”¨æˆ·æˆç»©åˆ—è¡¨",
     description=(
-        "获取用户特定类型的成绩列表，如最好成绩、最近成绩等。\n\n"
-        "如果 `x-api-version >= 20220705`，返回值为 `ScoreResp`列表，"
-        "否则为 `LegacyScoreResp`列表。"
+        "èŽ·å–ç”¨æˆ·ç‰¹å®šç±»åž‹çš„æˆç»©åˆ—è¡¨ï¼Œå¦‚æœ€å¥½æˆç»©ã€æœ€è¿‘æˆç»©ç­‰ã€‚\n\n"
+        "å¦‚æžœ `x-api-version >= 20220705`ï¼Œè¿”å›žå€¼ä¸º `ScoreResp`åˆ—è¡¨ï¼Œ"
+        "å¦åˆ™ä¸º `LegacyScoreResp`åˆ—è¡¨ã€‚"
     ),
-    tags=["用户"],
+    tags=["ç”¨æˆ·"],
 )
 @asset_proxy_response
 async def get_user_scores(
     session: Database,
     api_version: APIVersion,
     background_task: BackgroundTasks,
-    user_id: Annotated[int, Path(description="用户 ID")],
+    user_id: Annotated[int, Path(description="ç”¨æˆ· ID")],
     type: Annotated[
         Literal["best", "recent", "firsts", "pinned"],
-        Path(description=("成绩类型: best 最好成绩 / recent 最近 24h 游玩成绩 / firsts 第一名成绩 / pinned 置顶成绩")),
+        Path(description=("æˆç»©ç±»åž‹: best æœ€å¥½æˆç»© / recent æœ€è¿‘ 24h æ¸¸çŽ©æˆç»© / firsts ç¬¬ä¸€åæˆç»© / pinned ç½®é¡¶æˆç»©")),
     ],
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
-    legacy_only: Annotated[bool, Query(description="是否只查询 Stable 成绩")] = False,
-    include_fails: Annotated[bool, Query(description="是否包含失败的成绩")] = False,
-    mode: Annotated[GameMode | None, Query(description="指定 ruleset (可选，默认为用户主模式)")] = None,
-    limit: Annotated[int, Query(ge=1, le=1000, description="返回条数 (1-1000)")] = 100,
-    offset: Annotated[int, Query(ge=0, description="偏移量")] = 0,
+    legacy_only: Annotated[bool, Query(description="æ˜¯å¦åªæŸ¥è¯¢ Stable æˆç»©")] = False,
+    include_fails: Annotated[bool, Query(description="æ˜¯å¦åŒ…å«å¤±è´¥çš„æˆç»©")] = False,
+    mode: Annotated[GameMode | None, Query(description="æŒ‡å®š ruleset (å¯é€‰ï¼Œé»˜è®¤ä¸ºç”¨æˆ·ä¸»æ¨¡å¼)")] = None,
+    limit: Annotated[int, Query(ge=1, le=1000, description="è¿”å›žæ¡æ•° (1-1000)")] = 100,
+    offset: Annotated[int, Query(ge=0, description="åç§»é‡")] = 0,
+    pp_variant: Annotated[str | None, Query(description="pp variant: stable / pp_dev")] = None,
 ):
+    resolved_pp_variant = normalize_pp_variant(pp_variant)
+    use_pp_dev_variant = resolved_pp_variant == "pp_dev"
+
     is_legacy_api = api_version < 20220705
     show_nsfw_media = await viewer_allows_nsfw_media(current_user)
     add_weight = type == "best" and not is_legacy_api
@@ -671,7 +715,14 @@ async def get_user_scores(
     # longer TTL lowers DB pressure without changing the eventual result.
     cache_expire = 20 if type == "recent" else max(settings.user_scores_cache_expire_seconds, 300)
     cached_scores = await cache_service.get_user_scores_from_cache(
-        user_id, type, include_fails, mode, limit, offset, is_legacy_api
+        user_id,
+        type,
+        include_fails,
+        mode,
+        limit,
+        offset,
+        is_legacy_api,
+        resolved_pp_variant,
     )
     if cached_scores is not None:
         return cached_scores
@@ -690,7 +741,10 @@ async def get_user_scores(
     if not include_fails:
         where_clause &= col(Score.passed).is_(True)
 
-    scores = []
+    scores: list[Score] = []
+    pp_dev_rank_by_score_id: dict[int, int] | None = None
+    pp_dev_by_score_id: dict[int, float] = {}
+
     if type == "pinned":
         where_clause &= Score.pinned_order > 0
         if offset == 0:
@@ -721,32 +775,78 @@ async def get_user_scores(
             ).all()
 
     elif type == "best":
-        where_clause &= exists().where(col(BestScore.score_id) == Score.id)
-
-        if offset == 0:
-            cursor = sys.maxsize, sys.maxsize
-        else:
-            cursor = (
-                await session.exec(
-                    select(Score.pp, Score.id)
-                    .where(where_clause)
-                    .order_by(col(Score.pp).desc(), col(Score.id).desc())
-                    .limit(1)
-                    .offset(offset - 1)
-                )
-            ).first()
-        if cursor:
-            cursor_pp, cursor_id = cursor
-            where_clause &= tuple_(col(Score.pp), col(Score.id)) < tuple_(cursor_pp, cursor_id)
-            scores = (
+        if use_pp_dev_variant:
+            fetcher = await get_fetcher()
+            # Recalculate at least the currently viewed page to avoid "stable-looking" top plays.
+            pp_dev_recalc_limit = min(max(offset + limit, 100), 300)
+            # Mirror pp-dev ranking from canonical best-score rows to keep variant queries responsive.
+            candidate_scores = (
                 await session.exec(
                     select(Score)
                     .options(*eager_score_relations)
-                    .where(where_clause)
-                    .order_by(col(Score.pp).desc(), col(Score.id).desc())
-                    .limit(limit)
+                    .where(
+                        col(Score.user_id) == db_user.id,
+                        col(Score.gamemode) == gamemode,
+                        col(Score.passed).is_(True),
+                        col(Score.ranked).is_(True),
+                        exists().where(col(BestScore.score_id) == Score.id),
+                    )
                 )
             ).all()
+
+            best_by_beatmap: dict[int, tuple[Score, float]] = {}
+            ordered_candidates = sorted(candidate_scores, key=lambda s: (float(s.pp or 0.0), s.id), reverse=True)
+            pp_by_candidate_id = await get_score_pp_variant_batch(
+                session=session,
+                scores=ordered_candidates,
+                pp_variant=resolved_pp_variant,
+                redis=redis,
+                fetcher=fetcher,
+                recalc_top_n=pp_dev_recalc_limit,
+            )
+
+            for candidate in ordered_candidates:
+                pp_value = float(pp_by_candidate_id.get(candidate.id, float(candidate.pp or 0.0)))
+                if pp_value <= 0:
+                    continue
+                previous = best_by_beatmap.get(candidate.beatmap_id)
+                if previous is None or pp_value > previous[1] or (pp_value == previous[1] and candidate.id > previous[0].id):
+                    best_by_beatmap[candidate.beatmap_id] = (candidate, pp_value)
+
+            ranked_best = sorted(best_by_beatmap.values(), key=lambda item: (item[1], item[0].id), reverse=True)
+            pp_dev_rank_by_score_id = {score.id: index + 1 for index, (score, _pp) in enumerate(ranked_best)}
+            for score, pp_value in ranked_best:
+                pp_dev_by_score_id[score.id] = float(pp_value)
+
+            paged_best = ranked_best[offset : offset + limit]
+            scores = [score for score, _pp in paged_best]
+        else:
+            where_clause &= exists().where(col(BestScore.score_id) == Score.id)
+
+            if offset == 0:
+                cursor = sys.maxsize, sys.maxsize
+            else:
+                cursor = (
+                    await session.exec(
+                        select(Score.pp, Score.id)
+                        .where(where_clause)
+                        .order_by(col(Score.pp).desc(), col(Score.id).desc())
+                        .limit(1)
+                        .offset(offset - 1)
+                    )
+                ).first()
+            if cursor:
+                cursor_pp, cursor_id = cursor
+                where_clause &= tuple_(col(Score.pp), col(Score.id)) < tuple_(cursor_pp, cursor_id)
+                scores = (
+                    await session.exec(
+                        select(Score)
+                        .options(*eager_score_relations)
+                        .where(where_clause)
+                        .order_by(col(Score.pp).desc(), col(Score.id).desc())
+                        .limit(limit)
+                    )
+                ).all()
 
     elif type == "recent":
         where_clause &= Score.ended_at > utcnow() - timedelta(hours=24)
@@ -789,9 +889,28 @@ async def get_user_scores(
         for score in scores
     ]
 
-    # Avoid N per-score window-function queries in Score.weight while keeping
-    # identical ranking semantics (including pp ties) as get_best_id().
-    if add_weight and scores:
+    if use_pp_dev_variant and scores:
+        fetcher = await get_fetcher()
+        if not pp_dev_by_score_id:
+            for score in scores:
+                pp_dev_by_score_id[score.id] = await get_score_pp_variant(
+                    session=session,
+                    score=score,
+                    pp_variant=resolved_pp_variant,
+                    redis=redis,
+                    fetcher=fetcher,
+                )
+
+        apply_pp_variant_to_score_responses(
+            scores=scores,
+            score_responses=score_responses,
+            pp_by_score_id=pp_dev_by_score_id,
+            add_weight=add_weight,
+            rank_by_score_id=pp_dev_rank_by_score_id,
+        )
+    elif add_weight and scores:
+        # Avoid N per-score window-function queries in Score.weight while keeping
+        # identical ranking semantics (including pp ties) as get_best_id().
         score_ids = [score.id for score in scores]
         rownum = (
             func.row_number()
@@ -817,7 +936,7 @@ async def get_user_scores(
             if rank is not None:
                 score_resp["weight"] = calculate_pp_weight(rank - 1)
 
-    # 异步缓存结果
+    # å¼‚æ­¥ç¼“å­˜ç»“æžœ
     background_task.add_task(
         cache_service.cache_user_scores,
         user_id,
@@ -829,6 +948,10 @@ async def get_user_scores(
         offset,
         cache_expire,
         is_legacy_api,
+        resolved_pp_variant,
     )
 
     return score_responses
+
+
+

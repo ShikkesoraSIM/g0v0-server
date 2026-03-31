@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 logger = log("Calculator")
 
 CALCULATOR: PerformanceCalculator | None = None
+PP_DEV_CALCULATOR: PerformanceCalculator | None = None
+PP_DEV_CALCULATOR_INIT_FAILED = False
 
 
 async def init_calculator():
@@ -48,6 +50,34 @@ def get_calculator() -> PerformanceCalculator:
     if CALCULATOR is None:
         raise RuntimeError("Performance calculator is not initialized")
     return CALCULATOR
+
+
+async def get_pp_dev_calculator() -> PerformanceCalculator | None:
+    """Return the calculator used for pp-dev variant evaluation.
+
+    This is intentionally isolated from the stable calculator so pp-dev can
+    target a different backend/runtime without affecting score submission.
+    """
+    global PP_DEV_CALCULATOR
+    global PP_DEV_CALCULATOR_INIT_FAILED
+
+    if PP_DEV_CALCULATOR is not None:
+        return PP_DEV_CALCULATOR
+    if PP_DEV_CALCULATOR_INIT_FAILED:
+        return None
+
+    try:
+        module = importlib.import_module(f"app.calculators.performance.{settings.pp_dev_calculator}")
+        PP_DEV_CALCULATOR = module.PerformanceCalculator(**settings.pp_dev_calculator_config)
+        await PP_DEV_CALCULATOR.init()
+        return PP_DEV_CALCULATOR
+    except Exception as e:
+        PP_DEV_CALCULATOR_INIT_FAILED = True
+        logger.warning(
+            f"Failed to initialize pp-dev calculator ({settings.pp_dev_calculator}), "
+            f"falling back to stable pp: {e}"
+        )
+        return None
 
 
 def clamp[T: int | float](n: T, min_value: T, max_value: T) -> T:
@@ -130,7 +160,12 @@ def calculate_pp_for_no_calculator(score: "Score", star_rating: float) -> float:
         return pmax * (b + (1 - b) * exp_part)
 
 
-async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> float:
+async def calculate_pp(
+    score: "Score",
+    beatmap: str,
+    session: AsyncSession,
+    calculator_override: PerformanceCalculator | None = None,
+) -> float:
     from app.database.beatmap import BannedBeatmaps, Beatmap
 
     db_beatmap = await session.get(Beatmap, score.beatmap_id)
@@ -151,13 +186,14 @@ async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> f
         except Exception:
             logger.exception(f"Error checking if beatmap {score.beatmap_id} is suspicious")
 
+    calculator = calculator_override or get_calculator()
     base_mode = score.gamemode.to_base_ruleset()
     if settings.mania_pp_rework == "sunny_wip" and base_mode == GameMode.MANIA:
         star_rating = -1.0
         diff_attrs = None
-        if await get_calculator().can_calculate_difficulty(score.gamemode):
+        if await calculator.can_calculate_difficulty(score.gamemode):
             try:
-                diff_attrs = await get_calculator().calculate_difficulty(beatmap, score.mods, score.gamemode)
+                diff_attrs = await calculator.calculate_difficulty(beatmap, score.mods, score.gamemode)
                 star_rating = diff_attrs.star_rating
             except Exception:
                 logger.exception(f"Failed to calculate difficulty for sunny mania pp ({score.id=}, {score.beatmap_id=})")
@@ -169,17 +205,17 @@ async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> f
                 star_rating = (await score.awaitable_attrs.beatmap).difficulty_rating
 
         pp = calculate_sunny_mania_pp(star_rating, score, diff_attrs=diff_attrs)
-    elif not (await get_calculator().can_calculate_performance(score.gamemode)):
+    elif not (await calculator.can_calculate_performance(score.gamemode)):
         if not settings.fallback_no_calculator_pp:
             return 0
         star_rating = -1
-        if await get_calculator().can_calculate_difficulty(score.gamemode):
-            star_rating = (await get_calculator().calculate_difficulty(beatmap, score.mods, score.gamemode)).star_rating
+        if await calculator.can_calculate_difficulty(score.gamemode):
+            star_rating = (await calculator.calculate_difficulty(beatmap, score.mods, score.gamemode)).star_rating
         if star_rating < 0:
             star_rating = (await score.awaitable_attrs.beatmap).difficulty_rating
         pp = calculate_pp_for_no_calculator(score, star_rating)
     else:
-        attrs = await get_calculator().calculate_performance(beatmap, score)
+        attrs = await calculator.calculate_performance(beatmap, score)
         pp = attrs.pp
 
     if settings.suspicious_score_check and not is_local_beatmap and (pp > 3000):
@@ -194,16 +230,20 @@ async def calculate_pp(score: "Score", beatmap: str, session: AsyncSession) -> f
 
 
 async def pre_fetch_and_calculate_pp(
-    score: "Score", session: AsyncSession, redis: Redis, fetcher: "Fetcher"
+    score: "Score",
+    session: AsyncSession,
+    redis: Redis,
+    fetcher: "Fetcher",
+    calculator_override: PerformanceCalculator | None = None,
 ) -> tuple[float, bool]:
     """
-    优化版PP计算：预先获取beatmap文件并使用缓存
+    ä¼˜åŒ–ç‰ˆPPè®¡ç®—ï¼šé¢„å…ˆèŽ·å–beatmapæ–‡ä»¶å¹¶ä½¿ç”¨ç¼“å­˜
     """
     from app.database.beatmap import BannedBeatmaps
 
     beatmap_id = score.beatmap_id
 
-    # 快速检查是否被封禁
+    # å¿«é€Ÿæ£€æŸ¥æ˜¯å¦è¢«å°ç¦
     if settings.suspicious_score_check:
         beatmap_banned = (
             await session.exec(select(exists()).where(col(BannedBeatmaps.beatmap_id) == beatmap_id))
@@ -253,10 +293,10 @@ async def pre_fetch_and_calculate_pp(
         logger.error(f"Failed to fetch beatmap {beatmap_id}: {e}")
         return 0, False
 
-    # 在获取文件的同时，可以检查可疑beatmap
+    # åœ¨èŽ·å–æ–‡ä»¶çš„åŒæ—¶ï¼Œå¯ä»¥æ£€æŸ¥å¯ç–‘beatmap
     if settings.suspicious_score_check:
         try:
-            # 将可疑检查也移到线程池中执行
+            # å°†å¯ç–‘æ£€æŸ¥ä¹Ÿç§»åˆ°çº¿ç¨‹æ± ä¸­æ‰§è¡Œ
             def _check_suspicious():
                 return is_suspicious_beatmap(beatmap_raw)
 
@@ -269,8 +309,8 @@ async def pre_fetch_and_calculate_pp(
         except Exception:
             logger.exception(f"Error checking if beatmap {beatmap_id} is suspicious")
 
-    # 调用已优化的PP计算函数
-    return await calculate_pp(score, beatmap_raw, session), True
+    # è°ƒç”¨å·²ä¼˜åŒ–çš„PPè®¡ç®—å‡½æ•°
+    return await calculate_pp(score, beatmap_raw, session, calculator_override=calculator_override), True
 
 
 # https://osu.ppy.sh/wiki/Gameplay/Score/Total_score
@@ -425,22 +465,22 @@ def calculate_weighted_acc(acc: float, index: int) -> float:
     return calculate_pp_weight(index) * acc if acc > 0 else 0.0
 
 
-# 大致算法来自 https://github.com/MaxOhn/rosu-pp/blob/main/src/model/beatmap/suspicious.rs
+# å¤§è‡´ç®—æ³•æ¥è‡ª https://github.com/MaxOhn/rosu-pp/blob/main/src/model/beatmap/suspicious.rs
 
 
 class Threshold(int, Enum):
-    # 谱面异常常量
-    NOTES_THRESHOLD = 500000  # 除 taiko 以外任何模式的物件数量
-    TAIKO_THRESHOLD = 30000  # taiko 模式下的物量限制
+    # è°±é¢å¼‚å¸¸å¸¸é‡
+    NOTES_THRESHOLD = 500000  # é™¤ taiko ä»¥å¤–ä»»ä½•æ¨¡å¼çš„ç‰©ä»¶æ•°é‡
+    TAIKO_THRESHOLD = 30000  # taiko æ¨¡å¼ä¸‹çš„ç‰©é‡é™åˆ¶
 
     NOTES_PER_1S_THRESHOLD = 200  # 3000 BPM
     NOTES_PER_10S_THRESHOLD = 500  # 600 BPM
 
-    # 这个尺寸已经是常规游玩区域大小的 4 倍了 …… 如果不合适那另说吧
+    # è¿™ä¸ªå°ºå¯¸å·²ç»æ˜¯å¸¸è§„æ¸¸çŽ©åŒºåŸŸå¤§å°çš„ 4 å€äº† â€¦â€¦ å¦‚æžœä¸åˆé€‚é‚£å¦è¯´å§
     NOTE_POSX_THRESHOLD = 512  # x: [-512,512]
     NOTE_POSY_THRESHOLD = 384  # y: [-384,384]
 
-    POS_ERROR_THRESHOLD = 1280 * 50  # 超过这么多个物件（包括滑条控制点）的位置有问题就毙掉
+    POS_ERROR_THRESHOLD = 1280 * 50  # è¶…è¿‡è¿™ä¹ˆå¤šä¸ªç‰©ä»¶ï¼ˆåŒ…æ‹¬æ»‘æ¡æŽ§åˆ¶ç‚¹ï¼‰çš„ä½ç½®æœ‰é—®é¢˜å°±æ¯™æŽ‰
 
     SLIDER_REPEAT_THRESHOLD = 5000
 

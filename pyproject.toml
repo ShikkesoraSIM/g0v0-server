@@ -33,6 +33,7 @@ dependencies = [
     "python-multipart>=0.0.6",
     "redis>=5.0.1",
     "regex>=2025.11.3",
+    "rosu-pp-py>=3.1.0",
     "sentry-sdk[fastapi,httpx,loguru,sqlalchemy]>=2.34.1",
     "sqlalchemy>=2.0.23",
     "sqlmodel>=0.0.24",
@@ -40,11 +41,6 @@ dependencies = [
     "uvicorn[standard]>=0.24.0",
 ]
 authors = [{ name = "GooGuTeam" }]
-
-[project.optional-dependencies]
-rosu = [
-    "rosu-pp-py>=3.1.0",
-]
 
 [tool.ruff]
 line-length = 120

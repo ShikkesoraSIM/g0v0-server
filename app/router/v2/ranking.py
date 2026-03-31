@@ -5,8 +5,13 @@ from app.database import Team, TeamMember, User, UserStatistics
 from app.database.user import UserModel
 from app.database.statistics import UserStatisticsModel
 from app.dependencies.database import Database, get_redis
+from app.dependencies.fetcher import get_fetcher
 from app.dependencies.user import get_current_user
 from app.models.score import GameMode
+from app.service.pp_variant_service import (
+    get_pp_dev_ranking_snapshot,
+    normalize_pp_variant,
+)
 from app.service.ranking_cache_service import get_ranking_cache_service
 from app.utils import api_doc
 
@@ -135,7 +140,7 @@ class TeamStatistics(BaseModel):
 
 class TeamResponse(BaseModel):
     ranking: list[TeamStatistics]
-    total: int = Field(0, description="战队总数")
+    total: int = Field(0, description="æˆ˜é˜Ÿæ€»æ•°")
 
 
 SortType = Literal["performance", "score"]
@@ -143,17 +148,17 @@ SortType = Literal["performance", "score"]
 
 @router.get(
     "/rankings/{ruleset}/team",
-    name="获取战队排行榜",
-    description="获取在指定模式下按照 pp 排序的战队排行榜",
-    tags=["排行榜"],
+    name="èŽ·å–æˆ˜é˜ŸæŽ’è¡Œæ¦œ",
+    description="èŽ·å–åœ¨æŒ‡å®šæ¨¡å¼ä¸‹æŒ‰ç…§ pp æŽ’åºçš„æˆ˜é˜ŸæŽ’è¡Œæ¦œ",
+    tags=["æŽ’è¡Œæ¦œ"],
     response_model=TeamResponse,
 )
 async def get_team_ranking_pp(
     session: Database,
     background_tasks: BackgroundTasks,
-    ruleset: Annotated[GameMode, Path(..., description="指定 ruleset")],
+    ruleset: Annotated[GameMode, Path(..., description="æŒ‡å®š ruleset")],
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
-    page: Annotated[int, Query(ge=1, description="页码")] = 1,
+    page: Annotated[int, Query(ge=1, description="é¡µç ")] = 1,
 ):
     return await get_team_ranking(session, background_tasks, "performance", ruleset, current_user, page)
 
@@ -161,9 +166,9 @@ async def get_team_ranking_pp(
 @router.get(
     "/rankings/{ruleset}/team/{sort}",
     response_model=TeamResponse,
-    name="获取战队排行榜",
-    description="获取在指定模式下的战队排行榜",
-    tags=["排行榜"],
+    name="èŽ·å–æˆ˜é˜ŸæŽ’è¡Œæ¦œ",
+    description="èŽ·å–åœ¨æŒ‡å®šæ¨¡å¼ä¸‹çš„æˆ˜é˜ŸæŽ’è¡Œæ¦œ",
+    tags=["æŽ’è¡Œæ¦œ"],
 )
 async def get_team_ranking(
     session: Database,
@@ -304,17 +309,17 @@ class CountryResponse(BaseModel):
 
 @router.get(
     "/rankings/{ruleset}/country",
-    name="获取地区排行榜",
-    description="获取在指定模式下按照 pp 排序的地区排行榜",
-    tags=["排行榜"],
+    name="èŽ·å–åœ°åŒºæŽ’è¡Œæ¦œ",
+    description="èŽ·å–åœ¨æŒ‡å®šæ¨¡å¼ä¸‹æŒ‰ç…§ pp æŽ’åºçš„åœ°åŒºæŽ’è¡Œæ¦œ",
+    tags=["æŽ’è¡Œæ¦œ"],
     response_model=CountryResponse,
 )
 async def get_country_ranking_pp(
     session: Database,
     background_tasks: BackgroundTasks,
-    ruleset: Annotated[GameMode, Path(..., description="指定 ruleset")],
+    ruleset: Annotated[GameMode, Path(..., description="æŒ‡å®š ruleset")],
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
-    page: Annotated[int, Query(ge=1, description="页码")] = 1,
+    page: Annotated[int, Query(ge=1, description="é¡µç ")] = 1,
 ):
     return await get_country_ranking(session, background_tasks, ruleset, "performance", current_user, page)
 
@@ -322,42 +327,42 @@ async def get_country_ranking_pp(
 @router.get(
     "/rankings/{ruleset}/country/{sort}",
     response_model=CountryResponse,
-    name="获取地区排行榜",
-    description="获取在指定模式下的地区排行榜",
-    tags=["排行榜"],
+    name="èŽ·å–åœ°åŒºæŽ’è¡Œæ¦œ",
+    description="èŽ·å–åœ¨æŒ‡å®šæ¨¡å¼ä¸‹çš„åœ°åŒºæŽ’è¡Œæ¦œ",
+    tags=["æŽ’è¡Œæ¦œ"],
 )
 async def get_country_ranking(
     session: Database,
     background_tasks: BackgroundTasks,
-    ruleset: Annotated[GameMode, Path(..., description="指定 ruleset")],
+    ruleset: Annotated[GameMode, Path(..., description="æŒ‡å®š ruleset")],
     sort: Annotated[
         SortType,
         Path(
             ...,
-            description="排名类型：performance 表现分 / score 计分成绩总分 "
-            "**这个参数是本服务器额外添加的，不属于 v2 API 的一部分**",
+            description="æŽ’åç±»åž‹ï¼šperformance è¡¨çŽ°åˆ† / score è®¡åˆ†æˆç»©æ€»åˆ† "
+            "**è¿™ä¸ªå‚æ•°æ˜¯æœ¬æœåŠ¡å™¨é¢å¤–æ·»åŠ çš„ï¼Œä¸å±žäºŽ v2 API çš„ä¸€éƒ¨åˆ†**",
         ),
     ],
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
-    page: Annotated[int, Query(ge=1, description="页码")] = 1,
+    page: Annotated[int, Query(ge=1, description="é¡µç ")] = 1,
 ):
-    # 获取 Redis 连接和缓存服务
+    # èŽ·å– Redis è¿žæŽ¥å’Œç¼“å­˜æœåŠ¡
     redis = get_redis()
     cache_service = get_ranking_cache_service(redis)
 
-    # 尝试从缓存获取数据
+    # å°è¯•ä»Žç¼“å­˜èŽ·å–æ•°æ®
     cached_data = await cache_service.get_cached_country_ranking(ruleset, page)
 
     if cached_data:
-        # 从缓存返回数据
+        # ä»Žç¼“å­˜è¿”å›žæ•°æ®
         return CountryResponse(ranking=[CountryStatistics.model_validate(item) for item in cached_data])
 
-    # 缓存未命中，从数据库查询
+    # ç¼“å­˜æœªå‘½ä¸­ï¼Œä»Žæ•°æ®åº“æŸ¥è¯¢
     response = CountryResponse(ranking=[])
     countries = (await session.exec(select(User.country_code).distinct())).all()
 
     for country in countries:
-        if not country:  # 跳过空的国家代码
+        if not country:  # è·³è¿‡ç©ºçš„å›½å®¶ä»£ç 
             continue
 
         statistics = (
@@ -372,7 +377,7 @@ async def get_country_ranking(
             )
         ).all()
 
-        if not statistics:  # 跳过没有数据的国家
+        if not statistics:  # è·³è¿‡æ²¡æœ‰æ•°æ®çš„å›½å®¶
             continue
 
         pp = 0
@@ -400,18 +405,18 @@ async def get_country_ranking(
     else:
         response.ranking.sort(key=lambda x: x.ranked_score, reverse=True)
 
-    # 分页处理
+    # åˆ†é¡µå¤„ç†
     page_size = 50
     start_idx = (page - 1) * page_size
     end_idx = start_idx + page_size
 
-    # 获取当前页的数据
+    # èŽ·å–å½“å‰é¡µçš„æ•°æ®
     current_page_data = response.ranking[start_idx:end_idx]
 
-    # 异步缓存数据（不等待完成）
+    # å¼‚æ­¥ç¼“å­˜æ•°æ®ï¼ˆä¸ç­‰å¾…å®Œæˆï¼‰
     cache_data = [item.model_dump() for item in current_page_data]
 
-    # 创建后台任务来缓存数据
+    # åˆ›å»ºåŽå°ä»»åŠ¡æ¥ç¼“å­˜æ•°æ®
     background_tasks.add_task(
         cache_service.cache_country_ranking,
         ruleset,
@@ -420,7 +425,7 @@ async def get_country_ranking(
         ttl=settings.ranking_cache_expire_minutes * 60,
     )
 
-    # 返回当前页的结果
+    # è¿”å›žå½“å‰é¡µçš„ç»“æžœ
     response.ranking = current_page_data
     return response
 
@@ -429,43 +434,133 @@ async def get_country_ranking(
     "/rankings/{ruleset}/{sort}",
     responses={
         200: api_doc(
-            "用户排行榜",
+            "ç”¨æˆ·æŽ’è¡Œæ¦œ",
             {"ranking": list[UserStatisticsModel], "total": int},
             ["user.country", "user.cover"],
             name="TopUsersResponse",
         )
     },
-    name="获取用户排行榜",
-    description="获取在指定模式下的用户排行榜",
-    tags=["排行榜"],
+    name="èŽ·å–ç”¨æˆ·æŽ’è¡Œæ¦œ",
+    description="èŽ·å–åœ¨æŒ‡å®šæ¨¡å¼ä¸‹çš„ç”¨æˆ·æŽ’è¡Œæ¦œ",
+    tags=["æŽ’è¡Œæ¦œ"],
 )
 async def get_user_ranking(
     session: Database,
     background_tasks: BackgroundTasks,
-    ruleset: Annotated[GameMode, Path(..., description="指定 ruleset")],
-    sort: Annotated[SortType, Path(..., description="排名类型：performance 表现分 / score 计分成绩总分")],
+    ruleset: Annotated[GameMode, Path(..., description="æŒ‡å®š ruleset")],
+    sort: Annotated[SortType, Path(..., description="æŽ’åç±»åž‹ï¼šperformance è¡¨çŽ°åˆ† / score è®¡åˆ†æˆç»©æ€»åˆ†")],
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
-    country: Annotated[str | None, Query(description="国家代码")] = None,
-    page: Annotated[int, Query(ge=1, description="页码")] = 1,
+    country: Annotated[str | None, Query(description="å›½å®¶ä»£ç ")] = None,
+    page: Annotated[int, Query(ge=1, description="é¡µç ")] = 1,
+    pp_variant: Annotated[str | None, Query(description="pp variant: stable / pp_dev")] = None,
 ):
     show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
-    # 获取 Redis 连接和缓存服务
+    resolved_pp_variant = normalize_pp_variant(pp_variant)
+
+    if resolved_pp_variant == "pp_dev":
+        redis = get_redis()
+        fetcher = await get_fetcher()
+        snapshot_full = await get_pp_dev_ranking_snapshot(
+            session=session,
+            ruleset=ruleset,
+            redis=redis,
+            fetcher=fetcher,
+        )
+
+        global_rank_by_user_id = {int(row["user_id"]): index + 1 for index, row in enumerate(snapshot_full)}
+
+        country_rank_by_user_id: dict[int, int] = {}
+        country_counters: dict[str, int] = {}
+        for row in snapshot_full:
+            row_country = str(row.get("country_code") or "").upper()
+            if not row_country:
+                continue
+            country_counters[row_country] = country_counters.get(row_country, 0) + 1
+            country_rank_by_user_id[int(row["user_id"])] = country_counters[row_country]
+
+        snapshot_filtered = snapshot_full
+        if country:
+            wanted_country = country.upper()
+            snapshot_filtered = [row for row in snapshot_full if str(row.get("country_code") or "").upper() == wanted_country]
+
+        if sort == "score":
+            snapshot_filtered = sorted(
+                snapshot_filtered,
+                key=lambda row: (int(row.get("ranked_score") or 0), float(row.get("pp") or 0.0), int(row.get("user_id") or 0)),
+                reverse=True,
+            )
+
+        total_count = len(snapshot_filtered)
+        page_size = 50
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_rows = snapshot_filtered[start_idx:end_idx]
+
+        include = UserStatistics.RANKING_INCLUDES.copy()
+        if sort == "performance":
+            include.append("rank_change_since_30_days")
+        if country:
+            include.append("country_rank")
+
+        ranking_data: list[dict[str, Any]] = []
+        if page_rows:
+            page_user_ids = [int(row["user_id"]) for row in page_rows]
+            stats_rows = (
+                await session.exec(
+                    select(UserStatistics)
+                    .where(
+                        UserStatistics.mode == ruleset,
+                        col(UserStatistics.user_id).in_(page_user_ids),
+                        ~User.is_restricted_query(col(UserStatistics.user_id)),
+                    )
+                )
+            ).all()
+            stats_by_user_id = {int(stat.user_id): stat for stat in stats_rows}
+
+            for row in page_rows:
+                row_user_id = int(row["user_id"])
+                statistics = stats_by_user_id.get(row_user_id)
+                if statistics is None:
+                    continue
+
+                user_stats_resp = await UserStatisticsModel.transform(
+                    statistics,
+                    includes=include,
+                    user_country=current_user.country_code,
+                    show_nsfw_media=True,
+                )
+                user_stats_resp["pp"] = float(row.get("pp") or 0.0)
+                user_stats_resp["hit_accuracy"] = float(row.get("hit_accuracy") or 0.0)
+                user_stats_resp["global_rank"] = global_rank_by_user_id.get(row_user_id)
+
+                if country:
+                    user_stats_resp["country_rank"] = country_rank_by_user_id.get(row_user_id)
+
+                ranking_data.append(user_stats_resp)
+
+        ranking_data = await _apply_nsfw_policy_to_rankings(session, ranking_data, show_nsfw_media)
+        return {
+            "ranking": ranking_data,
+            "total": total_count,
+        }
+
+    # èŽ·å– Redis è¿žæŽ¥å’Œç¼“å­˜æœåŠ¡
     redis = get_redis()
     cache_service = get_ranking_cache_service(redis)
 
-    # 尝试从缓存获取数据
+    # å°è¯•ä»Žç¼“å­˜èŽ·å–æ•°æ®
     cached_data = await cache_service.get_cached_ranking(ruleset, sort, country, page)
     cached_stats = await cache_service.get_cached_stats(ruleset, sort, country)
 
     if cached_data and cached_stats:
         cached_data = await _apply_nsfw_policy_to_rankings(session, cached_data, show_nsfw_media)
-        # 从缓存返回数据
+        # ä»Žç¼“å­˜è¿”å›žæ•°æ®
         return {
             "ranking": cached_data,
             "total": cached_stats.get("total", 0),
         }
 
-    # 缓存未命中，从数据库查询
+    # ç¼“å­˜æœªå‘½ä¸­ï¼Œä»Žæ•°æ®åº“æŸ¥è¯¢
     wheres = [
         col(UserStatistics.mode) == ruleset,
         col(UserStatistics.pp) > 0,
@@ -481,7 +576,7 @@ async def get_user_ranking(
         wheres.append(col(UserStatistics.user).has(country_code=country.upper()))
         include.append("country_rank")
 
-    # 查询总数
+    # æŸ¥è¯¢æ€»æ•°
     count_query = select(func.count()).select_from(UserStatistics).where(*wheres)
     total_count_result = await session.exec(count_query)
     total_count = total_count_result.one()
@@ -497,7 +592,7 @@ async def get_user_ranking(
         .offset(50 * (page - 1))
     )
 
-    # 转换为响应格式
+    # è½¬æ¢ä¸ºå“åº”æ ¼å¼
     ranking_data = []
     for statistics in statistics_list:
         user_stats_resp = await UserStatisticsModel.transform(
@@ -509,12 +604,12 @@ async def get_user_ranking(
         )
         ranking_data.append(user_stats_resp)
 
-    # 异步缓存数据（不等待完成）
-    # 使用配置文件中的TTL设置
+    # å¼‚æ­¥ç¼“å­˜æ•°æ®ï¼ˆä¸ç­‰å¾…å®Œæˆï¼‰
+    # ä½¿ç”¨é…ç½®æ–‡ä»¶ä¸­çš„TTLè®¾ç½®
     cache_data = ranking_data
     stats_data = {"total": total_count}
 
-    # 创建后台任务来缓存数据
+    # åˆ›å»ºåŽå°ä»»åŠ¡æ¥ç¼“å­˜æ•°æ®
     background_tasks.add_task(
         cache_service.cache_ranking,
         ruleset,
@@ -525,7 +620,7 @@ async def get_user_ranking(
         ttl=settings.ranking_cache_expire_minutes * 60,
     )
 
-    # 缓存统计信息
+    # ç¼“å­˜ç»Ÿè®¡ä¿¡æ¯
     background_tasks.add_task(
         cache_service.cache_stats,
         ruleset,
@@ -541,5 +636,6 @@ async def get_user_ranking(
         "ranking": ranking_data,
         "total": total_count,
     }
+
 
 
