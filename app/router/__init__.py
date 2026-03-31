@@ -11,6 +11,20 @@ from .redirect import (
 )
 from .v1.router import router as api_v1_router
 from .v2.router import router as api_v2_router
+from .v2 import (  # noqa: F401
+    beatmap,
+    beatmapset,
+    changelog,
+    me,
+    misc,
+    ranking,
+    relationship,
+    room,
+    score,
+    session_verify,
+    tags,
+    user,
+)
 
 __all__ = [
     "api_v1_router",
