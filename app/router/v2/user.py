@@ -403,14 +403,14 @@ async def get_user_info_ruleset(
     # å¼‚æ­¥ç¼”å­˜ canonical result
     background_task.add_task(cache_service.cache_user, canonical_user_resp, ruleset, None, resolved_pp_variant)
     # Pre-warm the pp_dev variant so toggling is instant.
-    if resolved_pp_variant == “stable”:
+    if resolved_pp_variant == "stable":
         background_task.add_task(prewarm_pp_dev_profile_background, redis, searched_user.id, ruleset)
     return user_resp
 
 
-@router.get(“/users/{user_id}/”, include_in_schema=False)
+@router.get("/users/{user_id}/", include_in_schema=False)
 @router.get(
-    “/users/{user_id}”,
+    "/users/{user_id}",
     name="èŽ·å–ç”¨æˆ·ä¿¡æ¯",
     description="é€šè¿‡ç”¨æˆ· ID æˆ–ç”¨æˆ·åèŽ·å–å•ä¸ªç”¨æˆ·çš„è¯¦ç»†ä¿¡æ¯ã€‚",
     tags=["ç”¨æˆ·"],
@@ -477,7 +477,7 @@ async def get_user_info(
     # å¼‚æ­¥ç¼”å­˜ canonical result
     background_task.add_task(cache_service.cache_user, canonical_user_resp, None, None, resolved_pp_variant)
     # Pre-warm the pp_dev variant so toggling is instant.
-    if resolved_pp_variant == “stable”:
+    if resolved_pp_variant == "stable":
         background_task.add_task(prewarm_pp_dev_profile_background, redis, searched_user.id, None)
     return user_resp
 
@@ -679,6 +679,41 @@ async def get_user_beatmapsets(
     return resp
 
 
+async def _warm_pp_dev_scores_background(
+    scores: list,
+    pp_variant: str,
+    user_id: int,
+    gamemode: object,
+) -> None:
+    """Background task: recalculate and cache pp_dev values for scores not yet in Redis."""
+    if not scores:
+        return
+    try:
+        from app.dependencies.database import with_db
+        from app.dependencies.fetcher import get_fetcher
+        from app.service.pp_variant_service import get_score_pp_variant_batch
+
+        redis = get_redis()
+        fetcher = await get_fetcher()
+        async with with_db() as session:
+            # Only warm the top 15 scores to avoid flooding beatmap-raw mirrors with
+            # simultaneous requests (which causes HTTP 429 rate-limiting).
+            top_scores = scores[:15]
+            await get_score_pp_variant_batch(
+                session=session,
+                scores=top_scores,
+                pp_variant=pp_variant,
+                redis=redis,
+                fetcher=fetcher,
+                recalc_top_n=len(top_scores),
+            )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug(
+            f"Background pp_dev warm-up failed for user {user_id} mode {gamemode}: {e}"
+        )
+
+
 @router.get(
     "/users/{user_id}/scores/{type}",
     name="èŽ·å–ç”¨æˆ·æˆç»©åˆ—è¡¨",
@@ -783,8 +818,9 @@ async def get_user_scores(
     elif type == "best":
         if use_pp_dev_variant:
             fetcher = await get_fetcher()
-            # Recalculate at least the currently viewed page to avoid "stable-looking" top plays.
-            pp_dev_recalc_limit = min(max(offset + limit, 100), 300)
+            # Serve from cache only — no inline recalculation (avoids 30s+ client timeouts).
+            # Background task warms any uncached scores so the next request is fast.
+            pp_dev_recalc_limit = 0
             # Mirror pp-dev ranking from canonical best-score rows to keep variant queries responsive.
             candidate_scores = (
                 await session.exec(
@@ -809,6 +845,16 @@ async def get_user_scores(
                 redis=redis,
                 fetcher=fetcher,
                 recalc_top_n=pp_dev_recalc_limit,
+            )
+
+            # Warm up all best scores in the background so the next request serves from cache.
+            # The warm function is idempotent — already-cached scores are skipped quickly.
+            background_task.add_task(
+                _warm_pp_dev_scores_background,
+                list(ordered_candidates),
+                resolved_pp_variant,
+                db_user.id,
+                gamemode,
             )
 
             for candidate in ordered_candidates:

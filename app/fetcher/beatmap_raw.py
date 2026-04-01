@@ -13,7 +13,6 @@ from httpx import AsyncClient, HTTPError, Limits
 import redis.asyncio as redis
 
 urls = [
-    "https://catboy.best/osu/{beatmap_id}",           # catboy: fast, no aggressive rate limits
     "https://osu.direct/api/osu/{beatmap_id}",        # osu.direct
     "https://b.ppy.sh/osu/{beatmap_id}",              # old bancho endpoint
     "https://osu.ppy.sh/osu/{beatmap_id}",            # official (rate limited — last resort)

@@ -340,9 +340,6 @@ def check_settings(mod: APIMod, ranked_mods: RulesetRankedMods) -> bool:
 
 def _mods_can_get_pp(ruleset_id: int, mods: list[APIMod], ranked_mods: RankedMods) -> bool:
     for mod in mods:
-        # Hard safety rule: Adaptive Speed (AS) is always non-pp for all rulesets.
-        if mod["acronym"] == "AS":
-            return False
         # Hard safety rule for mania: DA with OD <= 6 is always non-pp, even if
         # ranked_mods.json is permissive (e.g. generated with enable-all).
         if ruleset_id == 3 and mod["acronym"] == "DA":

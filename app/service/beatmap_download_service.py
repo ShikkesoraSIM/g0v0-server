@@ -53,21 +53,12 @@ class BeatmapDownloadService:
         # 国外区域端点
         self.international_endpoints = [
             DownloadEndpoint(
-                name="CatBoy",
-                base_url="https://catboy.best",
-                health_check_url="https://catboy.best/",
-                url_template="https://catboy.best/d/{sid}?noVideo={no_video}",
-                is_china=False,
-                priority=0,
-                timeout=10,
-            ),
-            DownloadEndpoint(
                 name="OsuDirect",
                 base_url="https://osu.direct",
                 health_check_url="https://osu.direct/api/status",
                 url_template="https://osu.direct/api/d/{sid}?noVideo={no_video}",
                 is_china=False,
-                priority=1,
+                priority=0,
                 timeout=10,
             ),
             DownloadEndpoint(
@@ -76,7 +67,7 @@ class BeatmapDownloadService:
                 health_check_url="https://storage.ripple.moe",
                 url_template="https://storage.ripple.moe/d/{sid}",
                 is_china=False,
-                priority=2,
+                priority=1,
                 timeout=10,
             ),
         ]
@@ -212,8 +203,6 @@ class BeatmapDownloadService:
             return endpoint.url_template.format(type=video_type, sid=beatmapset_id)
         if endpoint.name in {"Nerinyan", "OsuDirect"}:
             return endpoint.url_template.format(sid=beatmapset_id, no_video="true" if no_video else "false")
-        if endpoint.name == "Catboy":
-            return endpoint.url_template.format(sid=f"{beatmapset_id}n" if no_video else beatmapset_id)
         return endpoint.url_template.format(sid=beatmapset_id)
 
     def get_download_urls(self, beatmapset_id: int, no_video: bool, is_china: bool) -> list[str]:
