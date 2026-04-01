@@ -1149,7 +1149,11 @@ async def process_score(
     )
 
     session.add(score)
-    await session.commit()
+    await session.flush()  # Sends INSERT to DB and gets auto-increment ID without committing
+    # Bind the token to this score in the SAME transaction so that if anything
+    # fails before the commit, the token remains unbound and no orphan score exists.
+    score_token.score_id = score.id
+    await session.commit()  # Atomically commits: score row + score_token.score_id
     score.processed = True
     await session.commit()
     await session.refresh(score)

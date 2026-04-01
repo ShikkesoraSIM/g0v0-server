@@ -253,73 +253,106 @@ async def submit_score(
         if not score:
             raise HTTPException(status_code=404, detail="Score not found")
     else:
-        beatmap = score_token.beatmap_id
+        # Distributed lock: prevents two concurrent requests for the same token
+        # from both seeing score_token.score_id=None and creating duplicate scores.
+        lock_key = f"score:submit:lock:{token}"
+        lock_acquired = await redis.set(lock_key, "1", nx=True, ex=30)
 
-        try:
-            cache_service = get_beatmap_cache_service(redis, fetcher)
-            await cache_service.smart_preload_for_score(beatmap)
-        except Exception as e:
-            logger.debug(f"Beatmap preload failed for {beatmap}: {e}")
-
-        try:
-            db_beatmap = await Beatmap.get_or_fetch(db, fetcher, bid=beatmap)
-        except HTTPError:
-            raise HTTPException(status_code=404, detail="Beatmap not found")
-
-        status = db_beatmap.beatmap_status
-
-        t0 = time.time()
-        logger.info("[submit_score] calling process_score user_id={} beatmap_id={} status={}", user_id, beatmap, status)
-
-        score = await process_score(
-            current_user,
-            beatmap,
-            status.has_pp() or settings.enable_all_beatmap_pp,
-            score_token,
-            info,
-            db,
-        )
-
-        logger.info(
-            "[submit_score] process_score done in {:.3f}s score_id={} user_id={} beatmap_id={}",
-            time.time() - t0,
-            score.id,
-            user_id,
-            beatmap,
-        )
-
-        await db.refresh(score_token)
-        score_id = score.id
-        score_token.score_id = score_id
-
-        t_commit = time.time()
-        await db.commit()
-        await db.refresh(score)
-        logger.info(
-            "[submit_score] db commit+refresh done in {:.3f}s score_id={}",
-            time.time() - t_commit,
-            score_id,
-        )
-
-        # ✅ Important: do PP/rank/stats update BEFORE responding
-        t_user = time.time()
-        logger.info("[submit_score] BEFORE _process_user score_id={} user_id={}", score_id, user_id)
-        try:
-            await _process_user(score_id, user_id, redis, fetcher)
+        if not lock_acquired:
+            # Another request is already processing this token.
+            # Wait briefly and re-check — the other request should have committed
+            # score_token.score_id atomically inside process_score by now.
+            await asyncio.sleep(0.5)
+            await db.refresh(score_token)
+            if not score_token.score_id:
+                raise HTTPException(status_code=409, detail="Score submission already in progress")
+            score = (
+                await db.exec(
+                    select(Score).where(
+                        Score.id == score_token.score_id,
+                        Score.user_id == user_id,
+                    )
+                )
+            ).first()
+            if not score:
+                raise HTTPException(status_code=409, detail="Score not found after concurrent submission")
             logger.info(
-                "[submit_score] AFTER _process_user in {:.3f}s score_id={} user_id={}",
-                time.time() - t_user,
-                score_id,
-                user_id,
+                "[submit_score] concurrent request resolved via lock check, returning existing score_id={}",
+                score_token.score_id,
             )
-        except Exception as e:
-            logger.warning(
-                "[submit_score] _process_user FAILED in {:.3f}s score_id={} user_id={} err={}",
-                time.time() - t_user,
+        else:
+            try:
+                beatmap = score_token.beatmap_id
+
+                try:
+                    cache_service = get_beatmap_cache_service(redis, fetcher)
+                    await cache_service.smart_preload_for_score(beatmap)
+                except Exception as e:
+                    logger.debug(f"Beatmap preload failed for {beatmap}: {e}")
+
+                try:
+                    db_beatmap = await Beatmap.get_or_fetch(db, fetcher, bid=beatmap)
+                except HTTPError:
+                    raise HTTPException(status_code=404, detail="Beatmap not found")
+
+                status = db_beatmap.beatmap_status
+
+                t0 = time.time()
+                logger.info("[submit_score] calling process_score user_id={} beatmap_id={} status={}", user_id, beatmap, status)
+
+                score = await process_score(
+                    current_user,
+                    beatmap,
+                    status.has_pp() or settings.enable_all_beatmap_pp,
+                    score_token,
+                    info,
+                    db,
+                )
+
+                logger.info(
+                    "[submit_score] process_score done in {:.3f}s score_id={} user_id={} beatmap_id={}",
+                    time.time() - t0,
+                    score.id,
+                    user_id,
+                    beatmap,
+                )
+            finally:
+                # Release the lock now. score_token.score_id was committed atomically
+                # inside process_score, so any subsequent request for this token will
+                # find score_id set and return the existing score (no duplicate).
+                await redis.delete(lock_key)
+
+            score_id = score.id
+
+            t_commit = time.time()
+            # Refresh MySQL REPEATABLE READ snapshot so we see the committed state.
+            await db.commit()
+            await db.refresh(score)
+            logger.info(
+                "[submit_score] db commit+refresh done in {:.3f}s score_id={}",
+                time.time() - t_commit,
                 score_id,
-                user_id,
-                e,
             )
+
+            # ✅ Important: do PP/rank/stats update BEFORE responding
+            t_user = time.time()
+            logger.info("[submit_score] BEFORE _process_user score_id={} user_id={}", score_id, user_id)
+            try:
+                await _process_user(score_id, user_id, redis, fetcher)
+                logger.info(
+                    "[submit_score] AFTER _process_user in {:.3f}s score_id={} user_id={}",
+                    time.time() - t_user,
+                    score_id,
+                    user_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[submit_score] _process_user FAILED in {:.3f}s score_id={} user_id={} err={}",
+                    time.time() - t_user,
+                    score_id,
+                    user_id,
+                    e,
+                )
 
     # _process_user runs in a dedicated session.
     # Commit before re-reading to avoid stale snapshots (e.g. MySQL REPEATABLE READ).
