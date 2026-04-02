@@ -1272,10 +1272,19 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
             od_cs = await _get_effective_od_cs(score, session)
             if od_cs is not None:
                 eff_od, eff_cs = od_cs
-                if eff_od == 0.0 and eff_cs == 0.0:
+                # Each DA-overridden value must be >= 1 (e.g. CS=0.1 is not allowed).
+                if _da_overrides_od and eff_od < 1.0:
                     logger.debug(
-                        "Skipping PP for score {score_id} | DA forced OD=0 and CS=0",
+                        "Skipping PP for score {score_id} | DA forced OD={od:.2f} < 1",
                         score_id=score.id,
+                        od=eff_od,
+                    )
+                    return
+                if _da_overrides_cs and eff_cs < 1.0:
+                    logger.debug(
+                        "Skipping PP for score {score_id} | DA forced CS={cs:.2f} < 1",
+                        score_id=score.id,
+                        cs=eff_cs,
                     )
                     return
                 if (eff_od + eff_cs) / 2.0 <= 4.0:

@@ -709,6 +709,9 @@ async def recalc_score_pp(
                 eff_od, eff_cs = _compute_effective_od_cs(
                     score.mods, float(beatmap.accuracy), float(beatmap.cs)
                 )
+                if (_da_overrides_od and eff_od < 1.0) or (_da_overrides_cs and eff_cs < 1.0):
+                    score.pp = 0
+                    return 0.0
                 if (eff_od == 0.0 and eff_cs == 0.0) or (eff_od + eff_cs) / 2.0 <= 4.0:
                     score.pp = 0
                     return 0.0
@@ -775,6 +778,8 @@ def build_best_scores(user_id: int, gamemode: GameMode, scores: list[Score]) -> 
                 eff_od, eff_cs = _compute_effective_od_cs(
                     score.mods, float(beatmap.accuracy), float(beatmap.cs)
                 )
+                if (_da_overrides_od and eff_od < 1.0) or (_da_overrides_cs and eff_cs < 1.0):
+                    continue
                 if (eff_od == 0.0 and eff_cs == 0.0) or (eff_od + eff_cs) / 2.0 <= 4.0:
                     continue
         if not score.pp or score.pp <= 0:
