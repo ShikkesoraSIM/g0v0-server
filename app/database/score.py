@@ -1237,29 +1237,9 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
         )
         return
 
-    can_get_pp = score.passed and score.ranked and mods_can_get_pp(int(score.gamemode), score.mods)
-    if not can_get_pp:
-        logger.debug(
-            "Skipping PP calculation for score {score_id} | passed={passed} ranked={ranked} mods={mods}",
-            score_id=score.id,
-            passed=score.passed,
-            ranked=score.ranked,
-            mods=score.mods,
-        )
-        return
-
-    # Accuracy floor for relax / autopilot modes: < 75% acc → 0 pp.
-    if score.gamemode in _RELAX_AP_MODES and score.accuracy < 0.75:
-        logger.debug(
-            "Skipping PP for score {score_id} | RX/AP acc {acc:.1%} < 75%",
-            score_id=score.id,
-            acc=score.accuracy,
-        )
-        return f"rx_acc_too_low:{score.accuracy:.1%}"
-
-    # OD + CS difficulty floor: only applies when DA is actively overriding values.
-    # Natural map values (even low ones like CS=0 by default) are always allowed.
-    # Only DA-forced reductions to low values are restricted.
+    # DA floor check runs FIRST — before mods_can_get_pp — so the warning fires
+    # even when other mods (e.g. rate-changed DT) would fail the whitelist check.
+    # Only DA-forced reductions to low values are restricted; natural map values are fine.
     if score.gamemode in _OSU_STANDARD_MODES:
         _da_settings: dict = {}
         for _m in score.mods:
@@ -1296,6 +1276,26 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
                         avg=(eff_od + eff_cs) / 2.0,
                     )
                     return f"da_avg_too_low:OD={eff_od:.1f},CS={eff_cs:.1f},avg={(eff_od+eff_cs)/2.0:.1f}"
+
+    can_get_pp = score.passed and score.ranked and mods_can_get_pp(int(score.gamemode), score.mods)
+    if not can_get_pp:
+        logger.debug(
+            "Skipping PP calculation for score {score_id} | passed={passed} ranked={ranked} mods={mods}",
+            score_id=score.id,
+            passed=score.passed,
+            ranked=score.ranked,
+            mods=score.mods,
+        )
+        return
+
+    # Accuracy floor for relax / autopilot modes: < 75% acc → 0 pp.
+    if score.gamemode in _RELAX_AP_MODES and score.accuracy < 0.75:
+        logger.debug(
+            "Skipping PP for score {score_id} | RX/AP acc {acc:.1%} < 75%",
+            score_id=score.id,
+            acc=score.accuracy,
+        )
+        return f"rx_acc_too_low:{score.accuracy:.1%}"
 
     # ✅ 14★ cap (stars AFTER mods). If the map is > 14 stars, it awards 0pp.
     # NOTE: requires: from app.database.beatmap import calculate_beatmap_attributes
