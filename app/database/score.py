@@ -1257,26 +1257,36 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
         )
         return
 
-    # OD + CS difficulty floor for osu! standard-based modes.
+    # OD + CS difficulty floor: only applies when DA is actively overriding values.
+    # Natural map values (even low ones like CS=0 by default) are always allowed.
+    # Only DA-forced reductions to low values are restricted.
     if score.gamemode in _OSU_STANDARD_MODES:
-        od_cs = await _get_effective_od_cs(score, session)
-        if od_cs is not None:
-            eff_od, eff_cs = od_cs
-            if eff_od == 0.0 and eff_cs == 0.0:
-                logger.debug(
-                    "Skipping PP for score {score_id} | OD=0 and CS=0",
-                    score_id=score.id,
-                )
-                return
-            if (eff_od + eff_cs) / 2.0 <= 4.0:
-                logger.debug(
-                    "Skipping PP for score {score_id} | (OD={od:.1f}+CS={cs:.1f})/2={avg:.1f} <= 4",
-                    score_id=score.id,
-                    od=eff_od,
-                    cs=eff_cs,
-                    avg=(eff_od + eff_cs) / 2.0,
-                )
-                return
+        _da_settings: dict = {}
+        for _m in score.mods:
+            if _m["acronym"] == "DA":
+                _da_settings = _m.get("settings", {}) or {}
+                break
+        _da_overrides_od = isinstance(_da_settings.get("overall_difficulty"), (int, float))
+        _da_overrides_cs = isinstance(_da_settings.get("circle_size"), (int, float))
+        if _da_overrides_od or _da_overrides_cs:
+            od_cs = await _get_effective_od_cs(score, session)
+            if od_cs is not None:
+                eff_od, eff_cs = od_cs
+                if eff_od == 0.0 and eff_cs == 0.0:
+                    logger.debug(
+                        "Skipping PP for score {score_id} | DA forced OD=0 and CS=0",
+                        score_id=score.id,
+                    )
+                    return
+                if (eff_od + eff_cs) / 2.0 <= 4.0:
+                    logger.debug(
+                        "Skipping PP for score {score_id} | DA forced (OD={od:.1f}+CS={cs:.1f})/2={avg:.1f} <= 4",
+                        score_id=score.id,
+                        od=eff_od,
+                        cs=eff_cs,
+                        avg=(eff_od + eff_cs) / 2.0,
+                    )
+                    return
 
     # ✅ 14★ cap (stars AFTER mods). If the map is > 14 stars, it awards 0pp.
     # NOTE: requires: from app.database.beatmap import calculate_beatmap_attributes
