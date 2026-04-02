@@ -1228,7 +1228,7 @@ async def _get_effective_od_cs(score: "Score", session: AsyncSession) -> tuple[f
     return _compute_effective_od_cs(mods, float(beatmap.accuracy), float(beatmap.cs))
 
 
-async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis, fetcher: "Fetcher"):
+async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis, fetcher: "Fetcher") -> str | None:
     if score.pp != 0:
         logger.debug(
             "Skipping PP calculation for score {score_id} | already set {pp:.2f}",
@@ -1255,7 +1255,7 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
             score_id=score.id,
             acc=score.accuracy,
         )
-        return
+        return f"rx_acc_too_low:{score.accuracy:.1%}"
 
     # OD + CS difficulty floor: only applies when DA is actively overriding values.
     # Natural map values (even low ones like CS=0 by default) are always allowed.
@@ -1279,14 +1279,14 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
                         score_id=score.id,
                         od=eff_od,
                     )
-                    return
+                    return f"da_od_below_min:OD={eff_od:.2f}"
                 if _da_overrides_cs and eff_cs < 1.0:
                     logger.debug(
                         "Skipping PP for score {score_id} | DA forced CS={cs:.2f} < 1",
                         score_id=score.id,
                         cs=eff_cs,
                     )
-                    return
+                    return f"da_cs_below_min:CS={eff_cs:.2f}"
                 if (eff_od + eff_cs) / 2.0 <= 4.0:
                     logger.debug(
                         "Skipping PP for score {score_id} | DA forced (OD={od:.1f}+CS={cs:.1f})/2={avg:.1f} <= 4",
@@ -1295,7 +1295,7 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
                         cs=eff_cs,
                         avg=(eff_od + eff_cs) / 2.0,
                     )
-                    return
+                    return f"da_avg_too_low:OD={eff_od:.1f},CS={eff_cs:.1f},avg={(eff_od+eff_cs)/2.0:.1f}"
 
     # ✅ 14★ cap (stars AFTER mods). If the map is > 14 stars, it awards 0pp.
     # NOTE: requires: from app.database.beatmap import calculate_beatmap_attributes
@@ -1748,10 +1748,56 @@ async def process_user(
     )
 
     # ---- Critical path (must be done before response) ----
-    await _process_score_pp(score, session, redis, fetcher)
+    _pp_zero_reason = await _process_score_pp(score, session, redis, fetcher)
     await session.commit()
     await session.refresh(score)
     await session.refresh(user)
+
+    # Send in-game warning if score was zeroed due to DA/accuracy rules.
+    if _pp_zero_reason:
+        try:
+            from app.database.notification import insert_notification
+            from app.models.notification import GlobalAnnouncement
+            from app.const import BANCHOBOT_ID
+            _reason_code = _pp_zero_reason.split(":")[0]
+            _reason_data = _pp_zero_reason.split(":", 1)[1] if ":" in _pp_zero_reason else ""
+            _msgs = {
+                "da_od_below_min": (
+                    "Your score gave 0pp — Difficulty Adjust",
+                    f"You set OD to {_reason_data.replace('OD=', '')} using Difficulty Adjust. "
+                    "Each DA-overridden value must be at least 1. Set OD ≥ 1 to earn pp.",
+                ),
+                "da_cs_below_min": (
+                    "Your score gave 0pp — Difficulty Adjust",
+                    f"You set CS to {_reason_data.replace('CS=', '')} using Difficulty Adjust. "
+                    "Each DA-overridden value must be at least 1. Set CS ≥ 1 to earn pp.",
+                ),
+                "da_avg_too_low": (
+                    "Your score gave 0pp — Difficulty Adjust",
+                    f"Your DA settings resulted in ({_reason_data}). "
+                    "When using DA to override OD or CS, (OD + CS) / 2 must be greater than 4.",
+                ),
+                "rx_acc_too_low": (
+                    "Your score gave 0pp — Accuracy too low",
+                    f"Your accuracy was {_reason_data}. "
+                    "Relax and Autopilot scores need at least 75% accuracy to earn pp.",
+                ),
+            }
+            _title, _message = _msgs.get(
+                _reason_code,
+                ("Your score gave 0pp", "Your score did not meet the requirements to earn pp."),
+            )
+            _notif = GlobalAnnouncement.init(
+                source_user_id=BANCHOBOT_ID,
+                title=_title,
+                message=_message,
+                severity="warning",
+                receiver_ids=[user_id],
+            )
+            async with AsyncSession(db_engine) as _notif_session:
+                await insert_notification(_notif_session, _notif)
+        except Exception as _notif_err:
+            logger.warning("Failed to send 0pp warning for score {}: {}", score.id, _notif_err)
 
     await _process_statistics(
         session,
