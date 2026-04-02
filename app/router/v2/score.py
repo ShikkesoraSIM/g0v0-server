@@ -380,28 +380,12 @@ async def submit_score(
 
     score_gamemode = score.gamemode
 
-    # ✅ Refresh cache BEFORE returning so client reads updated stats
+    # Kick off cache refresh as a background task so the score submission response
+    # is returned to the client immediately without waiting for pp-dev recalculation.
+    # Previously this was awaited inline, causing 10-30s timeouts because pp-dev
+    # calculations (2.5s each x many scores) blocked the response.
     if user_id is not None:
-        t_cache = time.time()
-        logger.info(
-            "[submit_score] BEFORE refresh_user_cache_background user_id={} mode={}",
-            user_id,
-            score_gamemode,
-        )
-        try:
-            await refresh_user_cache_background(redis, user_id, score_gamemode)
-            logger.info(
-                "[submit_score] AFTER refresh_user_cache_background in {:.3f}s user_id={}",
-                time.time() - t_cache,
-                user_id,
-            )
-        except Exception as e:
-            logger.warning(
-                "[submit_score] refresh_user_cache_background FAILED in {:.3f}s user_id={} err={}",
-                time.time() - t_cache,
-                user_id,
-                e,
-            )
+        background_task.add_task(refresh_user_cache_background, redis, user_id, score_gamemode)
 
     # Achievements can stay async
     background_task.add_task(_process_user_achievement, resp["id"])

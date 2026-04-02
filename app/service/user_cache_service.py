@@ -511,6 +511,15 @@ async def prewarm_pp_dev_profile_background(
     except Exception:
         return
 
+    # Prevent concurrent prewarms for the same user/mode - only one task at a time.
+    # Without this, every profile request for an uncached user fires a new background
+    # task, and they all contend on the same DB rows causing lock wait timeouts.
+    ruleset_key = ruleset.value if ruleset is not None else "none"
+    lock_key = f"prewarm_lock:{user_id}:{ruleset_key}"
+    acquired = await redis.set(lock_key, 1, nx=True, ex=60)
+    if not acquired:
+        return  # another prewarm task is already in progress for this user
+
     try:
         async with with_db() as session:
             from app.dependencies.fetcher import get_fetcher
@@ -528,17 +537,27 @@ async def prewarm_pp_dev_profile_background(
                 ruleset=ruleset,
                 show_nsfw_media=True,
             )
-            await apply_pp_variant_to_user_response(
-                session=session,
-                user_resp=canonical_user_resp,
-                user_id=user.id,
-                mode=effective_mode,
-                pp_variant="pp_dev",
-                redis=redis,
-                fetcher=fetcher,
-                country_code=user.country_code,
-            )
+            # Use no_autoflush to prevent SQLAlchemy from flushing Score objects
+            # whose .pp attribute gets modified in-memory during pp_dev computation.
+            # Without this, COUNT queries in apply_pp_variant_to_user_response
+            # trigger autoflush -> UPDATE scores SET pp=... -> lock wait timeout (1205).
+            with session.no_autoflush:
+                await apply_pp_variant_to_user_response(
+                    session=session,
+                    user_resp=canonical_user_resp,
+                    user_id=user.id,
+                    mode=effective_mode,
+                    pp_variant="pp_dev",
+                    redis=redis,
+                    fetcher=fetcher,
+                    country_code=user.country_code,
+                )
             await cache_service.cache_user(canonical_user_resp, ruleset, pp_variant="pp_dev")
             logger.debug(f"Pre-warmed pp_dev profile cache for user {user_id} mode={effective_mode}")
     except Exception as e:
         logger.warning(f"Failed to pre-warm pp_dev profile for user {user_id}: {e}")
+    finally:
+        try:
+            await redis.delete(lock_key)
+        except Exception:
+            pass
