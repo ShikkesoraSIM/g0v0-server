@@ -306,9 +306,37 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
         resp_id = resp.get("id")
         if resp_id is None:
             raise ValueError("id is required")
-        if not (await session.exec(select(exists()).where(Beatmap.id == resp_id))).first():
+        existing = (await session.exec(select(Beatmap).where(Beatmap.id == resp_id))).first()
+        if not existing:
             session.add(beatmap)
             await session.commit()
+        else:
+            # Update checksum, status, and key fields if the API has newer data.
+            # This handles recently-updated pending/qualified maps whose metadata
+            # changed since we first cached them.
+            changed = False
+            new_checksum = resp.get("checksum")
+            if new_checksum and (existing.checksum or "").lower() != new_checksum.lower():
+                existing.checksum = new_checksum
+                changed = True
+            new_ranked = resp.get("ranked")
+            if new_ranked is not None:
+                try:
+                    new_status = BeatmapRankStatus(int(new_ranked))
+                    if existing.beatmap_status != new_status:
+                        existing.beatmap_status = new_status
+                        changed = True
+                except (TypeError, ValueError):
+                    pass
+            # Also update other fields that might drift (ar, cs, od, hp, bpm, etc.)
+            for field in ("accuracy", "ar", "cs", "drain", "bpm", "total_length", "hit_length", "max_combo"):
+                new_val = resp.get(field)
+                if new_val is not None and getattr(existing, field, None) != new_val:
+                    setattr(existing, field, new_val)
+                    changed = True
+            if changed:
+                session.add(existing)
+                await session.commit()
         return (await session.exec(select(Beatmap).where(Beatmap.id == resp_id))).one()
 
     @classmethod
