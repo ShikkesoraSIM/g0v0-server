@@ -53,21 +53,30 @@ class BeatmapDownloadService:
         # 国外区域端点
         self.international_endpoints = [
             DownloadEndpoint(
-                name="OsuDirect",
-                base_url="https://osu.direct",
-                health_check_url="https://osu.direct/api/status",
-                url_template="https://osu.direct/api/d/{sid}?noVideo={no_video}",
+                name="Catboy",
+                base_url="https://catboy.best",
+                health_check_url="https://catboy.best/d/1",
+                url_template="https://catboy.best/d/{sid}",
                 is_china=False,
                 priority=0,
                 timeout=10,
             ),
             DownloadEndpoint(
-                name="Ripple",
-                base_url="https://storage.ripple.moe",
-                health_check_url="https://storage.ripple.moe",
-                url_template="https://storage.ripple.moe/d/{sid}",
+                name="Myrient",
+                base_url="https://myrient.erista.me",
+                health_check_url="https://myrient.erista.me/files/osu!/",
+                url_template="https://myrient.erista.me/files/osu!/beatmaps/{sid}.osz",
                 is_china=False,
                 priority=1,
+                timeout=10,
+            ),
+            DownloadEndpoint(
+                name="Beatconnect",
+                base_url="https://beatconnect.io",
+                health_check_url="https://beatconnect.io/",
+                url_template="https://beatconnect.io/b/{sid}",
+                is_china=False,
+                priority=2,
                 timeout=10,
             ),
         ]
@@ -201,8 +210,9 @@ class BeatmapDownloadService:
         if endpoint.name == "Sayobot":
             video_type = "novideo" if no_video else "full"
             return endpoint.url_template.format(type=video_type, sid=beatmapset_id)
-        if endpoint.name in {"Nerinyan", "OsuDirect"}:
-            return endpoint.url_template.format(sid=beatmapset_id, no_video="true" if no_video else "false")
+        if endpoint.name == "Catboy":
+            url = endpoint.url_template.format(sid=beatmapset_id)
+            return url + "n" if no_video else url
         return endpoint.url_template.format(sid=beatmapset_id)
 
     def get_download_urls(self, beatmapset_id: int, no_video: bool, is_china: bool) -> list[str]:
