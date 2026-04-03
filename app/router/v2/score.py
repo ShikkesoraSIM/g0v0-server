@@ -787,7 +787,38 @@ async def create_solo_score(
     # Local uploads can end up with hash drift between editor/export/import paths.
     # For local maps we trust the beatmap_id and only enforce hash for non-local maps.
     if not beatmap.is_local and beatmap.checksum and beatmap.checksum.lower() != beatmap_hash.lower():
-        raise HTTPException(status_code=422, detail="invalid or missing beatmap_hash")
+        # Checksum mismatch — the map may have been updated on osu! since we last
+        # synced.  Re-fetch from the official API to get the latest checksum before
+        # rejecting the score.  This handles pending/qualified/WIP maps that update
+        # frequently and mirrors that lag behind.
+        try:
+            fresh_resp = await fetcher.get_beatmap(beatmap_id, None)
+            fresh_checksum = (fresh_resp.get("checksum") or "").lower()
+            if fresh_checksum and fresh_checksum == beatmap_hash.lower():
+                # API confirms the client has the correct (newer) version — update our DB.
+                beatmap.checksum = fresh_checksum
+                fresh_ranked = fresh_resp.get("ranked")
+                if fresh_ranked is not None:
+                    try:
+                        from app.database.beatmap import BeatmapRankStatus
+                        beatmap.beatmap_status = BeatmapRankStatus(int(fresh_ranked))
+                    except (TypeError, ValueError):
+                        pass
+                db.add(beatmap)
+                await db.commit()
+                await db.refresh(beatmap)
+                logger.info(
+                    "Beatmap {} checksum updated from API (client had newer version): {}",
+                    beatmap_id,
+                    fresh_checksum,
+                )
+            else:
+                raise HTTPException(status_code=422, detail="invalid or missing beatmap_hash")
+        except HTTPException:
+            raise
+        except Exception as refetch_err:
+            logger.warning("Failed to re-fetch beatmap {} for checksum update: {}", beatmap_id, refetch_err)
+            raise HTTPException(status_code=422, detail="invalid or missing beatmap_hash")
 
     if not (result := gamemode.check_ruleset_version(ruleset_hash)):
         logger.info(
