@@ -1237,8 +1237,34 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
         )
         return
 
-    # DA floor check runs FIRST — before mods_can_get_pp — so the warning fires
+    # DA + FL checks run FIRST — before mods_can_get_pp — so the warning fires
     # even when other mods (e.g. rate-changed DT) would fail the whitelist check.
+    if score.gamemode in _OSU_STANDARD_MODES:
+        # FL settings floor: only vanilla Flashlight earns pp. If any setting is
+        # changed from its default (size, delay, combo_based_size), award 0pp and warn.
+        for _m in score.mods:
+            if _m["acronym"] == "FL":
+                _fl_settings = _m.get("settings") or {}
+                _fl_size = _fl_settings.get("size_multiplier")
+                _fl_delay = _fl_settings.get("follow_delay")
+                _fl_combo = _fl_settings.get("combo_based_size")
+                _fl_non_vanilla = (
+                    (_fl_size is not None and abs(_fl_size - 1.0) > 0.001)
+                    or (_fl_delay is not None and abs(_fl_delay - 1.0) > 0.001)
+                    or (_fl_combo is not None and _fl_combo is not True)
+                )
+                if _fl_non_vanilla:
+                    logger.debug(
+                        "Skipping PP for score {score_id} | FL non-vanilla settings size={size} delay={delay} combo={combo}",
+                        score_id=score.id,
+                        size=_fl_size,
+                        delay=_fl_delay,
+                        combo=_fl_combo,
+                    )
+                    return f"fl_non_vanilla:size={_fl_size},delay={_fl_delay},combo={_fl_combo}"
+                break
+
+    # DA floor: only applies when DA is actively overriding values.
     # Only DA-forced reductions to low values are restricted; natural map values are fine.
     if score.gamemode in _OSU_STANDARD_MODES:
         _da_settings: dict = {}
@@ -1753,51 +1779,50 @@ async def process_user(
     await session.refresh(score)
     await session.refresh(user)
 
-    # Send in-game warning if score was zeroed due to DA/accuracy rules.
+    # Send ToriiHalo private message if score was zeroed due to DA/FL/accuracy rules.
     if _pp_zero_reason:
         try:
-            from app.database.notification import insert_notification
-            from app.models.notification import GlobalAnnouncement
-            from app.const import BANCHOBOT_ID
+            from app.router.notification.banchobot import bot as _toriihalo
+            from app.database.user import User as _User
+            from app.dependencies.database import with_db as _with_db
             _reason_code = _pp_zero_reason.split(":")[0]
             _reason_data = _pp_zero_reason.split(":", 1)[1] if ":" in _pp_zero_reason else ""
-            _msgs = {
+            _pm_msgs: dict[str, str] = {
                 "da_od_below_min": (
-                    "Your score gave 0pp — Difficulty Adjust",
-                    f"You set OD to {_reason_data.replace('OD=', '')} using Difficulty Adjust. "
-                    "Each DA-overridden value must be at least 1. Set OD ≥ 1 to earn pp.",
+                    f"Your score gave 0pp! You used Difficulty Adjust with OD={_reason_data.replace('OD=', '')}. "
+                    "PP requires OD \u2265 1 when using DA. Try setting OD to something like 5 or higher."
                 ),
                 "da_cs_below_min": (
-                    "Your score gave 0pp — Difficulty Adjust",
-                    f"You set CS to {_reason_data.replace('CS=', '')} using Difficulty Adjust. "
-                    "Each DA-overridden value must be at least 1. Set CS ≥ 1 to earn pp.",
+                    f"Your score gave 0pp! You used Difficulty Adjust with CS={_reason_data.replace('CS=', '')}. "
+                    "PP requires CS \u2265 1 when using DA. Try setting CS to 1 or higher."
                 ),
                 "da_avg_too_low": (
-                    "Your score gave 0pp — Difficulty Adjust",
-                    f"Your DA settings resulted in ({_reason_data}). "
-                    "When using DA to override OD or CS, (OD + CS) / 2 must be greater than 4.",
+                    f"Your score gave 0pp! Your DA settings result in (OD+CS)/2 \u2264 4 ({_reason_data}). "
+                    "When overriding OD or CS with DA, (OD+CS)/2 must be greater than 4. "
+                    "For example, OD 8 + CS 1 = average 4.5, which works."
                 ),
                 "rx_acc_too_low": (
-                    "Your score gave 0pp — Accuracy too low",
-                    f"Your accuracy was {_reason_data}. "
-                    "Relax and Autopilot scores need at least 75% accuracy to earn pp.",
+                    f"Your score gave 0pp! Your accuracy was {_reason_data}. "
+                    "Relax and Autopilot scores need at least 75% accuracy to earn pp."
+                ),
+                "fl_non_vanilla": (
+                    "Your score gave 0pp! You changed Flashlight settings. "
+                    "Only default Flashlight settings earn pp \u2014 "
+                    "set size, delay and combo-based size back to their defaults."
                 ),
             }
-            _title, _message = _msgs.get(
+            _pm_text = _pm_msgs.get(
                 _reason_code,
-                ("Your score gave 0pp", "Your score did not meet the requirements to earn pp."),
+                "Your score gave 0pp \u2014 it did not meet the requirements to earn pp.",
             )
-            _notif = GlobalAnnouncement.init(
-                source_user_id=BANCHOBOT_ID,
-                title=_title,
-                message=_message,
-                severity="warning",
-                receiver_ids=[user_id],
-            )
-            async with AsyncSession(db_engine) as _notif_session:
-                await insert_notification(_notif_session, _notif)
+            async with _with_db() as _pm_session:
+                _pm_user = await _pm_session.get(_User, user_id)
+                if _pm_user is not None:
+                    _pm_channel = await _toriihalo._ensure_pm_channel(_pm_user, _pm_session)
+                    if _pm_channel is not None:
+                        await _toriihalo._send_message(_pm_channel, _pm_text, _pm_session)
         except Exception as _notif_err:
-            logger.warning("Failed to send 0pp warning for score {}: {}", score.id, _notif_err)
+            logger.warning("Failed to send 0pp warning PM for score {}: {}", score.id, _notif_err)
 
     await _process_statistics(
         session,
