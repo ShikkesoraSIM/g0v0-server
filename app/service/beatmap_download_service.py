@@ -53,30 +53,21 @@ class BeatmapDownloadService:
         # 国外区域端点
         self.international_endpoints = [
             DownloadEndpoint(
-                name="Catboy",
-                base_url="https://catboy.best",
-                health_check_url="https://catboy.best/d/1",
-                url_template="https://catboy.best/d/{sid}",
+                name="Gatari",
+                base_url="https://osu.gatari.pw",
+                health_check_url="https://osu.gatari.pw/d/1",
+                url_template="https://osu.gatari.pw/d/{sid}",
                 is_china=False,
                 priority=0,
                 timeout=10,
             ),
             DownloadEndpoint(
-                name="Myrient",
-                base_url="https://myrient.erista.me",
-                health_check_url="https://myrient.erista.me/files/osu!/",
-                url_template="https://myrient.erista.me/files/osu!/beatmaps/{sid}.osz",
+                name="Nerinyan",
+                base_url="https://api.nerinyan.moe",
+                health_check_url="https://api.nerinyan.moe/d/1",
+                url_template="https://api.nerinyan.moe/d/{sid}",
                 is_china=False,
                 priority=1,
-                timeout=10,
-            ),
-            DownloadEndpoint(
-                name="Beatconnect",
-                base_url="https://beatconnect.io",
-                health_check_url="https://beatconnect.io/",
-                url_template="https://beatconnect.io/b/{sid}",
-                is_china=False,
-                priority=2,
                 timeout=10,
             ),
         ]
@@ -147,12 +138,8 @@ class BeatmapDownloadService:
 
                 # 根据不同端点类型判断健康状态
                 is_healthy = False
-                if endpoint.name == "Sayobot":
-                    # Sayobot 端点返回 200, 302 (Redirect), 304 (Not Modified) 表示正常
-                    is_healthy = response.status_code in [200, 302, 304]
-                else:
-                    # 其他端点返回 200 表示正常
-                    is_healthy = response.status_code == 200
+                # 200, 302 (redirect), 304 (not modified) all indicate a live endpoint
+                is_healthy = response.status_code in [200, 302, 304]
 
                 if is_healthy:
                     # 健康检查成功
@@ -210,9 +197,6 @@ class BeatmapDownloadService:
         if endpoint.name == "Sayobot":
             video_type = "novideo" if no_video else "full"
             return endpoint.url_template.format(type=video_type, sid=beatmapset_id)
-        if endpoint.name == "Catboy":
-            url = endpoint.url_template.format(sid=beatmapset_id)
-            return url + "n" if no_video else url
         return endpoint.url_template.format(sid=beatmapset_id)
 
     def get_download_urls(self, beatmapset_id: int, no_video: bool, is_china: bool) -> list[str]:

@@ -44,6 +44,7 @@ class UserStatisticsDict(TypedDict):
     is_ranked: bool
     level: NotRequired[dict[str, int]]
     global_rank: NotRequired[int | None]
+    global_rank_percent: NotRequired[float | None]
     grade_counts: NotRequired[dict[str, int]]
     rank_change_since_30_days: NotRequired[int]
     country_rank: NotRequired[int | None]
@@ -99,6 +100,30 @@ class UserStatisticsModel(DatabaseModel[UserStatisticsDict]):
     @staticmethod
     async def global_rank(session: AsyncSession, statistics: "UserStatistics") -> int | None:
         return await get_rank(session, statistics)
+
+    # Minimum virtual population for global_rank_percent so that
+    # rank-tier colours spread out on small servers instead of
+    # everyone landing in the same tier.
+    _VIRTUAL_MIN_POPULATION: ClassVar[int] = 10_000
+
+    @included
+    @staticmethod
+    async def global_rank_percent(session: AsyncSession, statistics: "UserStatistics") -> float | None:
+        rank = await get_rank(session, statistics)
+        if rank is None:
+            return None
+        total = (
+            await session.exec(
+                select(func.count()).where(
+                    UserStatistics.mode == statistics.mode,
+                    UserStatistics.pp > 0,
+                    col(UserStatistics.is_ranked).is_(True),
+                )
+            )
+        ).one()
+        if total == 0:
+            return None
+        return rank / max(total, UserStatisticsModel._VIRTUAL_MIN_POPULATION)
 
     @included
     @staticmethod
