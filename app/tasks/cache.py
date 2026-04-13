@@ -190,7 +190,7 @@ def register_cache_jobs() -> None:
 
     scheduler.add_job(
         warmup_cache,
-        trigger=IntervalTrigger(minutes=30, timezone=UTC),
+        trigger=IntervalTrigger(minutes=60, timezone=UTC),
         id=CACHE_JOB_IDS["beatmap_warmup"],
         replace_existing=True,
         coalesce=True,

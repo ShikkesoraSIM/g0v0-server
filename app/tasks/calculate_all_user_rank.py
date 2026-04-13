@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 from app.database import RankHistory, UserStatistics
@@ -11,11 +12,14 @@ from app.utils import utcnow
 from sqlmodel import col, exists, select, update
 
 
-@get_scheduler().scheduled_job("cron", hour=0, minute=0, second=0, id="calculate_user_rank")
+# Stagger rank calculation to 00:00:10 so it doesn't overlap with
+# other midnight tasks (daily challenge, etc.) and block the event loop.
+@get_scheduler().scheduled_job("cron", hour=0, minute=0, second=10, id="calculate_user_rank")
 async def calculate_user_rank(is_today: bool = False):
     today = utcnow().date()
     target_date = today if is_today else today - timedelta(days=1)
     logger.info("Starting user rank calculation for {}", target_date)
+
     async with with_db() as session:
         for gamemode in GameMode:
             logger.info("Calculating ranks for {} on {}", gamemode.name, target_date)
@@ -31,9 +35,10 @@ async def calculate_user_rank(is_today: bool = False):
                     col(UserStatistics.total_score).desc(),
                 )
             )
+            users_list = list(users)
             rank = 1
             processed_users = 0
-            for user in users:
+            for user in users_list:
                 is_exist = (
                     await session.exec(
                         select(exists()).where(
@@ -85,7 +90,16 @@ async def calculate_user_rank(is_today: bool = False):
 
                 rank += 1
                 processed_users += 1
+
+                # Yield to the event loop every 10 users so WebSocket
+                # connections (notification-server) stay alive during
+                # rank calculation.
+                if processed_users % 10 == 0:
+                    await asyncio.sleep(0)
+
             await session.commit()
+            # Yield between game modes as well.
+            await asyncio.sleep(0)
             if processed_users > 0:
                 logger.info(
                     "Updated ranks for {} on {} ({} users)",
@@ -95,4 +109,5 @@ async def calculate_user_rank(is_today: bool = False):
                 )
             else:
                 logger.info("No users found for {} on {}", gamemode.name, target_date)
+
     logger.success("User rank calculation completed for {}", target_date)

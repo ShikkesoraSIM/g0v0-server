@@ -1494,10 +1494,24 @@ async def _process_statistics(
     has_leaderboard = beatmap_status.has_leaderboard() or settings.enable_all_beatmap_leaderboard
 
     mod_for_save = mod_to_save(score.mods)
-    previous_score_best = await get_user_best_score_in_beatmap(session, score.beatmap_id, user.id, score.gamemode)
-    previous_score_best_mod = await get_user_best_score_with_mod_in_beatmap(
-        session, score.beatmap_id, user.id, mod_for_save, score.gamemode
-    )
+    should_check_best_scores = score.passed and (ranked or has_leaderboard)
+    previous_score_best = None
+    previous_score_best_mod = None
+
+    if should_check_best_scores:
+        previous_score_best = await get_user_best_score_in_beatmap(session, score.beatmap_id, user.id, score.gamemode)
+        previous_score_best_mod = await get_user_best_score_with_mod_in_beatmap(
+            session, score.beatmap_id, user.id, mod_for_save, score.gamemode
+        )
+    else:
+        logger.debug(
+            "Skipping best-score lookups for score {score_id} | passed={passed} ranked={ranked} leaderboard={leaderboard}",
+            score_id=score.id,
+            passed=score.passed,
+            ranked=ranked,
+            leaderboard=has_leaderboard,
+        )
+
     logger.debug(
         "Existing best scores for user {user_id} | global={global_id} mod={mod_id}",
         user_id=user.id,

@@ -136,14 +136,25 @@ async def get_score_pp_variant(
     pp_value = float(score.pp or 0.0)
     calc_succeeded = False
     try:
+        # Each pp-dev calc gets its OWN session (avoids "concurrent operations"
+        # when batch tasks share the caller's session).  We use wait_for so
+        # timed-out tasks are cancelled — the `async with` ensures the session
+        # is closed even on CancelledError, preventing connection-pool exhaustion.
+        from app.dependencies.database import engine as _engine
+        from sqlmodel.ext.asyncio.session import AsyncSession as _AsyncSession
+
+        async def _calc_with_own_session():
+            async with _AsyncSession(_engine) as own_session:
+                return await pre_fetch_and_calculate_pp(
+                    score,
+                    own_session,
+                    redis,
+                    fetcher,
+                    calculator_override=pp_dev_calculator,
+                )
+
         calculated, success = await asyncio.wait_for(
-            pre_fetch_and_calculate_pp(
-                score,
-                session,
-                redis,
-                fetcher,
-                calculator_override=pp_dev_calculator,
-            ),
+            _calc_with_own_session(),
             timeout=SCORE_PP_DEV_CALC_TIMEOUT_SECONDS,
         )
         if success:
@@ -450,15 +461,23 @@ async def apply_pp_variant_to_user_response(
 
     # Prefer exact pp-dev ranking from snapshot cache (or on-demand build).
     # This provides real variant leaderboard parity for profile rank display.
+    # Uses its own DB session so cancellation on timeout properly releases the connection.
     snapshot: list[dict[str, Any]] | None = None
     try:
+        from app.dependencies.database import engine as _engine
+        from sqlmodel.ext.asyncio.session import AsyncSession as _AsyncSession
+
+        async def _snapshot_with_own_session():
+            async with _AsyncSession(_engine) as own_session:
+                return await get_pp_dev_ranking_snapshot(
+                    session=own_session,
+                    ruleset=mode,
+                    redis=redis,
+                    fetcher=fetcher,
+                )
+
         snapshot = await asyncio.wait_for(
-            get_pp_dev_ranking_snapshot(
-                session=session,
-                ruleset=mode,
-                redis=redis,
-                fetcher=fetcher,
-            ),
+            _snapshot_with_own_session(),
             timeout=PP_DEV_PROFILE_SNAPSHOT_TIMEOUT_SECONDS,
         )
     except TimeoutError:

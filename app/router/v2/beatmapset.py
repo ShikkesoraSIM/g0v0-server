@@ -324,51 +324,83 @@ async def download_beatmapset(
     if not download_urls:
         raise HTTPException(status_code=503, detail="No download URLs available")
 
-    probe_candidates = download_urls[: min(3, len(download_urls))]
-    # Keep this very short to minimise "pre-download" latency before the client progress bar appears.
-    per_probe_timeout = httpx.Timeout(connect=0.5, read=0.9, write=0.9, pool=0.5)
-    total_probe_window_s = 0.9
+    # Proxy the download through the server instead of redirecting.
+    # Most mirrors use redirect chains that osu! clients can't follow reliably,
+    # so we download server-side and stream to the client.
+    from starlette.responses import StreamingResponse
 
-    async def probe_url(client: httpx.AsyncClient, url: str) -> str | None:
+    proxy_timeout = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+
+    for mirror_url in download_urls:
         try:
-            logger.info(f"[beatmap dl] probe {beatmapset_id} -> {url}")
-            async with client.stream("GET", url, headers={"Range": "bytes=0-1"}) as r:
-                if r.status_code not in (200, 206):
-                    logger.warning(f"[beatmap dl] {url} -> {r.status_code}")
-                    return None
+            logger.info(f"[beatmap dl] proxy attempt {beatmapset_id} -> {mirror_url}")
+            client = httpx.AsyncClient(follow_redirects=True, timeout=proxy_timeout)
+            resp = await client.send(
+                client.build_request("GET", mirror_url),
+                stream=True,
+            )
 
-                # Small probe: ensure response starts as ZIP when possible.
-                first = await anext(r.aiter_bytes(chunk_size=64), b"")
-                content_type = (r.headers.get("Content-Type") or "").lower()
-                if first and not first.startswith(b"PK") and "zip" not in content_type and "octet-stream" not in content_type:
-                    logger.warning(f"[beatmap dl] {url} not zip-like (ct={content_type})")
-                    return None
+            if resp.status_code >= 400:
+                await resp.aclose()
+                await client.aclose()
+                logger.warning(f"[beatmap dl] {mirror_url} -> {resp.status_code}")
+                continue
 
-                return url
+            # Verify it looks like a zip/osz file
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            is_valid = "zip" in content_type or "octet-stream" in content_type or "osu-beatmap" in content_type
+
+            if not is_valid:
+                # Peek at the first bytes to check for PK header
+                first_chunk = b""
+                async for chunk in resp.aiter_bytes(chunk_size=4):
+                    first_chunk = chunk
+                    break
+                if not first_chunk.startswith(b"PK"):
+                    await resp.aclose()
+                    await client.aclose()
+                    logger.warning(f"[beatmap dl] {mirror_url} not a valid osz (ct={content_type})")
+                    continue
+                # Put the first chunk back by wrapping the stream
+                original_stream = resp.aiter_bytes(chunk_size=65536)
+
+                async def patched_stream():
+                    yield first_chunk
+                    async for c in original_stream:
+                        yield c
+
+                stream_iter = patched_stream()
+            else:
+                stream_iter = resp.aiter_bytes(chunk_size=65536)
+
+            content_length = resp.headers.get("Content-Length")
+            resp_headers = {
+                "Content-Type": "application/x-osu-beatmap-archive",
+                "Content-Disposition": f'attachment; filename="{beatmapset_id}.osz"',
+            }
+            if content_length:
+                resp_headers["Content-Length"] = content_length
+
+            async def stream_body():
+                try:
+                    async for chunk in stream_iter:
+                        yield chunk
+                finally:
+                    await resp.aclose()
+                    await client.aclose()
+
+            logger.info(f"[beatmap dl] proxying {beatmapset_id} from {mirror_url}")
+            return StreamingResponse(
+                stream_body(),
+                status_code=200,
+                headers=resp_headers,
+            )
+
         except Exception as e:
-            logger.warning(f"[beatmap dl] {url} probe failed: {e}")
-            return None
+            logger.warning(f"[beatmap dl] proxy failed for {mirror_url}: {e}")
+            continue
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=per_probe_timeout) as client:
-        probe_tasks = [asyncio.create_task(probe_url(client, url)) for url in probe_candidates]
-        try:
-            for task in asyncio.as_completed(probe_tasks, timeout=total_probe_window_s):
-                valid_url = await task
-                if valid_url:
-                    logger.info(f"[beatmap dl] redirect {beatmapset_id} -> {valid_url}")
-                    return RedirectResponse(url=valid_url, status_code=307)
-        except TimeoutError:
-            logger.info(f"[beatmap dl] probe timeout for {beatmapset_id}, falling back to primary mirror")
-        finally:
-            for task in probe_tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*probe_tasks, return_exceptions=True)
-
-    # Low-latency fallback: redirect immediately to top-priority mirror even if probes were inconclusive.
-    fallback_url = download_urls[0]
-    logger.info(f"[beatmap dl] fallback redirect {beatmapset_id} -> {fallback_url}")
-    return RedirectResponse(url=fallback_url, status_code=307)
+    raise HTTPException(status_code=503, detail="All download mirrors failed")
 
 
 @router.post(

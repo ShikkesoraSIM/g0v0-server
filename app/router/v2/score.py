@@ -217,6 +217,26 @@ async def _process_user(score_id: int, user_id: int, redis: Redis, fetcher: Fetc
         await process_user(session, redis, fetcher, user, score, score_token, beatmap[0], BeatmapRankStatus(beatmap[1]))
 
 
+async def _process_user_background(score_id: int, user_id: int, redis: Redis, fetcher: Fetcher):
+    t0 = time.time()
+    try:
+        await _process_user(score_id, user_id, redis, fetcher)
+        logger.info(
+            "[submit_score] background _process_user finished in {:.3f}s score_id={} user_id={}",
+            time.time() - t0,
+            score_id,
+            user_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "[submit_score] background _process_user FAILED in {:.3f}s score_id={} user_id={} err={}",
+            time.time() - t0,
+            score_id,
+            user_id,
+            e,
+        )
+
+
 async def submit_score(
     background_task: BackgroundTasks,
     info: SoloScoreSubmissionInfo,
@@ -339,25 +359,34 @@ async def submit_score(
                 score_id,
             )
 
-            # ✅ Important: do PP/rank/stats update BEFORE responding
-            t_user = time.time()
-            logger.info("[submit_score] BEFORE _process_user score_id={} user_id={}", score_id, user_id)
-            try:
-                await _process_user(score_id, user_id, redis, fetcher)
+            # Failed / quit submissions do not need to block the client on
+            # statistics and leaderboard housekeeping before returning.
+            if score.passed:
+                t_user = time.time()
+                logger.info("[submit_score] BEFORE _process_user score_id={} user_id={}", score_id, user_id)
+                try:
+                    await _process_user(score_id, user_id, redis, fetcher)
+                    logger.info(
+                        "[submit_score] AFTER _process_user in {:.3f}s score_id={} user_id={}",
+                        time.time() - t_user,
+                        score_id,
+                        user_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[submit_score] _process_user FAILED in {:.3f}s score_id={} user_id={} err={}",
+                        time.time() - t_user,
+                        score_id,
+                        user_id,
+                        e,
+                    )
+            else:
                 logger.info(
-                    "[submit_score] AFTER _process_user in {:.3f}s score_id={} user_id={}",
-                    time.time() - t_user,
+                    "[submit_score] scheduling background _process_user for failed score_id={} user_id={}",
                     score_id,
                     user_id,
                 )
-            except Exception as e:
-                logger.warning(
-                    "[submit_score] _process_user FAILED in {:.3f}s score_id={} user_id={} err={}",
-                    time.time() - t_user,
-                    score_id,
-                    user_id,
-                    e,
-                )
+                background_task.add_task(_process_user_background, score_id, user_id, redis, fetcher)
 
     # _process_user runs in a dedicated session.
     # Commit before re-reading to avoid stale snapshots (e.g. MySQL REPEATABLE READ).

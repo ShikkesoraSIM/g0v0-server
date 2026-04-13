@@ -156,6 +156,15 @@ class VerifySessionMiddleware(BaseHTTPMiddleware):
         if self._should_skip_verification(request):
             return await call_next(request)
 
+        # Fast path: safe methods (GET/HEAD/OPTIONS) never need verification
+        # unless the route is in ALWAYS_VERIFY_PATTERNS. Skip expensive DB
+        # lookups (2 extra sessions + 3 queries) for the vast majority of requests.
+        if request.method in {"GET", "HEAD", "OPTIONS"}:
+            path = request.url.path
+            needs_verify = any(path.startswith(p) for p in self.ALWAYS_VERIFY_PATTERNS)
+            if not needs_verify:
+                return await call_next(request)
+
         # 获取当前用户
         user = await self._get_current_user(request)
         if not user:

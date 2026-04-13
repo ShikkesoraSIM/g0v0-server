@@ -304,7 +304,7 @@ class BeatmapsetFetcher(BaseFetcher):
             try:
                 # 在请求之间添加延迟，避免突发请求
                 if i > 0:
-                    await asyncio.sleep(2.0)  # 2秒延迟
+                    await asyncio.sleep(5.0)  # 5s delay — gentler on osu! API rate limit
 
                 cache_key = self._generate_cache_key(query, cursor)
 
@@ -325,8 +325,8 @@ class BeatmapsetFetcher(BaseFetcher):
                     cursor_dict = api_response["cursor"]
                     api_response["cursor_string"] = self._encode_cursor(cursor_dict)
 
-                # 缓存结果
-                cache_ttl = 20 * 60  # 20 分钟
+                # 缓存结果 — long TTL so we don't re-fetch too aggressively
+                cache_ttl = 90 * 60  # 90 minutes
                 await redis_client.set(
                     cache_key,
                     json.dumps(api_response, separators=(",", ":")),
@@ -335,8 +335,9 @@ class BeatmapsetFetcher(BaseFetcher):
 
                 logger.info(f"Warmed up cache for {query.sort} (TTL: {cache_ttl}s)")
 
-                if api_response.get("cursor"):
-                    await self.prefetch_next_pages(query, api_response["cursor"], redis_client, pages=2)
+                # Skip prefetching extra pages to conserve API rate limit
+                # if api_response.get("cursor"):
+                #     await self.prefetch_next_pages(query, api_response["cursor"], redis_client, pages=2)
 
             except Exception as e:
                 logger.error(f"Failed to warmup cache for {query.sort}: {e}")
