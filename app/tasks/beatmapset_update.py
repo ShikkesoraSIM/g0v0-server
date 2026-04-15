@@ -11,9 +11,9 @@ if settings.enable_auto_beatmap_sync:
         "interval",
         id="update_beatmaps",
         minutes=settings.beatmap_sync_interval_minutes,
-        # Delay first run by 5 minutes after startup to avoid rate-limiting
-        # the osu! API right away (other startup tasks also fetch data).
-        next_run_time=datetime.now() + timedelta(minutes=5),
+        # Delay first run by 30 minutes after startup — the cache warmup
+        # already fires on startup and consumes most of the rate budget.
+        next_run_time=datetime.now() + timedelta(minutes=30),
     )
     async def beatmapset_update_job():
         service = get_beatmapset_update_service()

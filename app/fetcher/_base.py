@@ -27,15 +27,19 @@ class PassiveRateLimiter:
         self._waiting_tasks: set[asyncio.Task] = set()
 
     async def wait_if_limited(self) -> None:
-        """如果正在限流中，等待限流解除"""
-        async with self._lock:
-            if self._retry_after_time is not None:
-                current_time = time.time()
-                if current_time < self._retry_after_time:
-                    wait_seconds = self._retry_after_time - current_time
-                    logger.warning(f"Rate limited, waiting {wait_seconds:.2f} seconds")
-                    await asyncio.sleep(wait_seconds)
+        """Wait until the rate-limit window expires, without holding the lock
+        during the sleep so concurrent callers don't serialise behind each other."""
+        while True:
+            async with self._lock:
+                if self._retry_after_time is None:
+                    return
+                wait_seconds = self._retry_after_time - time.time()
+                if wait_seconds <= 0:
                     self._retry_after_time = None
+                    return
+            # Sleep outside the lock so other coroutines can also check.
+            logger.warning(f"Rate limited, waiting {wait_seconds:.2f} seconds")
+            await asyncio.sleep(wait_seconds)
 
     async def handle_rate_limit(self, retry_after: str | int | None) -> None:
         """
