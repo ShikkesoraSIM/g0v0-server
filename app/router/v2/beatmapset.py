@@ -15,7 +15,7 @@ from app.database import (
 )
 from app.dependencies.beatmap_download import DownloadService
 from app.dependencies.cache import BeatmapsetCacheService, UserCacheService
-from app.dependencies.database import Database, Redis
+from app.dependencies.database import Database, Redis, with_db
 from app.dependencies.fetcher import Fetcher
 from app.dependencies.geoip import IPAddress, get_geoip_helper
 from app.dependencies.storage import StorageService
@@ -282,7 +282,6 @@ async def get_beatmapset(
 
 @router.get("/beatmapsets/{beatmapset_id}/download", tags=["谱面集"])
 async def download_beatmapset(
-    db: Database,
     storage: StorageService,
     client_ip: IPAddress,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
@@ -290,9 +289,14 @@ async def download_beatmapset(
     no_video: Annotated[bool, Query(alias="noVideo")] = True,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
-    # Local user-uploaded beatmaps should be downloaded from local storage, not external mirrors.
-    local_beatmapset = await db.get(Beatmapset, beatmapset_id)
-    if local_beatmapset and local_beatmapset.is_local:
+    # Use a short-lived session just for the DB lookup, released before the
+    # streaming response starts — otherwise the session stays open for the
+    # entire download duration and exhausts the connection pool.
+    async with with_db() as db:
+        local_beatmapset = await db.get(Beatmapset, beatmapset_id)
+        is_local = bool(local_beatmapset and local_beatmapset.is_local)
+
+    if is_local:
         local_file_path = f"beatmapsets/{beatmapset_id}.osz"
         if await storage.is_exists(local_file_path):
             local_url = await storage.get_file_url(local_file_path)
