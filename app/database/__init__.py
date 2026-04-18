@@ -19,6 +19,7 @@ from .beatmapset import (
 )
 from .beatmapset_ratings import BeatmapRating
 from .best_scores import BestScore
+from .briefing_radar import ToriiBriefingRadarSnapshot
 from .chat import (
     ChannelType,
     ChatChannel,
@@ -160,6 +161,7 @@ __all__ = [
     "TeamResp",
     "TotalScoreBestScore",
     "TotpKeys",
+    "ToriiBriefingRadarSnapshot",
     "TrustedDevice",
     "TrustedDeviceResp",
     "User",
