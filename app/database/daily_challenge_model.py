@@ -24,6 +24,9 @@ class DailyChallenge(DailyChallengeBase, table=True):
 
 class DailyChallengeCreate(DailyChallengeBase):
     date: str
+    # Provide defaults so the admin form can omit these if no mods are selected
+    required_mods: str = "[]"
+    allowed_mods: str = "[]"
 
 
 class DailyChallengeUpdate(SQLModel):
@@ -38,6 +41,8 @@ class DailyChallengeUpdate(SQLModel):
 
 class DailyChallengeResponse(DailyChallengeBase):
     date: dt_date
-    created_at: datetime
-    updated_at: datetime
+    # DB columns are nullable (datetime | None = None); reflect that here to avoid
+    # Pydantic validation failures when a freshly-created challenge has no timestamps yet.
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
     beatmap: dict[str, Any] | None = None
