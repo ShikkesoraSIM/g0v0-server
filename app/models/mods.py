@@ -349,8 +349,8 @@ def _mods_can_get_pp(ruleset_id: int, mods: list[APIMod], ranked_mods: RankedMod
         # Hard safety rule for mania: Invert is always non-pp.
         if ruleset_id == 3 and mod["acronym"] == "IN":
             return False
-        # Bloom (BL) is disabled server-wide — the PP calculation is broken.
-        if mod["acronym"] == "BL":
+        # Bloom (BM) is disabled server-wide — the PP calculation is broken.
+        if mod["acronym"] == "BM":
             return False
         if app_settings.enable_rx and mod["acronym"] == "RX" and ruleset_id in {0, 1, 2}:
             continue
