@@ -384,20 +384,21 @@ async def chat_websocket(
 
     user: User | None = None
     user_id: int | None = None
-    session: AsyncSession | None = None
 
     try:
+        # --- SHORT-LIVED SESSION: only for auth + initial channel setup ---
+        # The session is closed before the long _listen_stop loop so it does
+        # NOT hold a pool connection for the entire WebSocket lifetime.
+        auth_token = token or access_token
+        if not auth_token and authorization:
+            auth_token = authorization.removeprefix("Bearer ")
+
+        if not auth_token:
+            await websocket.close(code=1008, reason="Missing authentication token")
+            logger.info("WebSocket rejected: missing authentication token")
+            return
+
         async with AsyncSession(engine) as session:
-            # 优先使用查询参数中的token，支持token或access_token参数名
-            auth_token = token or access_token
-            if not auth_token and authorization:
-                auth_token = authorization.removeprefix("Bearer ")
-
-            if not auth_token:
-                await websocket.close(code=1008, reason="Missing authentication token")
-                logger.info("WebSocket rejected: missing authentication token")
-                return
-
             try:
                 # Keep websocket auth permissive on scope for compatibility with
                 # older/custom clients that still use "*" password-grant tokens.
@@ -434,9 +435,10 @@ async def chat_websocket(
             ).all()
             for channel in pm_channels:
                 await server.join_channel(user, channel)
+        # --- SESSION CLOSED HERE — pool connection returned before the loop ---
 
-            await _listen_stop(websocket, user_id)
-            return  # importante: salimos del handler cuando termina
+        await _listen_stop(websocket, user_id)
+        return  # importante: salimos del handler cuando termina
 
     except WebSocketDisconnect as e:
         # ✅ desconexión normal: NO traceback
@@ -449,8 +451,10 @@ async def chat_websocket(
         logger.exception(f"Websocket crashed for client {user_id}")
         return
     finally:
-        if user is not None and session is not None:
+        if user is not None:
             try:
-                await server.disconnect(user, session, websocket)
+                # Fresh session for cleanup so the pool is not double-held.
+                async with AsyncSession(engine) as cleanup_session:
+                    await server.disconnect(user, cleanup_session, websocket)
             except Exception:
                 logger.exception(f"Cleanup failed for client {user_id}")
