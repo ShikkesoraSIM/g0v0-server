@@ -6,6 +6,7 @@ from app.config import settings
 from app.models.beatmap import BeatmapRankStatus
 from app.models.notification import NotificationName
 from app.models.score import GameMode
+from app.models.torii_groups import build_groups
 from app.models.user import Country, Page
 from app.path import STATIC_DIR
 from app.utils import utcnow
@@ -122,7 +123,7 @@ class UserDict(TypedDict):
     is_gmt: NotRequired[bool]
     is_qat: NotRequired[bool]
     is_bng: NotRequired[bool]
-    groups: NotRequired[list[str]]
+    groups: NotRequired[list[dict]]
     active_tournament_banners: NotRequired[list[dict]]
     graveyard_beatmapset_count: NotRequired[int]
     loved_beatmapset_count: NotRequired[int]
@@ -375,8 +376,8 @@ class UserModel(DatabaseModel[UserDict]):
 
     @ondemand
     @staticmethod
-    async def groups(_session: AsyncSession, _obj: "User") -> list[str]:
-        return []
+    async def groups(_session: AsyncSession, obj: "User") -> list[dict]:
+        return build_groups(obj)
 
     @ondemand
     @staticmethod
@@ -869,6 +870,7 @@ class User(AsyncAttrs, UserModel, table=True):
     email: str = Field(max_length=254, unique=True, index=True)
     priv: int = Field(default=1)
     is_admin: bool = Field(default=False)
+    torii_titles: list[str] = Field(default=[], sa_column=Column(JSON))
     pw_bcrypt: str = Field(max_length=60)
     silence_end_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     donor_end_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
