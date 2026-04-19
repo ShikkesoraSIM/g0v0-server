@@ -41,6 +41,28 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_ as sql_or
 from sqlmodel import col, func, select
 
+def _parse_mods_raw(raw: str | None) -> list[APIMod]:
+    """Parse mods from a JSON string into a list of APIMod dicts.
+
+    The admin frontend stores mods as a JSON array of acronym strings
+    (e.g. ``["HD","NF"]``).  The rest of the server (cron jobs, room
+    creation) expects APIMod dicts (``[{"acronym": "HD"}, ...]``).
+    This helper normalises both formats and silently falls back to []
+    on parse errors so a bad payload never crashes an endpoint.
+    """
+    try:
+        parsed = json.loads(raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    result: list[APIMod] = []
+    for item in parsed:
+        if isinstance(item, str):
+            result.append(APIMod(acronym=item))
+        elif isinstance(item, dict) and "acronym" in item:
+            result.append(cast(APIMod, {k: v for k, v in item.items()}))
+    return result
+
+
 async def require_admin(session: Database, user_and_token: UserAndToken) -> User:
     """Helper function to check if user is admin"""
     current_user, _ = user_and_token
@@ -2152,13 +2174,21 @@ async def create_daily_challenge(
         if existing_room_challenge:
             raise HTTPException(status_code=409, detail="Room ID already in use by another daily challenge")
 
+    required_mods_list = _parse_mods_raw(challenge_data.required_mods)
+    allowed_mods_list = _parse_mods_raw(challenge_data.allowed_mods)
+
+    # Store mods in canonical APIMod format so that the cron job can consume
+    # them directly without further conversion.
+    required_mods_json = json.dumps(required_mods_list)
+    allowed_mods_json = json.dumps(allowed_mods_list)
+
     # Create new challenge with enhanced fields
     new_challenge = DailyChallenge(
         date=challenge_date,
         beatmap_id=challenge_data.beatmap_id,
         ruleset_id=challenge_data.ruleset_id,
-        required_mods=challenge_data.required_mods,
-        allowed_mods=challenge_data.allowed_mods,
+        required_mods=required_mods_json,
+        allowed_mods=allowed_mods_json,
         room_id=getattr(challenge_data, 'room_id', None),
         max_attempts=getattr(challenge_data, 'max_attempts', None),
         time_limit=getattr(challenge_data, 'time_limit', None),
@@ -2168,16 +2198,13 @@ async def create_daily_challenge(
     redis = get_redis()
     redis_key = f"daily_challenge:{challenge_date}"
 
-    required_mods_list = json.loads(challenge_data.required_mods)
-    allowed_mods_list = json.loads(challenge_data.allowed_mods)
-
     await redis.hset(
         redis_key,
         mapping={
             "beatmap": new_challenge.beatmap_id,
             "ruleset_id": new_challenge.ruleset_id,
-            "required_mods": challenge_data.required_mods,
-            "allowed_mods": challenge_data.allowed_mods,
+            "required_mods": required_mods_json,
+            "allowed_mods": allowed_mods_json,
         },
     )
 
@@ -2192,8 +2219,8 @@ async def create_daily_challenge(
             beatmap=new_challenge.beatmap_id,
             ruleset_id=new_challenge.ruleset_id,
             duration=duration,
-            required_mods=cast(list[APIMod], required_mods_list),
-            allowed_mods=cast(list[APIMod], allowed_mods_list),
+            required_mods=required_mods_list,
+            allowed_mods=allowed_mods_list,
         )
         new_challenge.room_id = room.id
 
@@ -2261,9 +2288,10 @@ async def update_daily_challenge(
     if getattr(challenge_data, 'ruleset_id', None) is not None:
         challenge.ruleset_id = challenge_data.ruleset_id
     if getattr(challenge_data, 'required_mods', None) is not None:
-        challenge.required_mods = challenge_data.required_mods
+        # Normalise to APIMod format (frontend sends acronym strings)
+        challenge.required_mods = json.dumps(_parse_mods_raw(challenge_data.required_mods))
     if getattr(challenge_data, 'allowed_mods', None) is not None:
-        challenge.allowed_mods = challenge_data.allowed_mods
+        challenge.allowed_mods = json.dumps(_parse_mods_raw(challenge_data.allowed_mods))
     if getattr(challenge_data, 'room_id', None) is not None:
         # Check if room_id is already used by another challenge
         existing_room_challenge = (
@@ -2304,15 +2332,15 @@ async def update_daily_challenge(
         # Duration should be in minutes, not seconds
         duration = int((next_day - now).total_seconds() / 60)
 
-        required_mods_list = json.loads(challenge.required_mods)
-        allowed_mods_list = json.loads(challenge.allowed_mods)
+        required_mods_list = _parse_mods_raw(challenge.required_mods)
+        allowed_mods_list = _parse_mods_raw(challenge.allowed_mods)
 
         room = await create_daily_challenge_room(
             beatmap=challenge.beatmap_id,
             ruleset_id=challenge.ruleset_id,
             duration=duration,
-            required_mods=cast(list[APIMod], required_mods_list),
-            allowed_mods=cast(list[APIMod], allowed_mods_list),
+            required_mods=required_mods_list,
+            allowed_mods=allowed_mods_list,
         )
         challenge.room_id = room.id
 

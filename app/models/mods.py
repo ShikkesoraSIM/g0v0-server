@@ -113,10 +113,12 @@ def mods_to_int(mods: list[APIMod]) -> int:
 
 DEFAULT_RANKED_MODS = {
     0: {
+        # ── Difficulty Reduction ──────────────────────────────────────────────
         "EZ": {"retries": {"type": "number", "eq": 2}},
         "NF": {},
         "HT": {"speed_change": {"type": "number", "eq": 0.75}, "adjust_pitch": {"check": False, "type": "boolean"}},
         "DC": {"speed_change": {"type": "number", "eq": 0.75}},
+        # ── Difficulty Increase ───────────────────────────────────────────────
         "HR": {},
         "SD": {
             "fail_on_slider_tail": {"check": False, "type": "boolean"},
@@ -131,6 +133,70 @@ DEFAULT_RANKED_MODS = {
             "size_multiplier": {"type": "number", "eq": 1.0},
             "combo_based_size": {"type": "boolean", "eq": True},
         },
+        "ST": {},  # Strict Tracking — harder slider rules
+        # ── Automation (gated by server flags, pass-through here) ─────────────
+        # RX / AP are allowed by _mods_can_get_pp when enable_rx / enable_ap is set
+        # ── Conversion / Fun mods ─────────────────────────────────────────────
+        "CL": {  # Classic — allow any combo of sub-settings
+            "no_slider_head_accuracy": {"check": False, "type": "boolean"},
+            "classic_note_lock": {"check": False, "type": "boolean"},
+            "always_play_tail_sample": {"check": False, "type": "boolean"},
+            "fade_hit_circle_early": {"check": False, "type": "boolean"},
+            "classic_health": {"check": False, "type": "boolean"},
+        },
+        "DA": {  # Difficulty Adjust — allow any settings (no hard OD floor for std)
+            "circle_size": {"check": False, "type": "number"},
+            "approach_rate": {"check": False, "type": "number"},
+            "drain_rate": {"check": False, "type": "number"},
+            "overall_difficulty": {"check": False, "type": "number"},
+            "extended_limits": {"check": False, "type": "boolean"},
+        },
+        "MR": {},  # Mirror
+        "RD": {  # Random
+            "angle_sharpness": {"check": False, "type": "number"},
+            "seed": {"check": False, "type": "number"},
+        },
+        "TP": {  # Target Practice
+            "seed": {"check": False, "type": "number"},
+            "metronome": {"check": False, "type": "boolean"},
+        },
+        "AD": {  # Approach Different
+            "scale": {"check": False, "type": "number"},
+            "style": {"check": False, "type": "string"},
+        },
+        "AS": {  # Adaptive Speed
+            "initial_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        "BR": {  # Barrel Roll
+            "spin_speed": {"check": False, "type": "number"},
+            "direction": {"check": False, "type": "string"},
+        },
+        "BU": {},   # Bubbles
+        "DF": {"start_scale": {"check": False, "type": "number"}},   # Deflate
+        "DP": {  # Depth
+            "max_depth": {"check": False, "type": "number"},
+            "show_approach_circles": {"check": False, "type": "boolean"},
+        },
+        "FR": {},   # Freeze Frame
+        "GR": {"start_scale": {"check": False, "type": "number"}},   # Grow
+        "MG": {"attraction_strength": {"check": False, "type": "number"}},  # Magnetised
+        "RP": {"repulsion_strength": {"check": False, "type": "number"}},   # Repel
+        "SI": {},   # Spin In
+        "SY": {},   # Synesthesia
+        "TR": {},   # Transform
+        "WD": {  # Wind Down
+            "initial_rate": {"check": False, "type": "number"},
+            "final_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        "WG": {"strength": {"check": False, "type": "number"}},  # Wiggle
+        "WU": {  # Wind Up
+            "initial_rate": {"check": False, "type": "number"},
+            "final_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        # ── Other existing ────────────────────────────────────────────────────
         "AC": {
             "minimum_accuracy": {"check": False, "type": "number"},
             "accuracy_judge_mode": {"check": False, "type": "string"},
@@ -143,7 +209,7 @@ DEFAULT_RANKED_MODS = {
             "affects_hit_sounds": {"check": False, "type": "boolean"},
         },
         "TD": {},
-        "BL": {},
+        "BL": {},   # Blinds
         "NS": {"hidden_combo_count": {"check": False, "type": "number"}},
         "SO": {},
         "TC": {},
@@ -151,10 +217,12 @@ DEFAULT_RANKED_MODS = {
         "SG": {},
     },
     1: {
+        # ── Difficulty Reduction ──────────────────────────────────────────────
         "EZ": {},
         "NF": {},
         "HT": {"speed_change": {"type": "number", "eq": 0.75}, "adjust_pitch": {"check": False, "type": "boolean"}},
         "DC": {"speed_change": {"type": "number", "eq": 0.75}},
+        # ── Difficulty Increase ───────────────────────────────────────────────
         "HR": {},
         "SD": {"restart": {"check": False, "type": "boolean"}},
         "PF": {"restart": {"check": False, "type": "boolean"}},
@@ -162,6 +230,31 @@ DEFAULT_RANKED_MODS = {
         "DT": {"speed_change": {"type": "number", "eq": 1.5}, "adjust_pitch": {"check": False, "type": "boolean"}},
         "NC": {"speed_change": {"type": "number", "eq": 1.5}},
         "FL": {"size_multiplier": {"type": "number", "eq": 1.0}, "combo_based_size": {"type": "boolean", "eq": True}},
+        # ── Conversion / Fun mods ─────────────────────────────────────────────
+        "CL": {},   # Classic
+        "CS": {},   # Constant Speed
+        "DA": {  # Difficulty Adjust
+            "drain_rate": {"check": False, "type": "number"},
+            "overall_difficulty": {"check": False, "type": "number"},
+            "extended_limits": {"check": False, "type": "boolean"},
+        },
+        "RD": {"seed": {"check": False, "type": "number"}},  # Random
+        "SR": {},   # Simplified Rhythm
+        "AS": {  # Adaptive Speed
+            "initial_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        "WD": {  # Wind Down
+            "initial_rate": {"check": False, "type": "number"},
+            "final_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        "WU": {  # Wind Up
+            "initial_rate": {"check": False, "type": "number"},
+            "final_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        # ── Other existing ────────────────────────────────────────────────────
         "AC": {
             "minimum_accuracy": {"check": False, "type": "number"},
             "accuracy_judge_mode": {"check": False, "type": "string"},
@@ -177,10 +270,12 @@ DEFAULT_RANKED_MODS = {
         "SW": {},
     },
     2: {
+        # ── Difficulty Reduction ──────────────────────────────────────────────
         "EZ": {"retries": {"type": "number", "eq": 2}},
         "NF": {},
         "HT": {"speed_change": {"type": "number", "eq": 0.75}, "adjust_pitch": {"check": False, "type": "boolean"}},
         "DC": {"speed_change": {"type": "number", "eq": 0.75}},
+        # ── Difficulty Increase ───────────────────────────────────────────────
         "HR": {},
         "SD": {"restart": {"check": False, "type": "boolean"}},
         "PF": {"restart": {"check": False, "type": "boolean"}},
@@ -188,6 +283,29 @@ DEFAULT_RANKED_MODS = {
         "DT": {"speed_change": {"type": "number", "eq": 1.5}, "adjust_pitch": {"check": False, "type": "boolean"}},
         "NC": {"speed_change": {"type": "number", "eq": 1.5}},
         "FL": {"size_multiplier": {"type": "number", "eq": 1.0}, "combo_based_size": {"type": "boolean", "eq": True}},
+        # ── Conversion / Fun mods ─────────────────────────────────────────────
+        "CL": {},   # Classic
+        "DA": {  # Difficulty Adjust
+            "circle_size": {"check": False, "type": "number"},
+            "approach_rate": {"check": False, "type": "number"},
+            "drain_rate": {"check": False, "type": "number"},
+            "overall_difficulty": {"check": False, "type": "number"},
+            "extended_limits": {"check": False, "type": "boolean"},
+        },
+        "MR": {},   # Mirror
+        "FF": {},   # Floating Fruits
+        "MF": {},   # Moving Fast
+        "WD": {  # Wind Down
+            "initial_rate": {"check": False, "type": "number"},
+            "final_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        "WU": {  # Wind Up
+            "initial_rate": {"check": False, "type": "number"},
+            "final_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        # ── Other existing ────────────────────────────────────────────────────
         "AC": {
             "minimum_accuracy": {"check": False, "type": "number"},
             "accuracy_judge_mode": {"check": False, "type": "string"},
@@ -202,6 +320,7 @@ DEFAULT_RANKED_MODS = {
         "NS": {"hidden_combo_count": {"check": False, "type": "number"}},
     },
     3: {
+        # ── Difficulty Reduction ──────────────────────────────────────────────
         "EZ": {"retries": {"type": "number", "eq": 2}},
         "NF": {},
         "DA": {
@@ -211,15 +330,41 @@ DEFAULT_RANKED_MODS = {
         },
         "HT": {"speed_change": {"type": "number", "eq": 0.75}, "adjust_pitch": {"check": False, "type": "boolean"}},
         "DC": {"speed_change": {"type": "number", "eq": 0.75}},
+        "NR": {},   # No Release — reduction (easier holds)
+        # ── Difficulty Increase ───────────────────────────────────────────────
+        "HR": {},
         "SD": {"restart": {"check": False, "type": "boolean"}},
         "PF": {
             "require_perfect_hits": {"check": False, "type": "boolean"},
             "restart": {"check": False, "type": "boolean"},
         },
         "HD": {},
+        "FI": {},   # Fade In
+        "CO": {},   # Cover
         "DT": {"speed_change": {"type": "number", "eq": 1.5}, "adjust_pitch": {"check": False, "type": "boolean"}},
         "NC": {"speed_change": {"type": "number", "eq": 1.5}},
         "FL": {"size_multiplier": {"type": "number", "eq": 1.0}, "combo_based_size": {"type": "boolean", "eq": False}},
+        # ── Conversion / Fun mods ─────────────────────────────────────────────
+        "CL": {},   # Classic
+        "CS": {},   # Constant Speed
+        "DS": {},   # Dual Stages
+        "HO": {},   # Hold Off
+        "RD": {"seed": {"check": False, "type": "number"}},  # Random
+        "AS": {  # Adaptive Speed
+            "initial_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        "WD": {  # Wind Down
+            "initial_rate": {"check": False, "type": "number"},
+            "final_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        "WU": {  # Wind Up
+            "initial_rate": {"check": False, "type": "number"},
+            "final_rate": {"check": False, "type": "number"},
+            "adjust_pitch": {"check": False, "type": "boolean"},
+        },
+        # ── Other existing ────────────────────────────────────────────────────
         "AC": {
             "minimum_accuracy": {"check": False, "type": "number"},
             "accuracy_judge_mode": {"check": False, "type": "string"},
@@ -238,6 +383,10 @@ DEFAULT_RANKED_MODS = {
         "7K": {},
         "8K": {},
         "9K": {},
+        "1K": {},
+        "2K": {},
+        "3K": {},
+        "10K": {},
     },
 }
 TYPE_TO_PY = {
@@ -349,8 +498,8 @@ def _mods_can_get_pp(ruleset_id: int, mods: list[APIMod], ranked_mods: RankedMod
         # Hard safety rule for mania: Invert is always non-pp.
         if ruleset_id == 3 and mod["acronym"] == "IN":
             return False
-        # Bloom (BL) is disabled server-wide — the PP calculation is broken.
-        if mod["acronym"] == "BL":
+        # Bloom (BM) is disabled server-wide — the PP calculation is broken.
+        if mod["acronym"] == "BM":
             return False
         if app_settings.enable_rx and mod["acronym"] == "RX" and ruleset_id in {0, 1, 2}:
             continue
