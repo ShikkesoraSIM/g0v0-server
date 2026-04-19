@@ -99,6 +99,8 @@ async def user_to_dict(user: User, session: Database) -> dict:
     except Exception:
         user_dict["is_restricted"] = False
 
+    user_dict["torii_titles"] = user.torii_titles or []
+
     # Handle badges - serialize datetime to ISO string
     try:
         # 1. Get badges from JSON field (legacy)
@@ -240,6 +242,8 @@ class UserUpdateRequest(BaseModel):
     is_admin: bool | None = None
     # Accept legacy payloads from older frontend builds (dict/str/list)
     badge: dict | str | list[dict] | None = None
+    # List of TORII_GROUPS keys to assign as custom titles (replaces the full list)
+    torii_titles: list[str] | None = None
 
 
 class BeatmapBlacklistItem(BaseModel):
@@ -981,6 +985,16 @@ async def update_user(
 
     if user_data.is_admin is not None:
         user.is_admin = user_data.is_admin
+
+    if user_data.torii_titles is not None:
+        from app.models.torii_groups import TORII_GROUPS
+        unknown = [k for k in user_data.torii_titles if k not in TORII_GROUPS]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown torii_titles keys: {unknown}. Valid keys: {sorted(TORII_GROUPS)}",
+            )
+        user.torii_titles = user_data.torii_titles
 
     if user_data.badge is not None:
         import json
