@@ -544,19 +544,6 @@ CALCULATOR_CONFIG='{}'
         ),
         "è¡¨çŽ°è®¡ç®—è®¾ç½®",
     ]
-    pp_dev_calculator: Annotated[
-        Literal["rosu", "performance_server"],
-        Field(default="rosu", description="pp-dev dedicated performance calculator"),
-        "Performance Settings",
-    ]
-    pp_dev_calculator_config: Annotated[
-        dict[str, Any],
-        Field(
-            default={"server_url": "http://localhost:5225"},
-            description="pp-dev calculator config (JSON)",
-        ),
-        "Performance Settings",
-    ]
     fallback_no_calculator_pp: Annotated[
         bool,
         Field(default=False, description="å½“è®¡ç®—å™¨ä¸æ”¯æŒæŸä¸ªæ¨¡å¼æ—¶ï¼Œä½¿ç”¨ç®€åŒ–çš„ pp è®¡ç®—æ–¹æ³•ä½œä¸ºåŽå¤‡"),
@@ -694,6 +681,61 @@ CALCULATOR_CONFIG='{}'
     suspicious_score_check: Annotated[
         bool,
         Field(default=True, description="å¯ç”¨å¯ç–‘åˆ†æ•°æ£€æŸ¥ï¼ˆpp>3000ï¼‰"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    enable_suspicious_mod_alerts: Annotated[
+        bool,
+        Field(default=True, description="å¯ç”¨å¯ç–‘è´¦å·/æˆç»©çš„ç®¡ç†å‘Šè­¦"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    moderation_alert_token: Annotated[
+        str,
+        Field(default="", description="ToriiHalo è½®è¯¢ç®¡ç†å‘Šè­¦æ—¶ä½¿ç”¨çš„ç§æœ‰ token"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_alert_pp_threshold: Annotated[
+        float,
+        Field(default=1200.0, description="è¾¾åˆ°è¯¥ pp åŽç›´æŽ¥å‘Šè­¦"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_alert_low_acc_pp_threshold: Annotated[
+        float,
+        Field(default=800.0, description="ä½Žå‡†ç¡®çŽ‡é«˜ pp å‘Šè­¦é˜ˆå€¼"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_alert_low_accuracy: Annotated[
+        float,
+        Field(default=0.80, description="ä½Žå‡†ç¡®çŽ‡é«˜ pp å‘Šè­¦é˜ˆå€¼ï¼ˆ0-1ï¼‰"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_alert_new_account_days: Annotated[
+        int,
+        Field(default=14, description="å°äºŽç­‰äºŽè¯¥å¤©æ•°è§†ä¸ºæ–°è´¦å·"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_alert_new_account_pp_threshold: Annotated[
+        float,
+        Field(default=900.0, description="æ–°è´¦å·é«˜ pp å‘Šè­¦é˜ˆå€¼"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_alert_low_playcount_threshold: Annotated[
+        int,
+        Field(default=250, description="ä½Ž playcount å‘Šè­¦é˜ˆå€¼"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_alert_low_playcount_pp_threshold: Annotated[
+        float,
+        Field(default=700.0, description="ä½Ž playcount é«˜ pp å‘Šè­¦é˜ˆå€¼"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_shared_ip_user_threshold: Annotated[
+        int,
+        Field(default=2, description="åŒä¸€ IP å‘½ä¸­å¤šè´¦å·åŽè§¦å‘å‘Šè­¦"),
+        "åä½œå¼Šè®¾ç½®",
+    ]
+    suspicious_shared_ip_critical_threshold: Annotated[
+        int,
+        Field(default=4, description="åŒä¸€ IP å‘½ä¸­å¤šè´¦å·çš„ä¸¥é‡çº§åˆ«é˜ˆå€¼"),
         "åä½œå¼Šè®¾ç½®",
     ]
     banned_name: Annotated[

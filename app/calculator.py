@@ -30,8 +30,6 @@ if TYPE_CHECKING:
 logger = log("Calculator")
 
 CALCULATOR: PerformanceCalculator | None = None
-PP_DEV_CALCULATOR: PerformanceCalculator | None = None
-PP_DEV_CALCULATOR_INIT_FAILED = False
 
 
 async def init_calculator():
@@ -50,34 +48,6 @@ def get_calculator() -> PerformanceCalculator:
     if CALCULATOR is None:
         raise RuntimeError("Performance calculator is not initialized")
     return CALCULATOR
-
-
-async def get_pp_dev_calculator() -> PerformanceCalculator | None:
-    """Return the calculator used for pp-dev variant evaluation.
-
-    This is intentionally isolated from the stable calculator so pp-dev can
-    target a different backend/runtime without affecting score submission.
-    """
-    global PP_DEV_CALCULATOR
-    global PP_DEV_CALCULATOR_INIT_FAILED
-
-    if PP_DEV_CALCULATOR is not None:
-        return PP_DEV_CALCULATOR
-    if PP_DEV_CALCULATOR_INIT_FAILED:
-        return None
-
-    try:
-        module = importlib.import_module(f"app.calculators.performance.{settings.pp_dev_calculator}")
-        PP_DEV_CALCULATOR = module.PerformanceCalculator(**settings.pp_dev_calculator_config)
-        await PP_DEV_CALCULATOR.init()
-        return PP_DEV_CALCULATOR
-    except Exception as e:
-        PP_DEV_CALCULATOR_INIT_FAILED = True
-        logger.warning(
-            f"Failed to initialize pp-dev calculator ({settings.pp_dev_calculator}), "
-            f"falling back to stable pp: {e}"
-        )
-        return None
 
 
 def clamp[T: int | float](n: T, min_value: T, max_value: T) -> T:
