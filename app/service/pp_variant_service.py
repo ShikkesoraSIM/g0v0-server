@@ -8,7 +8,7 @@ from app.calculator import (
     calculate_pp_weight,
     calculate_weighted_acc,
     calculate_weighted_pp,
-    get_pp_dev_calculator,
+    get_calculator,
     pre_fetch_and_calculate_pp,
 )
 from app.database import User, UserStatistics
@@ -127,11 +127,8 @@ async def get_score_pp_variant(
                 await redis.set(cache_key, "0", ex=SCORE_PP_DEV_CACHE_TTL_SECONDS)
                 return 0.0
 
-    pp_dev_calculator = await get_pp_dev_calculator()
-    if pp_dev_calculator is None:
-        fallback = float(score.pp or 0.0)
-        await redis.set(cache_key, str(fallback), ex=SCORE_PP_DEV_FALLBACK_CACHE_TTL_SECONDS)
-        return fallback
+    # pp-dev is now the primary calculator — use it directly.
+    pp_dev_calculator = get_calculator()
 
     pp_value = float(score.pp or 0.0)
     calc_succeeded = False

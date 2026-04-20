@@ -1,0 +1,132 @@
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: g0v0-server-app
+    container_name: osu_api_server
+    ports:
+      - "127.0.0.1:9000:8000"
+    env_file:
+      - .env
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - REDIS_URL=redis://redis:6379
+      - CHECK_CLIENT_VERSION=false
+
+      # Local dev: sin spectator
+      - SAVE_REPLAYS=0
+      - STORAGE_SERVICE=local
+      - STORAGE_SETTINGS={"local_storage_path":"/app/storage"}
+
+      # Si tu app necesita igual estas vars, dejalas pero apuntando al mismo app:
+      - SHARED_INTEROP_DOMAIN=http://app:8000
+      - SHARED_INTEROP_SECRET=21c4ec31907932ab141c9a6826f5229479d9f50c8b729bc8141754f61d00808b
+
+      - CALCULATOR_CONFIG={"server_url":"http://performance-server:8080"}
+    entrypoint: ["sh", "/app/docker-entrypoint.sh"]
+    command: ["uv","run","--no-sync","uvicorn","main:app","--host","0.0.0.0","--port","8000"]
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      performance-server:
+        condition: service_started
+
+    volumes:
+      - ./static:/app/static
+      - ./logs:/app/logs
+      - ./newrelic.ini:/app/newrelic.ini:ro
+      - ./config:/app/config
+      - ./geoip:/app/geoip
+      - ./replays:/app/replays
+      - ./storage:/app/storage
+
+    restart: unless-stopped
+    networks:
+      - osu-network
+
+  adminer:
+    image: adminer:latest
+    container_name: g0v0-server-adminer-1
+    ports:
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      - mysql
+    restart: unless-stopped
+    networks:
+      - osu-network
+
+  mysql:
+    image: mysql:8.0
+    container_name: osu_api_mysql
+    env_file:
+      - .env
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE}"
+      MYSQL_USER: "${MYSQL_USER}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
+      TZ: "UTC"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d
+      # opcional:
+      # - ./mysql-conf/timezone.cnf:/etc/mysql/conf.d/timezone.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+      interval: 10s
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - osu-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: osu_api_redis
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 5s
+      retries: 5
+      interval: 10s
+      start_period: 10s
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - osu-network
+
+  performance-server:
+    build:
+      context: ./docker/performance-server-author-port
+      dockerfile: Dockerfile
+      args:
+        # pp-dev is now the primary (and only) PP algorithm.
+        # Rebuild with: docker compose build --no-cache performance-server
+        OSU_REPO: https://github.com/ppy/osu.git
+        OSU_REF: pp-dev
+    image: g0v0-performance-server-ppdev
+    container_name: performance_server
+    environment:
+      - SAVE_BEATMAP_FILES=false
+    volumes:
+      - ./rulesets:/data/rulesets
+    restart: unless-stopped
+    networks:
+      - osu-network
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  osu-network:
+    driver: bridge
