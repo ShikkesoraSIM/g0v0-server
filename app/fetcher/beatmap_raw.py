@@ -5,9 +5,11 @@ import zipfile
 from io import BytesIO
 from typing import Any
 
+from app.dependencies.database import get_redis
 from app.log import fetcher_logger
 
 from ._base import BaseFetcher
+from .beatconnect import beatconnect_base_url, beatconnect_enabled, beatconnect_headers
 
 from httpx import AsyncClient, HTTPError, Limits
 import redis.asyncio as redis
@@ -18,8 +20,13 @@ urls = [
     "https://osu.ppy.sh/osu/{beatmap_id}",            # official (rate limited — last resort)
     "https://old.ppy.sh/osu/{beatmap_id}",            # legacy official fallback
 ]
+FAST_RAW_URLS = urls[:2]
+OFFICIAL_RAW_URLS = urls[2:]
 
 logger = fetcher_logger("BeatmapRawFetcher")
+
+BEATCONNECT_NEGATIVE_CACHE_SECONDS = 60 * 60 * 6
+RAW_NEGATIVE_CACHE_SECONDS = 60 * 60
 
 
 class NoBeatmapError(Exception):
@@ -219,8 +226,8 @@ class BeatmapRawFetcher(BaseFetcher):
             return None
 
     def _build_archive_urls(self, beatmapset_id: int) -> list[str]:
-        # Official first, then mirrors from the existing download service.
-        candidates = [f"https://osu.ppy.sh/beatmapsets/{beatmapset_id}/download?noVideo=1"]
+        # Prefer mirrors first. Official downloads are kept as a last-resort fallback.
+        candidates: list[str] = []
 
         try:
             from app.service.beatmap_download_service import download_service
@@ -230,6 +237,8 @@ class BeatmapRawFetcher(BaseFetcher):
         except Exception as e:
             logger.debug(f"Could not load beatmap download service URLs: {e}")
 
+        candidates.append(f"https://osu.ppy.sh/beatmapsets/{beatmapset_id}/download?noVideo=1")
+
         # Keep order and remove duplicates.
         deduped: list[str] = []
         seen: set[str] = set()
@@ -238,6 +247,33 @@ class BeatmapRawFetcher(BaseFetcher):
                 deduped.append(url)
                 seen.add(url)
         return deduped
+
+    @staticmethod
+    def _beatconnect_osu_miss_cache_key(beatmap_id: int) -> str:
+        return f"beatconnect:osu:missing:beatmap:{beatmap_id}"
+
+    @staticmethod
+    def _beatconnect_archive_set_miss_cache_key(beatmapset_id: int) -> str:
+        return f"beatconnect:archive:missing:set:{beatmapset_id}"
+
+    @staticmethod
+    def _beatconnect_archive_diff_miss_cache_key(beatmap_id: int) -> str:
+        return f"beatconnect:archive:missing:beatmap:{beatmap_id}"
+
+    async def _is_negative_cached(self, cache_key: str) -> bool:
+        try:
+            redis_client = get_redis()
+            return bool(await redis_client.exists(cache_key))
+        except Exception as e:
+            logger.debug(f"Negative cache read failed for {cache_key}: {e}")
+            return False
+
+    async def _set_negative_cache(self, cache_key: str, value: str) -> None:
+        try:
+            redis_client = get_redis()
+            await redis_client.set(cache_key, value, ex=BEATCONNECT_NEGATIVE_CACHE_SECONDS)
+        except Exception as e:
+            logger.debug(f"Negative cache write failed for {cache_key}: {e}")
 
     async def _fetch_from_archive_fallback(
         self,
@@ -253,7 +289,7 @@ class BeatmapRawFetcher(BaseFetcher):
         for archive_url in archive_urls:
             try:
                 logger.debug(f"Archive fallback fetch for beatmap {beatmap_id}: {archive_url}")
-                resp = await client.get(archive_url, headers=self._request_headers, timeout=25.0)
+                resp = await client.get(archive_url, headers=self._request_headers, timeout=12.0)
                 if resp.status_code >= 400:
                     continue
 
@@ -273,6 +309,186 @@ class BeatmapRawFetcher(BaseFetcher):
                 logger.debug(f"Archive fallback source failed for beatmap {beatmap_id}: {archive_url} ({e})")
 
         return None
+
+    async def _fetch_from_raw_urls(
+        self,
+        beatmap_id: int,
+        *,
+        checksum: str | None,
+        is_local: bool,
+        url_templates: list[str],
+    ) -> str | None:
+        client = await self._get_client()
+        expected_checksum = checksum.lower() if checksum else None
+        last_error = None
+
+        for url_template in url_templates:
+            req_url = url_template.format(beatmap_id=beatmap_id)
+            try:
+                logger.opt(colors=True).debug(f"get_beatmap_raw: <y>{req_url}</y>")
+                resp = await client.get(req_url, headers=self._request_headers)
+
+                if resp.status_code >= 400:
+                    logger.warning(f"Beatmap {beatmap_id} from {req_url}: HTTP {resp.status_code}")
+                    last_error = NoBeatmapError(f"HTTP {resp.status_code}")
+                    continue
+
+                raw_bytes = resp.content
+                body = raw_bytes.decode("utf-8-sig", errors="ignore")
+                if not body or not body.strip():
+                    logger.warning(f"Beatmap {beatmap_id} from {req_url}: empty response")
+                    last_error = NoBeatmapError("Empty response")
+                    continue
+
+                if not self._is_valid_osu_payload(body):
+                    logger.warning(f"Beatmap {beatmap_id} from {req_url}: invalid/non-osu payload")
+                    last_error = NoBeatmapError("Invalid payload")
+                    continue
+
+                parsed_id = self._extract_beatmap_id_from_osu(body)
+                if parsed_id is not None and parsed_id != beatmap_id:
+                    logger.warning(
+                        f"Beatmap {beatmap_id} from {req_url}: returned mismatched BeatmapID={parsed_id}"
+                    )
+                    last_error = NoBeatmapError("Mismatched BeatmapID")
+                    continue
+
+                if expected_checksum:
+                    payload_checksum = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest().lower()
+                    if payload_checksum != expected_checksum:
+                        if is_local:
+                            logger.warning(
+                                "Beatmap {} from {}: checksum mismatch for local map (expected {}, got {})",
+                                beatmap_id,
+                                req_url,
+                                expected_checksum,
+                                payload_checksum,
+                            )
+                            last_error = NoBeatmapError("Checksum mismatch")
+                            continue
+
+                        logger.warning(
+                            "Beatmap {} from {}: checksum mismatch (expected {}, got {}), accepting payload",
+                            beatmap_id,
+                            req_url,
+                            expected_checksum,
+                            payload_checksum,
+                        )
+
+                logger.debug(f"Successfully fetched beatmap {beatmap_id} from {req_url}")
+                return body
+
+            except Exception as e:
+                logger.warning(f"Error fetching beatmap {beatmap_id} from {req_url}: {e}")
+                last_error = e
+                continue
+
+        if last_error and isinstance(last_error, NoBeatmapError):
+            raise last_error
+        return None
+
+    async def _fetch_from_beatconnect_osu(
+        self,
+        beatmap_id: int,
+        beatmapset_id: int | None,
+        checksum: str | None,
+    ) -> str | None:
+        if beatmapset_id is None or not beatconnect_enabled():
+            return None
+
+        negative_cache_key = self._beatconnect_osu_miss_cache_key(beatmap_id)
+        if await self._is_negative_cached(negative_cache_key):
+            logger.debug(f"Skipping BeatConnect .osu fetch for beatmap {beatmap_id}: cached miss")
+            return None
+
+        client = await self._get_client()
+        url = f"{beatconnect_base_url()}/osu/{beatmapset_id}/{beatmap_id}/"
+        try:
+            logger.debug(f"BeatConnect .osu fetch for beatmap {beatmap_id}: {url}")
+            resp = await client.get(
+                url,
+                headers={**self._request_headers, **beatconnect_headers()},
+                timeout=15.0,
+            )
+            if resp.status_code >= 400:
+                logger.warning(f"BeatConnect .osu fetch for beatmap {beatmap_id}: HTTP {resp.status_code}")
+                if resp.status_code == 404:
+                    await self._set_negative_cache(negative_cache_key, "404")
+                return None
+
+            raw_bytes = resp.content
+            body = raw_bytes.decode("utf-8-sig", errors="ignore")
+            if not self._is_valid_osu_payload(body):
+                logger.warning(f"BeatConnect .osu fetch for beatmap {beatmap_id}: invalid payload")
+                await self._set_negative_cache(negative_cache_key, "invalid")
+                return None
+
+            if checksum:
+                payload_checksum = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest().lower()
+                expected_checksum = checksum.lower()
+                if payload_checksum != expected_checksum:
+                    logger.warning(
+                        "BeatConnect .osu fetch for beatmap {}: checksum mismatch (expected {}, got {}), accepting payload",
+                        beatmap_id,
+                        expected_checksum,
+                        payload_checksum,
+                    )
+
+            return body
+        except Exception as e:
+            logger.debug(f"BeatConnect .osu fetch failed for beatmap {beatmap_id}: {e}")
+            return None
+
+    async def _fetch_from_beatconnect_archive(
+        self,
+        beatmap_id: int,
+        beatmapset_id: int | None,
+        checksum: str | None,
+    ) -> str | None:
+        if beatmapset_id is None or not beatconnect_enabled():
+            return None
+
+        set_negative_cache_key = self._beatconnect_archive_set_miss_cache_key(beatmapset_id)
+        diff_negative_cache_key = self._beatconnect_archive_diff_miss_cache_key(beatmap_id)
+        if await self._is_negative_cached(set_negative_cache_key):
+            logger.debug(f"Skipping BeatConnect archive fetch for set {beatmapset_id}: cached set miss")
+            return None
+        if await self._is_negative_cached(diff_negative_cache_key):
+            logger.debug(f"Skipping BeatConnect archive fetch for beatmap {beatmap_id}: cached diff miss")
+            return None
+
+        client = await self._get_client()
+        url = f"{beatconnect_base_url()}/b/{beatmapset_id}/"
+        try:
+            logger.debug(f"BeatConnect archive fetch for beatmap {beatmap_id}: {url}")
+            resp = await client.get(
+                url,
+                headers={**self._request_headers, **beatconnect_headers()},
+                timeout=30.0,
+            )
+            if resp.status_code >= 400:
+                logger.warning(f"BeatConnect archive fetch for beatmap {beatmap_id}: HTTP {resp.status_code}")
+                if resp.status_code == 404:
+                    body = resp.text.lower()
+                    if "difficulty not found" in body:
+                        await self._set_negative_cache(diff_negative_cache_key, "404")
+                    else:
+                        await self._set_negative_cache(set_negative_cache_key, "404")
+                return None
+
+            body = resp.content
+            if not body.startswith(b"PK"):
+                logger.warning(f"BeatConnect archive fetch for beatmap {beatmap_id}: non-zip payload")
+                await self._set_negative_cache(set_negative_cache_key, "non-zip")
+                return None
+
+            extracted = self._extract_osu_from_osz_bytes(body, beatmap_id, checksum)
+            if extracted is None:
+                await self._set_negative_cache(diff_negative_cache_key, "not-in-archive")
+            return extracted
+        except Exception as e:
+            logger.debug(f"BeatConnect archive fetch failed for beatmap {beatmap_id}: {e}")
+            return None
 
     async def get_beatmap_raw(self, beatmap_id: int) -> str:
         future: asyncio.Future[str] | None = None
@@ -322,10 +538,8 @@ class BeatmapRawFetcher(BaseFetcher):
                 self._pending_requests.pop(beatmap_id, None)
 
     async def _fetch_beatmap_raw(self, beatmap_id: int) -> str:
-        client = await self._get_client()
         last_error = None
         beatmapset_id, checksum, is_local = await self._resolve_beatmap_context(beatmap_id)
-        expected_checksum = checksum.lower() if checksum else None
 
         # Local maps: use local .osz first. This avoids relying on external mirrors for local uploads.
         local_raw = await self._fetch_local_osz_beatmap_raw(beatmap_id, beatmapset_id, checksum)
@@ -333,71 +547,28 @@ class BeatmapRawFetcher(BaseFetcher):
             logger.debug(f"Successfully fetched local beatmap raw for {beatmap_id} (set {beatmapset_id})")
             return local_raw
 
-        for url_template in urls:
-            req_url = url_template.format(beatmap_id=beatmap_id)
-            try:
-                logger.opt(colors=True).debug(f"get_beatmap_raw: <y>{req_url}</y>")
-                resp = await client.get(req_url, headers=self._request_headers)
+        beatconnect_raw = await self._fetch_from_beatconnect_osu(beatmap_id, beatmapset_id, checksum)
+        if beatconnect_raw is not None:
+            logger.debug(f"Successfully fetched beatmap {beatmap_id} from BeatConnect direct .osu")
+            return beatconnect_raw
 
-                if resp.status_code >= 400:
-                    logger.warning(f"Beatmap {beatmap_id} from {req_url}: HTTP {resp.status_code}")
-                    last_error = NoBeatmapError(f"HTTP {resp.status_code}")
-                    continue
+        try:
+            fast_raw = await self._fetch_from_raw_urls(
+                beatmap_id,
+                checksum=checksum,
+                is_local=is_local,
+                url_templates=FAST_RAW_URLS,
+            )
+            if fast_raw is not None:
+                return fast_raw
+        except Exception as e:
+            last_error = e
 
-                raw_bytes = resp.content
-                body = raw_bytes.decode("utf-8-sig", errors="ignore")
-                if not body or not body.strip():
-                    logger.warning(f"Beatmap {beatmap_id} from {req_url}: empty response")
-                    last_error = NoBeatmapError("Empty response")
-                    continue
+        beatconnect_archive_raw = await self._fetch_from_beatconnect_archive(beatmap_id, beatmapset_id, checksum)
+        if beatconnect_archive_raw is not None:
+            logger.debug(f"Successfully fetched beatmap {beatmap_id} from BeatConnect archive fallback")
+            return beatconnect_archive_raw
 
-                if not self._is_valid_osu_payload(body):
-                    logger.warning(f"Beatmap {beatmap_id} from {req_url}: invalid/non-osu payload")
-                    last_error = NoBeatmapError("Invalid payload")
-                    continue
-
-                parsed_id = self._extract_beatmap_id_from_osu(body)
-                if parsed_id is not None and parsed_id != beatmap_id:
-                    logger.warning(
-                        f"Beatmap {beatmap_id} from {req_url}: returned mismatched BeatmapID={parsed_id}"
-                    )
-                    last_error = NoBeatmapError("Mismatched BeatmapID")
-                    continue
-
-                if expected_checksum:
-                    payload_checksum = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest().lower()
-                    if payload_checksum != expected_checksum:
-                        if is_local:
-                            # Local beatmaps can collide with upstream IDs; checksum must match.
-                            logger.warning(
-                                "Beatmap {} from {}: checksum mismatch for local map (expected {}, got {})",
-                                beatmap_id,
-                                req_url,
-                                expected_checksum,
-                                payload_checksum,
-                            )
-                            last_error = NoBeatmapError("Checksum mismatch")
-                            continue
-
-                        # For upstream maps, checksum can drift when DB metadata is stale.
-                        # Prefer using a valid payload over dropping PP calculation.
-                        logger.warning(
-                            "Beatmap {} from {}: checksum mismatch (expected {}, got {}), accepting payload",
-                            beatmap_id,
-                            req_url,
-                            expected_checksum,
-                            payload_checksum,
-                        )
-
-                logger.debug(f"Successfully fetched beatmap {beatmap_id} from {req_url}")
-                return body
-
-            except Exception as e:
-                logger.warning(f"Error fetching beatmap {beatmap_id} from {req_url}: {e}")
-                last_error = e
-                continue
-
-        # Final fallback: resolve through beatmapset archives and extract the matching .osu.
         archive_raw = await self._fetch_from_archive_fallback(beatmap_id, beatmapset_id, checksum)
         if archive_raw is not None:
             logger.debug(
@@ -408,6 +579,18 @@ class BeatmapRawFetcher(BaseFetcher):
             )
             return archive_raw
 
+        try:
+            official_raw = await self._fetch_from_raw_urls(
+                beatmap_id,
+                checksum=checksum,
+                is_local=is_local,
+                url_templates=OFFICIAL_RAW_URLS,
+            )
+            if official_raw is not None:
+                return official_raw
+        except Exception as e:
+            last_error = e
+
         error_msg = f"Failed to fetch beatmap {beatmap_id} from all sources"
         if last_error and isinstance(last_error, NoBeatmapError):
             raise last_error
@@ -417,6 +600,7 @@ class BeatmapRawFetcher(BaseFetcher):
         from app.config import settings
 
         cache_key = f"beatmap:{beatmap_id}:raw"
+        miss_cache_key = f"beatmap:{beatmap_id}:raw:missing"
         cache_expire = settings.beatmap_cache_expire_hours * 60 * 60
 
         if await redis.exists(cache_key):
@@ -425,6 +609,15 @@ class BeatmapRawFetcher(BaseFetcher):
                 await redis.expire(cache_key, cache_expire)
                 return content
 
-        raw = await self.get_beatmap_raw(beatmap_id)
+        if await redis.exists(miss_cache_key):
+            raise NoBeatmapError(f"Beatmap {beatmap_id} is cached as missing from all sources")
+
+        try:
+            raw = await self.get_beatmap_raw(beatmap_id)
+        except (NoBeatmapError, HTTPError) as e:
+            await redis.set(miss_cache_key, str(e), ex=RAW_NEGATIVE_CACHE_SECONDS)
+            raise
+
         await redis.set(cache_key, raw, ex=cache_expire)
+        await redis.delete(miss_cache_key)
         return raw

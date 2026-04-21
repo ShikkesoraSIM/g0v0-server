@@ -10,7 +10,9 @@ from app.models.model import Cursor
 from app.utils import bg_tasks
 
 from ._base import BaseFetcher
+from .beatconnect import beatconnect_base_url, beatconnect_enabled, beatconnect_headers, beatconnect_beatmapset_to_dict
 
+from httpx import AsyncClient
 from pydantic import TypeAdapter
 import redis.asyncio as redis
 
@@ -60,6 +62,28 @@ adapter = TypeAdapter(
 
 
 class BeatmapsetFetcher(BaseFetcher):
+    async def _get_beatmapset_from_beatconnect(self, beatmap_set_id: int) -> BeatmapsetDict | None:
+        if not beatconnect_enabled():
+            return None
+
+        logger.opt(colors=True).debug(f"get_beatmapset (BeatConnect): <y>{beatmap_set_id}</y>")
+
+        async with AsyncClient(timeout=12.0, follow_redirects=True) as client:
+            resp = await client.get(
+                f"{beatconnect_base_url()}/api/beatmap/{beatmap_set_id}/",
+                headers=beatconnect_headers(),
+            )
+
+        if resp.status_code == 404:
+            return None
+
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            return None
+
+        return beatconnect_beatmapset_to_dict(payload)
+
     @staticmethod
     def _ensure_local_flags(beatmapset: dict) -> dict:
         """Normalize remote payloads that do not contain local-only fields."""
@@ -149,6 +173,10 @@ class BeatmapsetFetcher(BaseFetcher):
 
     async def get_beatmapset(self, beatmap_set_id: int) -> BeatmapsetDict:
         logger.opt(colors=True).debug(f"get_beatmapset: <y>{beatmap_set_id}</y>")
+        beatconnect_payload = await self._get_beatmapset_from_beatconnect(beatmap_set_id)
+        if beatconnect_payload is not None:
+            return adapter.validate_python(beatconnect_payload)  # pyright: ignore[reportReturnType]
+
         payload = await self.request_api(f"https://osu.ppy.sh/api/v2/beatmapsets/{beatmap_set_id}")
         payload = self._ensure_local_flags(payload)
         return adapter.validate_python(  # pyright: ignore[reportReturnType]

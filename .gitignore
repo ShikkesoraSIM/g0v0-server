@@ -237,3 +237,12 @@ spectator-m1pp/
 .env.save
 fix-message-system.patch
 docker-compose.yml
+
+# local migration / backup scratch files
+.env.docker
+Caddyfile
+backup_prod_*.sql
+backup_prod_*.tar.gz
+mania_*.csv
+null
+storage_pre_restore_*/

@@ -302,6 +302,19 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="Fetcher å®¢æˆ·ç«¯å¯†é’¥"),
         "Fetcher è®¾ç½®",
     ]
+    beatconnect_base_url: Annotated[
+        HttpUrl,
+        Field(
+            default=HttpUrl("https://beatconnect.io"),
+            description="BeatConnect API åŸºç¡€ URL",
+        ),
+        "Fetcher è®¾ç½®",
+    ]
+    beatconnect_api_token: Annotated[
+        str,
+        Field(default="", description="BeatConnect API token (Patreon)"),
+        "Fetcher è®¾ç½®",
+    ]
 
     # NOTE: Reserve for user-based-fetcher
 
