@@ -1,6 +1,7 @@
 from . import (  # noqa: F401
     beatmap,
     beatmapset,
+    briefing,
     changelog,
     me,
     misc,

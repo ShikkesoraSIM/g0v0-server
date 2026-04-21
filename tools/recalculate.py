@@ -807,6 +807,8 @@ def build_total_score_best_scores(scores: list[Score]) -> list[TotalScoreBestSco
             continue
         if not (beatmap.beatmap_status.has_leaderboard() | settings.enable_all_beatmap_leaderboard):
             continue
+        if not mods_can_get_pp(int(score.gamemode), score.mods):
+            continue
         mods_saved = mod_to_save(score.mods)
         new_entry = TotalScoreBestScore(
             user_id=score.user_id,
@@ -875,7 +877,9 @@ async def _recalculate_statistics(
         statistics.count_miss += score.nmiss
         statistics.total_hits += score.n300 + score.ngeki + score.n100 + score.nkatu + score.n50
 
-        ranked = beatmap.beatmap_status.has_pp() | settings.enable_all_beatmap_pp
+        ranked = (beatmap.beatmap_status.has_pp() | settings.enable_all_beatmap_pp) and mods_can_get_pp(
+            int(score.gamemode), score.mods
+        )
         if ranked and score.passed:
             statistics.maximum_combo = max(statistics.maximum_combo, score.max_combo)
             previous = cached_best.get(score.beatmap_id)

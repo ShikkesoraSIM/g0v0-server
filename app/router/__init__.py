@@ -14,6 +14,7 @@ from .v2.router import router as api_v2_router
 from .v2 import (  # noqa: F401
     beatmap,
     beatmapset,
+    briefing,
     changelog,
     me,
     misc,

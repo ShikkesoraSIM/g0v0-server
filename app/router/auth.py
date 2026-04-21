@@ -34,6 +34,7 @@ from app.models.oauth import (
 from app.models.score import GameMode
 from app.service.login_log_service import LoginLogService
 from app.service.password_reset_service import password_reset_service
+from app.service.suspicious_alert_service import SuspiciousAlertService
 from app.service.turnstile_service import turnstile_service
 from app.service.verification_service import (
     EmailVerificationService,
@@ -246,6 +247,7 @@ async def register_user(
     geoip: GeoIPService,
     client_ip: IPAddress,
     user_agent: UserAgentInfo,
+    web_uuid: Annotated[str | None, Header(include_in_schema=False, alias="X-UUID")] = None,
     cf_turnstile_response: Annotated[
         str, Form(description="Cloudflare Turnstile å“åº” token")
     ] = "XXXX.DUMMY.TOKEN.XXXX",
@@ -339,6 +341,18 @@ async def register_user(
         daily_challenge_user_stats = DailyChallengeStats(user_id=new_user.id)
         db.add(daily_challenge_user_stats)
         await db.commit()
+        try:
+            alert_result = await SuspiciousAlertService.maybe_record_registration_alert(
+                db,
+                user=new_user,
+                ip_address=client_ip,
+                user_agent=user_agent.raw_ua,
+                web_uuid=web_uuid,
+            )
+            if alert_result.created:
+                await db.commit()
+        except Exception as suspicious_err:
+            logger.warning(f"Failed to record suspicious registration alert for user {new_user.id}: {suspicious_err}")
     except Exception:
         await db.rollback()
         # æ‰“å°è¯¦ç»†é”™è¯¯ä¿¡æ¯ç”¨äºŽè°ƒè¯•
@@ -494,6 +508,13 @@ async def oauth_token(
         await db.refresh(user)
 
         user_id = user.id
+        # Capture all user primitives now - after subsequent awaits the ORM
+        # object's attributes get expired and accessing them triggers a sync
+        # lazy-load which fails with MissingGreenlet in async context.
+        _user_username = user.username
+        _user_email = user.email
+        _user_country_code = user.country_code
+        _user_join_date = user.join_date
         totp_key: TotpKeys | None = await user.awaitable_attrs.totp_key
         if normalized_version_hash:
             validation = version_validation or await verification_service.validate_client_version(normalized_version_hash)
@@ -565,17 +586,16 @@ async def oauth_token(
         elif not trusted_device and settings.enable_email_verification:
             # å¦‚æžœæ˜¯æ–°è®¾å¤‡ç™»å½•ï¼Œéœ€è¦é‚®ä»¶éªŒè¯
             # åˆ·æ–°ç”¨æˆ·å¯¹è±¡ä»¥ç¡®ä¿å±žæ€§å·²åŠ è½½
-            await db.refresh(user)
             session_verification_method = "mail"
             await EmailVerificationService.send_verification_email(
                 db,
                 redis,
                 user_id,
-                user.username,
-                user.email,
+                _user_username,
+                _user_email,
                 ip_address,
                 user_agent,
-                user.country_code,
+                _user_country_code,
             )
 
             # è®°å½•éœ€è¦äºŒæ¬¡éªŒè¯çš„ç™»å½•å°è¯•
@@ -622,6 +642,31 @@ async def oauth_token(
             await LoginSessionService.create_session(
                 db, user_id, token_id, ip_address, user_agent.raw_ua, not trusted_device, web_uuid, True
             )
+
+        user_id_for_alert = user_id
+        username_for_alert = _user_username
+        country_code_for_alert = _user_country_code
+        join_date_for_alert = _user_join_date
+
+        try:
+            alert_result = await SuspiciousAlertService.maybe_record_login_alert(
+                db,
+                user_id=user_id_for_alert,
+                username=username_for_alert,
+                country_code=country_code_for_alert,
+                join_date=join_date_for_alert,
+                ip_address=ip_address,
+                user_agent=raw_user_agent,
+                web_uuid=web_uuid,
+                trusted_device=trusted_device,
+                version_hash=normalized_version_hash or None,
+                client_label=client_label_for_log,
+                is_new_device=not trusted_device,
+            )
+            if alert_result.created:
+                await db.commit()
+        except Exception as suspicious_err:
+            logger.warning(f"Failed to record suspicious login alert for user {user_id}: {suspicious_err}")
 
         return TokenResponse(
             access_token=access_token,

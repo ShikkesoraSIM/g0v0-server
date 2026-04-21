@@ -5,9 +5,11 @@ from app.database.beatmap import BeatmapDict, BeatmapModel
 from app.log import fetcher_logger
 
 from ._base import BaseFetcher
+from .beatconnect import beatconnect_base_url, beatconnect_enabled, beatconnect_find_beatmap, beatconnect_headers
 
 from httpx import AsyncClient
 from pydantic import TypeAdapter
+from sqlmodel import select
 
 logger = fetcher_logger("BeatmapFetcher")
 adapter = TypeAdapter(
@@ -156,6 +158,57 @@ class BeatmapFetcher(BaseFetcher):
 
         return None
 
+    async def _get_beatmap_from_beatconnect(
+        self,
+        beatmap_id: int | None = None,
+        beatmap_checksum: str | None = None,
+    ) -> BeatmapDict | None:
+        if not beatconnect_enabled() or beatmap_id is None:
+            return None
+
+        beatmapset_id: int | None = None
+        try:
+            from app.database import Beatmap
+            from app.dependencies.database import with_db
+
+            async with with_db() as session:
+                beatmap = await session.get(Beatmap, beatmap_id)
+                if beatmap is not None:
+                    beatmapset_id = beatmap.beatmapset_id
+                elif beatmap_checksum:
+                    beatmap = (
+                        await session.exec(
+                            select(Beatmap).where(Beatmap.checksum == beatmap_checksum)  # type: ignore[name-defined]
+                        )
+                    ).first()
+                    if beatmap is not None:
+                        beatmapset_id = beatmap.beatmapset_id
+        except Exception as e:
+            logger.debug("BeatConnect beatmap pre-resolution failed for id={} md5={}: {}", beatmap_id, beatmap_checksum, e)
+
+        if beatmapset_id is None:
+            return None
+
+        try:
+            async with AsyncClient(timeout=12.0, follow_redirects=True) as client:
+                resp = await client.get(
+                    f"{beatconnect_base_url()}/api/beatmap/{beatmapset_id}/",
+                    headers=beatconnect_headers(),
+                )
+
+            if resp.status_code == 404:
+                return None
+
+            resp.raise_for_status()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                return None
+
+            return beatconnect_find_beatmap(payload, beatmap_id=beatmap_id)
+        except Exception as e:
+            logger.debug("BeatConnect beatmap lookup failed for id={} md5={}: {}", beatmap_id, beatmap_checksum, e)
+            return None
+
     async def get_beatmap(self, beatmap_id: int | None = None, beatmap_checksum: str | None = None) -> BeatmapDict:
         if beatmap_id:
             params = {"id": beatmap_id}
@@ -164,6 +217,10 @@ class BeatmapFetcher(BaseFetcher):
         else:
             raise ValueError("Either beatmap_id or beatmap_checksum must be provided.")
         logger.opt(colors=True).debug(f"get_beatmap: <y>{params}</y>")
+
+        beatconnect_payload = await self._get_beatmap_from_beatconnect(beatmap_id, beatmap_checksum)
+        if beatconnect_payload is not None:
+            return adapter.validate_python(beatconnect_payload)  # pyright: ignore[reportReturnType]
 
         try:
             return adapter.validate_python(  # pyright: ignore[reportReturnType]

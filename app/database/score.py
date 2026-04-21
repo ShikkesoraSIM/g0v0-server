@@ -39,6 +39,7 @@ from app.models.score import (
 from app.models.scoring_mode import ScoringMode
 from app.storage import StorageService
 from app.utils import utcnow
+from app.service.suspicious_alert_service import SuspiciousAlertService
 
 from ._base import DatabaseModel, OnDemand, included, ondemand
 from .beatmap import Beatmap, BeatmapDict, BeatmapModel
@@ -1100,14 +1101,18 @@ async def process_score(
     session: AsyncSession,
 ) -> Score:
     gamemode = GameMode.from_int(info.ruleset_id).to_special_mode(info.mods)
+    mods_ranked = mods_can_get_pp(int(gamemode), info.mods)
+    effective_ranked = ranked and mods_ranked
 
     logger.info(
-        "Creating score for user {user_id} | beatmap={beatmap_id} ruleset={ruleset} passed={passed} total={total}",
+        "Creating score for user {user_id} | beatmap={beatmap_id} ruleset={ruleset} passed={passed} total={total} ranked={ranked} mods_ranked={mods_ranked}",
         user_id=user.id,
         beatmap_id=beatmap_id,
         ruleset=gamemode,
         passed=info.passed,
         total=info.total_score,
+        ranked=effective_ranked,
+        mods_ranked=mods_ranked,
     )
 
     is_multiplayer = score_token.room_id is not None or score_token.playlist_item_id is not None
@@ -1145,7 +1150,7 @@ async def process_score(
         room_id=score_token.room_id,
         maximum_statistics=info.maximum_statistics,
         processed=False,   # 👈 IMPORTANTE: acá SIEMPRE False
-        ranked=ranked,
+        ranked=effective_ranked,
     )
 
     session.add(score)
@@ -1489,9 +1494,10 @@ async def _process_statistics(
     beatmap_length: int,
     beatmap_status: BeatmapRankStatus,
 ):
-    has_pp = beatmap_status.has_pp() or settings.enable_all_beatmap_pp
-    ranked = beatmap_status.ranked() or settings.enable_all_beatmap_pp
-    has_leaderboard = beatmap_status.has_leaderboard() or settings.enable_all_beatmap_leaderboard
+    mods_ranked = mods_can_get_pp(int(score.gamemode), score.mods)
+    has_pp = (beatmap_status.has_pp() or settings.enable_all_beatmap_pp) and mods_ranked
+    ranked = (beatmap_status.ranked() or settings.enable_all_beatmap_pp) and mods_ranked
+    has_leaderboard = (beatmap_status.has_leaderboard() or settings.enable_all_beatmap_leaderboard) and mods_ranked
 
     mod_for_save = mod_to_save(score.mods)
     should_check_best_scores = score.passed and (ranked or has_leaderboard)
@@ -1792,6 +1798,8 @@ async def process_user(
     await session.commit()
     await session.refresh(score)
     await session.refresh(user)
+    alert_username = user.username
+    alert_join_date = user.join_date
 
     # Send ToriiHalo private message if score was zeroed due to DA/FL/accuracy rules.
     if _pp_zero_reason:
@@ -1851,6 +1859,20 @@ async def process_user(
     # Commit stats/leaderboard/etc first, so any reads after publish see updated data
     await session.commit()
 
+    try:
+        alert_result = await SuspiciousAlertService.maybe_record_suspicious_score_alert(
+            session,
+            redis,
+            score=score,
+            user_id=user_id,
+            username=alert_username,
+            join_date=alert_join_date,
+        )
+        if alert_result.created:
+            await session.commit()
+    except Exception as suspicious_err:
+        logger.warning("Failed to record suspicious score alert for score {}: {}", score.id, suspicious_err)
+
     await redis.publish(
     "osu-channel:user:invalidate",
     json.dumps({"user_id": user_id})
@@ -1871,3 +1893,4 @@ async def process_user(
         score_id=score_id,
         user_id=user_id,
     )
+

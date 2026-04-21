@@ -19,6 +19,7 @@ from .beatmapset import (
 )
 from .beatmapset_ratings import BeatmapRating
 from .best_scores import BestScore
+from .briefing_radar import ToriiBriefingRadarSnapshot
 from .chat import (
     ChannelType,
     ChatChannel,
@@ -70,6 +71,7 @@ from .statistics import (
     UserStatisticsDict,
     UserStatisticsModel,
 )
+from .suspicious_alert import SuspiciousAlert
 from .team import Team, TeamMember, TeamRequest, TeamResp
 from .total_score_best_scores import TotalScoreBestScore
 from .user import (
@@ -154,12 +156,14 @@ __all__ = [
     "ScoreToken",
     "ScoreTokenResp",
     "SearchBeatmapsetsResp",
+    "SuspiciousAlert",
     "Team",
     "TeamMember",
     "TeamRequest",
     "TeamResp",
     "TotalScoreBestScore",
     "TotpKeys",
+    "ToriiBriefingRadarSnapshot",
     "TrustedDevice",
     "TrustedDeviceResp",
     "User",

@@ -335,6 +335,61 @@ async def download_beatmapset(
 
     proxy_timeout = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
 
+    if settings.beatconnect_api_token:
+        beatconnect_url = f"{str(settings.beatconnect_base_url).rstrip('/')}/b/{beatmapset_id}/"
+        try:
+            logger.info(f"[beatmap dl] BeatConnect proxy attempt {beatmapset_id} -> {beatconnect_url}")
+            client = httpx.AsyncClient(follow_redirects=True, timeout=proxy_timeout)
+            resp = await client.send(
+                client.build_request(
+                    "GET",
+                    beatconnect_url,
+                    headers={"Token": settings.beatconnect_api_token},
+                ),
+                stream=True,
+            )
+
+            if resp.status_code < 400:
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                stream_iter = resp.aiter_bytes(chunk_size=65536)
+                first_chunk = await anext(stream_iter, b"")
+
+                if "zip" in content_type or "octet-stream" in content_type or first_chunk.startswith(b"PK"):
+                    async def beatconnect_stream():
+                        if first_chunk:
+                            yield first_chunk
+                        async for c in stream_iter:
+                            yield c
+
+                    content_length = resp.headers.get("Content-Length")
+                    resp_headers = {
+                        "Content-Type": "application/x-osu-beatmap-archive",
+                        "Content-Disposition": f'attachment; filename="{beatmapset_id}.osz"',
+                    }
+                    if content_length:
+                        resp_headers["Content-Length"] = content_length
+
+                    async def stream_body():
+                        try:
+                            async for chunk in beatconnect_stream():
+                                yield chunk
+                        finally:
+                            await resp.aclose()
+                            await client.aclose()
+
+                    logger.info(f"[beatmap dl] proxying {beatmapset_id} from BeatConnect")
+                    return StreamingResponse(
+                        stream_body(),
+                        status_code=200,
+                        headers=resp_headers,
+                    )
+
+            await resp.aclose()
+            await client.aclose()
+            logger.warning(f"[beatmap dl] BeatConnect fallback for {beatmapset_id} -> {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"[beatmap dl] BeatConnect proxy failed for {beatmapset_id}: {e}")
+
     for mirror_url in download_urls:
         try:
             logger.info(f"[beatmap dl] proxy attempt {beatmapset_id} -> {mirror_url}")
@@ -356,21 +411,17 @@ async def download_beatmapset(
 
             if not is_valid:
                 # Peek at the first bytes to check for PK header
-                first_chunk = b""
-                async for chunk in resp.aiter_bytes(chunk_size=4):
-                    first_chunk = chunk
-                    break
+                stream_iter = resp.aiter_bytes(chunk_size=65536)
+                first_chunk = await anext(stream_iter, b"")
                 if not first_chunk.startswith(b"PK"):
                     await resp.aclose()
                     await client.aclose()
                     logger.warning(f"[beatmap dl] {mirror_url} not a valid osz (ct={content_type})")
                     continue
                 # Put the first chunk back by wrapping the stream
-                original_stream = resp.aiter_bytes(chunk_size=65536)
-
                 async def patched_stream():
                     yield first_chunk
-                    async for c in original_stream:
+                    async for c in stream_iter:
                         yield c
 
                 stream_iter = patched_stream()
