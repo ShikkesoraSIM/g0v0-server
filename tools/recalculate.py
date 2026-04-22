@@ -25,7 +25,7 @@ from app.const import BANCHOBOT_ID
 from app.database import TotalScoreBestScore, UserStatistics
 from app.database.beatmap import Beatmap, calculate_beatmap_attributes, clear_cached_beatmap_raws
 from app.database.best_scores import BestScore
-from app.database.score import Score, _RELAX_AP_MODES, _OSU_STANDARD_MODES, _compute_effective_od_cs, calculate_playtime, calculate_user_pp
+from app.database.score import Score, _RELAX_AP_MODES, calculate_playtime, calculate_user_pp
 from app.dependencies.database import engine, get_redis
 from app.dependencies.fetcher import get_fetcher
 from app.dependencies.storage import get_storage_service
@@ -695,27 +695,6 @@ async def recalc_score_pp(
             score.pp = 0
             return 0.0
 
-        # OD + CS difficulty floor: only applies when DA is actively overriding values.
-        # Natural map values (even low ones like CS=0 by default) are always allowed.
-        if score.gamemode in _OSU_STANDARD_MODES:
-            _da_settings = {}
-            for _m in score.mods:
-                if _m["acronym"] == "DA":
-                    _da_settings = _m.get("settings", {}) or {}
-                    break
-            _da_overrides_od = isinstance(_da_settings.get("overall_difficulty"), (int, float))
-            _da_overrides_cs = isinstance(_da_settings.get("circle_size"), (int, float))
-            if _da_overrides_od or _da_overrides_cs:
-                eff_od, eff_cs = _compute_effective_od_cs(
-                    score.mods, float(beatmap.accuracy), float(beatmap.cs)
-                )
-                if (_da_overrides_od and eff_od < 1.0) or (_da_overrides_cs and eff_cs < 1.0):
-                    score.pp = 0
-                    return 0.0
-                if (eff_od == 0.0 and eff_cs == 0.0) or (eff_od + eff_cs) / 2.0 <= 4.0:
-                    score.pp = 0
-                    return 0.0
-
         try:
             beatmap_raw = await _get_beatmap_raw_for_recalc(fetcher, redis, beatmap)
             # 记录使用的beatmap
@@ -766,22 +745,6 @@ def build_best_scores(user_id: int, gamemode: GameMode, scores: list[Score]) -> 
             continue
         if score.gamemode in _RELAX_AP_MODES and score.accuracy < 0.75:
             continue
-        if score.gamemode in _OSU_STANDARD_MODES:
-            _da_settings = {}
-            for _m in score.mods:
-                if _m["acronym"] == "DA":
-                    _da_settings = _m.get("settings", {}) or {}
-                    break
-            _da_overrides_od = isinstance(_da_settings.get("overall_difficulty"), (int, float))
-            _da_overrides_cs = isinstance(_da_settings.get("circle_size"), (int, float))
-            if _da_overrides_od or _da_overrides_cs:
-                eff_od, eff_cs = _compute_effective_od_cs(
-                    score.mods, float(beatmap.accuracy), float(beatmap.cs)
-                )
-                if (_da_overrides_od and eff_od < 1.0) or (_da_overrides_cs and eff_cs < 1.0):
-                    continue
-                if (eff_od == 0.0 and eff_cs == 0.0) or (eff_od + eff_cs) / 2.0 <= 4.0:
-                    continue
         if not score.pp or score.pp <= 0:
             continue
         current_best = best_per_map.get(score.beatmap_id)
