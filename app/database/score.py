@@ -1239,8 +1239,9 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
         )
         return
 
-    # DA + FL checks run FIRST — before mods_can_get_pp — so the warning fires
-    # even when other mods (e.g. rate-changed DT) would fail the whitelist check.
+    # Flashlight custom-setting checks run FIRST — before mods_can_get_pp — so the
+    # warning fires even when other mods (e.g. rate-changed DT) would fail the
+    # whitelist check.
     if score.gamemode in _OSU_STANDARD_MODES:
         # FL settings floor: only vanilla Flashlight earns pp. If any setting is
         # changed from its default (size, delay, combo_based_size), award 0pp and warn.
@@ -1265,45 +1266,6 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
                     )
                     return f"fl_non_vanilla:size={_fl_size},delay={_fl_delay},combo={_fl_combo}"
                 break
-
-    # DA floor: only applies when DA is actively overriding values.
-    # Only DA-forced reductions to low values are restricted; natural map values are fine.
-    if score.gamemode in _OSU_STANDARD_MODES:
-        _da_settings: dict = {}
-        for _m in score.mods:
-            if _m["acronym"] == "DA":
-                _da_settings = _m.get("settings", {}) or {}
-                break
-        _da_overrides_od = isinstance(_da_settings.get("overall_difficulty"), (int, float))
-        _da_overrides_cs = isinstance(_da_settings.get("circle_size"), (int, float))
-        if _da_overrides_od or _da_overrides_cs:
-            od_cs = await _get_effective_od_cs(score, session)
-            if od_cs is not None:
-                eff_od, eff_cs = od_cs
-                # Each DA-overridden value must be >= 1 (e.g. CS=0.1 is not allowed).
-                if _da_overrides_od and eff_od < 1.0:
-                    logger.debug(
-                        "Skipping PP for score {score_id} | DA forced OD={od:.2f} < 1",
-                        score_id=score.id,
-                        od=eff_od,
-                    )
-                    return f"da_od_below_min:OD={eff_od:.2f}"
-                if _da_overrides_cs and eff_cs < 1.0:
-                    logger.debug(
-                        "Skipping PP for score {score_id} | DA forced CS={cs:.2f} < 1",
-                        score_id=score.id,
-                        cs=eff_cs,
-                    )
-                    return f"da_cs_below_min:CS={eff_cs:.2f}"
-                if (eff_od + eff_cs) / 2.0 <= 4.0:
-                    logger.debug(
-                        "Skipping PP for score {score_id} | DA forced (OD={od:.1f}+CS={cs:.1f})/2={avg:.1f} <= 4",
-                        score_id=score.id,
-                        od=eff_od,
-                        cs=eff_cs,
-                        avg=(eff_od + eff_cs) / 2.0,
-                    )
-                    return f"da_avg_too_low:OD={eff_od:.1f},CS={eff_cs:.1f},avg={(eff_od+eff_cs)/2.0:.1f}"
 
     can_get_pp = score.passed and score.ranked and mods_can_get_pp(int(score.gamemode), score.mods)
     if not can_get_pp:
@@ -1798,7 +1760,7 @@ async def process_user(
     alert_username = user.username
     alert_join_date = user.join_date
 
-    # Send ToriiHalo private message if score was zeroed due to DA/FL/accuracy rules.
+    # Send ToriiHalo private message if score was zeroed due to Flashlight/accuracy rules.
     if _pp_zero_reason:
         try:
             from app.router.notification.banchobot import bot as _toriihalo
@@ -1807,19 +1769,6 @@ async def process_user(
             _reason_code = _pp_zero_reason.split(":")[0]
             _reason_data = _pp_zero_reason.split(":", 1)[1] if ":" in _pp_zero_reason else ""
             _pm_msgs: dict[str, str] = {
-                "da_od_below_min": (
-                    f"Your score gave 0pp! You used Difficulty Adjust with OD={_reason_data.replace('OD=', '')}. "
-                    "PP requires OD \u2265 1 when using DA. Try setting OD to something like 5 or higher."
-                ),
-                "da_cs_below_min": (
-                    f"Your score gave 0pp! You used Difficulty Adjust with CS={_reason_data.replace('CS=', '')}. "
-                    "PP requires CS \u2265 1 when using DA. Try setting CS to 1 or higher."
-                ),
-                "da_avg_too_low": (
-                    f"Your score gave 0pp! Your DA settings result in (OD+CS)/2 \u2264 4 ({_reason_data}). "
-                    "When overriding OD or CS with DA, (OD+CS)/2 must be greater than 4. "
-                    "For example, OD 8 + CS 1 = average 4.5, which works."
-                ),
                 "rx_acc_too_low": (
                     f"Your score gave 0pp! Your accuracy was {_reason_data}. "
                     "Relax and Autopilot scores need at least 75% accuracy to earn pp."
@@ -1890,4 +1839,3 @@ async def process_user(
         score_id=score_id,
         user_id=user_id,
     )
-

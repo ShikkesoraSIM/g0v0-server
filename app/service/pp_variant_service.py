@@ -13,7 +13,7 @@ from app.calculator import (
 )
 from app.database import User, UserStatistics
 from app.database.best_scores import BestScore
-from app.database.score import LegacyScoreResp, Score, _RELAX_AP_MODES, _OSU_STANDARD_MODES, _get_effective_od_cs
+from app.database.score import LegacyScoreResp, Score, _RELAX_AP_MODES
 from app.log import log
 from app.models.mods import mods_can_get_pp
 from app.models.score import GameMode
@@ -117,15 +117,6 @@ async def get_score_pp_variant(
     if score.gamemode in _RELAX_AP_MODES and score.accuracy < 0.75:
         await redis.set(cache_key, "0", ex=SCORE_PP_DEV_CACHE_TTL_SECONDS)
         return 0.0
-
-    # OD + CS difficulty floor for osu! standard-based modes.
-    if score.gamemode in _OSU_STANDARD_MODES:
-        od_cs = await _get_effective_od_cs(score, session)
-        if od_cs is not None:
-            eff_od, eff_cs = od_cs
-            if (eff_od == 0.0 and eff_cs == 0.0) or (eff_od + eff_cs) / 2.0 <= 4.0:
-                await redis.set(cache_key, "0", ex=SCORE_PP_DEV_CACHE_TTL_SECONDS)
-                return 0.0
 
     # pp-dev is now the primary calculator — use it directly.
     pp_dev_calculator = get_calculator()
