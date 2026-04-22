@@ -39,6 +39,7 @@ from app.models.score import (
 from app.models.scoring_mode import ScoringMode
 from app.storage import StorageService
 from app.utils import utcnow
+from app.service.suspicious_alert_service import SuspiciousAlertService
 
 from ._base import DatabaseModel, OnDemand, included, ondemand
 from .beatmap import Beatmap, BeatmapDict, BeatmapModel
@@ -1855,6 +1856,18 @@ async def process_user(
 
     # Commit stats/leaderboard/etc first, so any reads after publish see updated data
     await session.commit()
+
+    try:
+        alert_result = await SuspiciousAlertService.maybe_record_suspicious_score_alert(
+            session,
+            redis,
+            score=score,
+            user=user,
+        )
+        if alert_result.created:
+            await session.commit()
+    except Exception as suspicious_err:
+        logger.warning("Failed to record suspicious score alert for score {}: {}", score.id, suspicious_err)
 
     await redis.publish(
     "osu-channel:user:invalidate",

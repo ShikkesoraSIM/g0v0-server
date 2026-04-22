@@ -1,0 +1,15 @@
+services:
+  app:
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      performance-server:
+        condition: service_started
+
+  performance-server:
+    build:
+      context: ./docker/performance-server-author-port
+      dockerfile: Dockerfile
+    image: g0v0-performance-server-author-port

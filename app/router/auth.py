@@ -34,6 +34,7 @@ from app.models.oauth import (
 from app.models.score import GameMode
 from app.service.login_log_service import LoginLogService
 from app.service.password_reset_service import password_reset_service
+from app.service.suspicious_alert_service import SuspiciousAlertService
 from app.service.turnstile_service import turnstile_service
 from app.service.verification_service import (
     EmailVerificationService,
@@ -246,6 +247,7 @@ async def register_user(
     geoip: GeoIPService,
     client_ip: IPAddress,
     user_agent: UserAgentInfo,
+    web_uuid: Annotated[str | None, Header(include_in_schema=False, alias="X-UUID")] = None,
     cf_turnstile_response: Annotated[
         str, Form(description="Cloudflare Turnstile å“åº” token")
     ] = "XXXX.DUMMY.TOKEN.XXXX",
@@ -339,6 +341,18 @@ async def register_user(
         daily_challenge_user_stats = DailyChallengeStats(user_id=new_user.id)
         db.add(daily_challenge_user_stats)
         await db.commit()
+        try:
+            alert_result = await SuspiciousAlertService.maybe_record_registration_alert(
+                db,
+                user=new_user,
+                ip_address=client_ip,
+                user_agent=user_agent.raw_ua,
+                web_uuid=web_uuid,
+            )
+            if alert_result.created:
+                await db.commit()
+        except Exception as suspicious_err:
+            logger.warning(f"Failed to record suspicious registration alert for user {new_user.id}: {suspicious_err}")
     except Exception:
         await db.rollback()
         # æ‰“å°è¯¦ç»†é”™è¯¯ä¿¡æ¯ç”¨äºŽè°ƒè¯•
@@ -622,6 +636,23 @@ async def oauth_token(
             await LoginSessionService.create_session(
                 db, user_id, token_id, ip_address, user_agent.raw_ua, not trusted_device, web_uuid, True
             )
+
+        try:
+            alert_result = await SuspiciousAlertService.maybe_record_login_alert(
+                db,
+                user=user,
+                ip_address=ip_address,
+                user_agent=raw_user_agent,
+                web_uuid=web_uuid,
+                trusted_device=trusted_device,
+                version_hash=normalized_version_hash or None,
+                client_label=client_label_for_log,
+                is_new_device=not trusted_device,
+            )
+            if alert_result.created:
+                await db.commit()
+        except Exception as suspicious_err:
+            logger.warning(f"Failed to record suspicious login alert for user {user_id}: {suspicious_err}")
 
         return TokenResponse(
             access_token=access_token,
