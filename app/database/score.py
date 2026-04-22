@@ -686,9 +686,6 @@ def _global_gamemodes_including_automation(base: GameMode) -> list[GameMode]:
         base.to_special_mode(["RX"]),
         base.to_special_mode(["AP"]),
     ]
-    # Backward compatibility for historical CTB-RX entries that used FRUITSRX.
-    if base == GameMode.FRUITS:
-        modes.append(GameMode.FRUITSRX)
     return list(dict.fromkeys(modes))
 
 async def _score_where(
