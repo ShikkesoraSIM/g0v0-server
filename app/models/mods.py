@@ -151,51 +151,6 @@ DEFAULT_RANKED_MODS = {
             "overall_difficulty": {"check": False, "type": "number"},
             "extended_limits": {"check": False, "type": "boolean"},
         },
-        "MR": {},  # Mirror
-        "RD": {  # Random
-            "angle_sharpness": {"check": False, "type": "number"},
-            "seed": {"check": False, "type": "number"},
-        },
-        "TP": {  # Target Practice
-            "seed": {"check": False, "type": "number"},
-            "metronome": {"check": False, "type": "boolean"},
-        },
-        "AD": {  # Approach Different
-            "scale": {"check": False, "type": "number"},
-            "style": {"check": False, "type": "string"},
-        },
-        "AS": {  # Adaptive Speed
-            "initial_rate": {"check": False, "type": "number"},
-            "adjust_pitch": {"check": False, "type": "boolean"},
-        },
-        "BR": {  # Barrel Roll
-            "spin_speed": {"check": False, "type": "number"},
-            "direction": {"check": False, "type": "string"},
-        },
-        "BU": {},   # Bubbles
-        "DF": {"start_scale": {"check": False, "type": "number"}},   # Deflate
-        "DP": {  # Depth
-            "max_depth": {"check": False, "type": "number"},
-            "show_approach_circles": {"check": False, "type": "boolean"},
-        },
-        "FR": {},   # Freeze Frame
-        "GR": {"start_scale": {"check": False, "type": "number"}},   # Grow
-        "MG": {"attraction_strength": {"check": False, "type": "number"}},  # Magnetised
-        "RP": {"repulsion_strength": {"check": False, "type": "number"}},   # Repel
-        "SI": {},   # Spin In
-        "SY": {},   # Synesthesia
-        "TR": {},   # Transform
-        "WD": {  # Wind Down
-            "initial_rate": {"check": False, "type": "number"},
-            "final_rate": {"check": False, "type": "number"},
-            "adjust_pitch": {"check": False, "type": "boolean"},
-        },
-        "WG": {"strength": {"check": False, "type": "number"}},  # Wiggle
-        "WU": {  # Wind Up
-            "initial_rate": {"check": False, "type": "number"},
-            "final_rate": {"check": False, "type": "number"},
-            "adjust_pitch": {"check": False, "type": "boolean"},
-        },
         # ── Other existing ────────────────────────────────────────────────────
         "AC": {
             "minimum_accuracy": {"check": False, "type": "number"},
@@ -399,6 +354,33 @@ RulesetRankedMods = dict[str, dict[str, Any]]
 RankedMods = dict[int, RulesetRankedMods]
 RANKED_MODS: RankedMods = {}
 
+# Standard / RX / AP should keep pp focused on the core ruleset plus explicitly
+# blessed Torii options like DA / CL / ST. The large "fun mod" expansion added a
+# bunch of experimental modifiers that were never meant to enter ranked pp.
+_STD_ALWAYS_UNRANKED_MODS = frozenset(
+    {
+        "MR",
+        "RD",
+        "TP",
+        "AD",
+        "AS",
+        "BR",
+        "BU",
+        "DF",
+        "DP",
+        "FR",
+        "GR",
+        "MG",
+        "RP",
+        "SI",
+        "SY",
+        "TR",
+        "WD",
+        "WG",
+        "WU",
+    }
+)
+
 
 class _LegacyModSettings(BaseModel):
     enable_all_mods_pp: bool = False
@@ -489,6 +471,11 @@ def check_settings(mod: APIMod, ranked_mods: RulesetRankedMods) -> bool:
 
 def _mods_can_get_pp(ruleset_id: int, mods: list[APIMod], ranked_mods: RankedMods) -> bool:
     for mod in mods:
+        # Standard, relax, and autopilot all use ruleset 0 here. Keep the pp
+        # gate strict even if ranked_mods.json was generated from an overly
+        # permissive default set at some point.
+        if ruleset_id == 0 and mod["acronym"] in _STD_ALWAYS_UNRANKED_MODS:
+            return False
         # Hard safety rule for mania: DA with OD <= 6 is always non-pp, even if
         # ranked_mods.json is permissive (e.g. generated with enable-all).
         if ruleset_id == 3 and mod["acronym"] == "DA":
