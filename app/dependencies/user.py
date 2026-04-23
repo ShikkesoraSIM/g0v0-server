@@ -23,6 +23,10 @@ from redis.asyncio import Redis
 from sqlmodel import select
 
 security = HTTPBearer()
+RESTRICTED_ACCESS_DETAIL = (
+    "Your account is banned from Torii. "
+    "Wait 1 month without any further offenses before trying again."
+)
 
 
 oauth2_password = OAuth2PasswordBearer(
@@ -94,6 +98,10 @@ async def get_client_user_and_token(
     user = (await db.exec(select(User).where(User.id == token_record.user_id))).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if await user.is_restricted(db):
+        await db.delete(token_record)
+        await db.commit()
+        raise HTTPException(status_code=403, detail=RESTRICTED_ACCESS_DETAIL)
 
     return user, token_record
 
@@ -158,6 +166,10 @@ async def _validate_token(
     user = (await db.exec(select(User).where(User.id == token_record.user_id))).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if await user.is_restricted(db):
+        await db.delete(token_record)
+        await db.commit()
+        raise HTTPException(status_code=403, detail=RESTRICTED_ACCESS_DETAIL)
     return user, token_record
 
 

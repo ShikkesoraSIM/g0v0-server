@@ -257,6 +257,12 @@ async def submit_score(
         getattr(info, "rank", None),
     )
 
+    if await current_user.is_restricted(db):
+        raise HTTPException(
+            status_code=403,
+            detail="You are restricted from logging in or submitting scores on Torii.",
+        )
+
     if not info.passed:
         info.rank = Rank.F
 
@@ -808,6 +814,12 @@ async def create_solo_score(
         )
 
     await _store_last_client_hash(redis, user_id, version_hash)
+
+    if await current_user.is_restricted(db):
+        raise HTTPException(
+            status_code=403,
+            detail="You are restricted from creating score tokens on Torii.",
+        )
 
     beatmap = await Beatmap.get_or_fetch(db, fetcher, bid=beatmap_id)
     if not beatmap:

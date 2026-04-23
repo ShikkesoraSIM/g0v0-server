@@ -79,6 +79,10 @@ CLIENT_VERSION_HEADER_KEYS = (
     "x-client-version",
     "x-build-version",
 )
+RESTRICTED_LOGIN_MESSAGE = (
+    "Your account is banned from Torii. "
+    "Wait 1 month without any further offenses before trying again."
+)
 
 
 def _format_client_label_from_validation(validation) -> str | None:
@@ -213,6 +217,21 @@ def create_oauth_error_response(error: str, description: str, hint: str, status_
     """åˆ›å»ºæ ‡å‡†çš„ OAuth é”™è¯¯å“åº”"""
     error_data = OAuthErrorResponse(error=error, error_description=description, hint=hint, message=description)
     return JSONResponse(status_code=status_code, content=error_data.model_dump())
+
+
+async def _notify_restricted_login_attempt(db: Database, user: User) -> None:
+    try:
+        from app.router.notification.banchobot import bot as toriihalo
+
+        channel = await toriihalo._ensure_pm_channel(user, db)
+        if channel is not None:
+            await toriihalo._send_message(
+                channel,
+                RESTRICTED_LOGIN_MESSAGE,
+                db,
+            )
+    except Exception as e:
+        logger.warning(f"Failed to send restricted login PM for user {user.id}: {e}")
 
 
 def validate_email(email: str) -> list[str]:
@@ -507,6 +526,25 @@ async def oauth_token(
         # ç¡®ä¿ç”¨æˆ·å¯¹è±¡ä¸Žå½“å‰ä¼šè¯å…³è”
         await db.refresh(user)
 
+        if await user.is_restricted(db):
+            await _notify_restricted_login_attempt(db, user)
+            await LoginLogService.record_failed_login(
+                db=db,
+                request=request,
+                attempted_username=username,
+                login_method="password",
+                user_agent=raw_user_agent,
+                client_hash=normalized_version_hash or None,
+                client_label=client_label_for_log,
+                notes="Restricted account login blocked",
+            )
+            return create_oauth_error_response(
+                error="invalid_grant",
+                description=RESTRICTED_LOGIN_MESSAGE,
+                hint=RESTRICTED_LOGIN_MESSAGE,
+                status_code=403,
+            )
+
         user_id = user.id
         # Capture all user primitives now - after subsequent awaits the ORM
         # object's attributes get expired and accessing them triggers a sync
@@ -704,6 +742,23 @@ async def oauth_token(
                 hint="Invalid refresh token",
             )
 
+        user = await db.get(User, token_record.user_id)
+        if user is None:
+            return create_oauth_error_response(
+                error="invalid_grant",
+                description="Associated user no longer exists.",
+                hint="Invalid refresh token",
+            )
+        if await user.is_restricted(db):
+            await db.delete(token_record)
+            await db.commit()
+            return create_oauth_error_response(
+                error="invalid_grant",
+                description=RESTRICTED_LOGIN_MESSAGE,
+                hint=RESTRICTED_LOGIN_MESSAGE,
+                status_code=403,
+            )
+
         # ç”Ÿæˆæ–°çš„è®¿é—®ä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
         access_token = create_access_token(data={"sub": str(token_record.user_id)}, expires_delta=access_token_expires)
@@ -768,6 +823,14 @@ async def oauth_token(
 
         # ç¡®ä¿ç”¨æˆ·å¯¹è±¡ä¸Žå½“å‰ä¼šè¯å…³è”
         await db.refresh(user)
+        if await user.is_restricted(db):
+            await _notify_restricted_login_attempt(db, user)
+            return create_oauth_error_response(
+                error="invalid_grant",
+                description=RESTRICTED_LOGIN_MESSAGE,
+                hint=RESTRICTED_LOGIN_MESSAGE,
+                status_code=403,
+            )
 
         # ç”Ÿæˆä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)

@@ -942,15 +942,12 @@ class User(AsyncAttrs, UserModel, table=True):
             & (
                 (col(UserAccountHistory.permanent).is_(True))
                 | (
-                    (
-                        func.timestampadd(
-                            text("SECOND"),
-                            col(UserAccountHistory.length),
-                            col(UserAccountHistory.timestamp),
-                        )
-                        > func.now()
+                    func.timestampadd(
+                        text("SECOND"),
+                        col(UserAccountHistory.length),
+                        col(UserAccountHistory.timestamp),
                     )
-                    & (func.now() > col(UserAccountHistory.timestamp))
+                    > func.now()
                 )
             ),
         )
