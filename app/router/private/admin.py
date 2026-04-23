@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Annotated, cast, Any
 
+from app.auth import invalidate_user_tokens
 from app.database.auth import OAuthToken
 from app.database.beatmap import Beatmap, BannedBeatmaps
 from app.database.beatmapset import Beatmapset
@@ -17,7 +18,7 @@ from app.database.user_account_history import UserAccountHistory, UserAccountHis
 from app.database.user_badge import UserBadge, UserBadgeCreate, UserBadgeUpdate, UserBadgeResponse
 from app.database.verification import LoginSession, LoginSessionResp, TrustedDevice, TrustedDeviceResp
 from app.const import BANCHOBOT_ID
-from app.dependencies.database import Database, get_redis
+from app.dependencies.database import Database, Redis, get_redis
 from app.dependencies.client_verification import ClientVerificationService
 from app.dependencies.geoip import GeoIPService
 from app.dependencies.storage import StorageService
@@ -61,6 +62,34 @@ def _parse_mods_raw(raw: str | None) -> list[APIMod]:
         elif isinstance(item, dict) and "acronym" in item:
             result.append(cast(APIMod, {k: v for k, v in item.items()}))
     return result
+
+
+async def _evict_user_from_live_services(session: Database, redis: Redis, user: User) -> None:
+    user_id = user.id
+    if user_id is None:
+        return
+
+    revoked_tokens = await invalidate_user_tokens(session, user_id)
+    logger.info(f"Revoked {revoked_tokens} tokens for restricted user {user_id}")
+
+    sockets = list(server.connect_client.get(user_id, set()))
+    for websocket in sockets:
+        try:
+            await websocket.close(code=4003, reason="Account restricted")
+        except Exception:
+            pass
+
+    try:
+        await server.disconnect(user, session)
+    except Exception as e:
+        logger.debug(f"Failed to disconnect restricted user {user_id} from notification server: {e}")
+
+    try:
+        await redis.delete(f"metadata:online:{user_id}")
+        await redis.srem("metadata:online_users_set", user_id)
+        await redis.publish("osu-channel:user:invalidate", json.dumps({"user_id": user_id}))
+    except Exception as e:
+        logger.debug(f"Failed to clear online presence for restricted user {user_id}: {e}")
 
 
 async def require_admin(session: Database, user_and_token: UserAndToken) -> User:
@@ -1097,6 +1126,7 @@ async def update_user(
 async def ban_user(
     session: Database,
     user_id: int,
+    redis: Redis,
     user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
 ):
     """Ban a user (admin only)"""
@@ -1120,6 +1150,8 @@ async def ban_user(
     )
     session.add(restriction)
     await session.commit()
+    await session.refresh(user)
+    await _evict_user_from_live_services(session, redis, user)
 
 
 @router.post(

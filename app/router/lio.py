@@ -92,6 +92,14 @@ async def _validate_user_exists(db: Database, user_id: int) -> User:
     return user
 
 
+async def _ensure_user_not_restricted(db: Database, user: User) -> None:
+    if await user.is_restricted(db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Restricted users cannot use Torii spectator or multiplayer services.",
+        )
+
+
 class InviteRequest(BaseModel):
     room_id: int
     room_name: str
@@ -109,6 +117,8 @@ async def invite_user(
     invited = await db.get(User, user_id)
     if not inviter or not invited:
         raise HTTPException(404, "User not found")
+    await _ensure_user_not_restricted(db, inviter)
+    await _ensure_user_not_restricted(db, invited)
 
     channel = await ChatChannel.get_pm_channel(req.inviter_id, user_id, db)
     if not channel:
@@ -230,7 +240,8 @@ async def _create_room(db: Database, room_data: dict[str, Any]) -> tuple[Room, i
     if not host_user_id or not isinstance(host_user_id, int):
         raise HTTPException(status_code=400, detail="Missing or invalid user_id")
 
-    await _validate_user_exists(db, host_user_id)
+    host_user = await _validate_user_exists(db, host_user_id)
+    await _ensure_user_not_restricted(db, host_user)
 
     match_type_enum, queue_mode_enum = _parse_room_enums(match_type, queue_mode)
 
@@ -632,6 +643,8 @@ async def add_user_to_room(
 ) -> dict[str, Any]:
     """Add a user to a multiplayer room."""
     logger.debug(f"Adding user {user_id} to room {room_id}")
+    joining_user = await _validate_user_exists(db, user_id)
+    await _ensure_user_not_restricted(db, joining_user)
 
     # Get request body and parse user_data
     body = await request.body()
@@ -797,6 +810,11 @@ async def save_replay(
 
         if score_id is None or user_id is None or beatmap_id is None or data_bytes is None:
             raise HTTPException(status_code=400, detail="Missing required replay fields")
+
+        replay_user = await db.get(User, user_id)
+        if replay_user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        await _ensure_user_not_restricted(db, replay_user)
 
         from app.database.score import Score
         score = await db.get(Score, score_id)
