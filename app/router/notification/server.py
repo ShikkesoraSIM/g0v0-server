@@ -362,7 +362,7 @@ async def _listen_stop(ws: WebSocket, user_id: int):
             logger.info(f"Client {user_id} closed the connection.")
             break
         except RuntimeError as e:
-            if "disconnect message" in str(e):
+            if "disconnect message" in str(e) or "WebSocket is not connected" in str(e):
                 logger.info(f"Client {user_id} closed the connection.")
             else:
                 logger.exception(f"RuntimeError in client {user_id}: {e}")

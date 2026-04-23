@@ -23,6 +23,7 @@ from app.dependencies.client_verification import ClientVerificationService
 from app.dependencies.geoip import GeoIPService
 from app.dependencies.storage import StorageService
 from app.dependencies.user import UserAndToken, get_client_user_and_token
+from app.log import log
 from app.models.mods import APIMod, get_available_mods
 from app.models.score import GameMode
 from app.models.notification import ChannelMessage, GlobalAnnouncement
@@ -41,6 +42,8 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_ as sql_or
 from sqlmodel import col, func, select
+
+logger = log("AdminRouter")
 
 def _parse_mods_raw(raw: str | None) -> list[APIMod]:
     """Parse mods from a JSON string into a list of APIMod dicts.
