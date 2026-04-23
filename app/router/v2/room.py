@@ -103,6 +103,7 @@ async def get_all_rooms(
         .unique()
         .all()
     )
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     for room in db_rooms:
         resp = await RoomModel.transform(
             room,
@@ -113,6 +114,7 @@ async def get_all_rooms(
                 "playlist_item_stats",
                 "recent_participants",
             ],
+            show_nsfw_media=show_nsfw_media,
         )
         if category == RoomCategory.REALTIME:
             resp["category"] = RoomCategory.NORMAL
@@ -172,7 +174,8 @@ async def create_room(
     await _participate_room(db_room.id, user_id, db_room, db, redis)
     await db.commit()
     await db.refresh(db_room)
-    created_room = await RoomModel.transform(db_room, includes=Room.SHOW_RESPONSE_INCLUDES)
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
+    created_room = await RoomModel.transform(db_room, includes=Room.SHOW_RESPONSE_INCLUDES, show_nsfw_media=show_nsfw_media)
     return created_room
 
 
@@ -203,7 +206,8 @@ async def get_room(
     db_room = (await db.exec(select(Room).where(Room.id == room_id))).first()
     if db_room is None:
         raise HTTPException(404, "Room not found")
-    resp = await RoomModel.transform(db_room, includes=Room.SHOW_RESPONSE_INCLUDES, user=current_user)
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
+    resp = await RoomModel.transform(db_room, includes=Room.SHOW_RESPONSE_INCLUDES, show_nsfw_media=show_nsfw_media)
     return resp
 
 
@@ -251,7 +255,8 @@ async def add_user_to_room(
         await _participate_room(room_id, user_id, db_room, db, redis)
         await db.commit()
         await db.refresh(db_room)
-        resp = await RoomModel.transform(db_room, includes=Room.SHOW_RESPONSE_INCLUDES)
+        show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
+        resp = await RoomModel.transform(db_room, includes=Room.SHOW_RESPONSE_INCLUDES, show_nsfw_media=show_nsfw_media)
         return resp
     else:
         raise HTTPException(404, "room not found")
@@ -431,8 +436,9 @@ async def get_room_events(
     if room.category == RoomCategory.REALTIME:
         current_playlist_item_id = (await Room.current_playlist_item(db, room))["id"]
 
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     users = await db.exec(select(User).where(col(User.id).in_(user_ids)))
-    user_resps = [await UserModel.transform(user, includes=["country"]) for user in users]
+    user_resps = [await UserModel.transform(user, includes=["country"], show_nsfw_media=show_nsfw_media) for user in users]
 
     beatmaps = await db.exec(select(Beatmap).where(col(Beatmap.id).in_(beatmap_ids)))
     beatmap_resps = [

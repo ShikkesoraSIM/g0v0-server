@@ -148,15 +148,23 @@ class RosuPerformanceCalculator(BasePerformanceCalculator):
             map = rosu.Beatmap(content=beatmap_raw)
             mods = deepcopy(score.mods.copy())
             _parse_enum_to_str(int(score.gamemode), mods)
-            map.convert(self._to_rosu_mode(score.gamemode), mods)  # pyright: ignore[reportArgumentType]
+
+            # Classic mod signals stable-style scoring. rosu-pp doesn't accept CL as a
+            # valid mod, so we strip it and switch to lazer=False.  Tick-hit counts
+            # don't exist in stable scoring and passing them as non-zero causes rosu to
+            # compute massive negative penalties, so we zero them out as well.
+            has_classic = any(m.get("acronym") == "CL" for m in mods)
+            effective_mods = [m for m in mods if m.get("acronym") != "CL"] if has_classic else mods
+
+            map.convert(self._to_rosu_mode(score.gamemode), effective_mods)  # pyright: ignore[reportArgumentType]
             perf = rosu.Performance(
-                mods=mods,
-                lazer=True,
+                mods=effective_mods,
+                lazer=not has_classic,
                 accuracy=clamp(score.accuracy * 100, 0, 100),
                 combo=score.max_combo,
-                large_tick_hits=score.nlarge_tick_hit or 0,
-                slider_end_hits=score.nslider_tail_hit or 0,
-                small_tick_hits=score.nsmall_tick_hit or 0,
+                large_tick_hits=0 if has_classic else (score.nlarge_tick_hit or 0),
+                slider_end_hits=0 if has_classic else (score.nslider_tail_hit or 0),
+                small_tick_hits=0 if has_classic else (score.nsmall_tick_hit or 0),
                 n_geki=score.ngeki,
                 n_katu=score.nkatu,
                 n300=score.n300,

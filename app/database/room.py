@@ -150,13 +150,22 @@ class RoomModel(DatabaseModel[RoomDict]):
 
     @ondemand
     @staticmethod
-    async def host(_session: AsyncSession, room: "Room", includes: list[str] | None = None) -> UserDict:
+    async def host(
+        _session: AsyncSession,
+        room: "Room",
+        includes: list[str] | None = None,
+        show_nsfw_media: bool = False,
+    ) -> UserDict:
         host_user = await room.awaitable_attrs.host
-        return await UserModel.transform(host_user, includes=includes)
+        return await UserModel.transform(host_user, includes=includes, show_nsfw_media=show_nsfw_media)
 
     @ondemand
     @staticmethod
-    async def recent_participants(session: AsyncSession, room: "Room") -> list[UserDict]:
+    async def recent_participants(
+        session: AsyncSession,
+        room: "Room",
+        show_nsfw_media: bool = False,
+    ) -> list[UserDict]:
         participants: list[UserDict] = []
         if room.category == RoomCategory.REALTIME:
             query = (
@@ -179,7 +188,7 @@ class RoomModel(DatabaseModel[RoomDict]):
             )
         for recent_participant in await session.exec(query):
             user_instance = await recent_participant.awaitable_attrs.user
-            participants.append(await UserModel.transform(user_instance))
+            participants.append(await UserModel.transform(user_instance, show_nsfw_media=show_nsfw_media))
         return participants
 
     @ondemand
