@@ -282,6 +282,8 @@ class BeatmapBlacklistItem(BaseModel):
     id: int
     beatmapset_id: int
     beatmap_id: int
+    source: str = "manual"
+    reason: str | None = None
     beatmapset: dict | None = None
 
 
@@ -1239,6 +1241,8 @@ async def get_blacklisted_beatmaps(
                 id=banned_item.id or 0,
                 beatmapset_id=beatmapset_id,
                 beatmap_id=banned_item.beatmap_id,
+                source=banned_item.source,
+                reason=banned_item.reason,
                 beatmapset=beatmapset_dict,
             )
         )
@@ -1287,7 +1291,11 @@ async def add_blacklisted_beatmap(
         if existing_banned:
             raise HTTPException(status_code=400, detail="Beatmap is already blacklisted")
 
-        session.add(BannedBeatmaps(beatmap_id=beatmap_id))
+        session.add(BannedBeatmaps(
+            beatmap_id=beatmap_id,
+            source="manual",
+            reason="manual admin blacklist",
+        ))
         await session.commit()
         return {
             "beatmap_id": beatmap_id,
@@ -1327,7 +1335,11 @@ async def add_blacklisted_beatmap(
 
     # Ban all beatmaps in the set
     for beatmap in beatmaps:
-        banned_item = BannedBeatmaps(beatmap_id=beatmap.id)
+        banned_item = BannedBeatmaps(
+            beatmap_id=beatmap.id,
+            source="manual",
+            reason="manual admin beatmapset blacklist",
+        )
         session.add(banned_item)
 
     await session.commit()
@@ -1413,8 +1425,8 @@ async def reverify_blacklisted_beatmaps(
     user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
 ):
     """
-    Re-verify every entry in BannedBeatmaps using the correct .osu fetcher.
-    Removes false positives (beatmaps wrongly banned due to checksum-mismatch bug).
+    Re-verify automatic entries in BannedBeatmaps using the correct .osu fetcher.
+    Manual blacklist entries are preserved.
     The next hourly recalculate_banned_beatmap task will restore PP and BestScore
     entries for any maps removed here. Admin only.
     """

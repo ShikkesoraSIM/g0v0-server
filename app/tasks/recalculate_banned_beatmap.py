@@ -180,8 +180,9 @@ async def recalculate_banned_beatmap():
 
 async def reverify_banned_beatmaps() -> dict:
     """
-    Re-verify all beatmaps in BannedBeatmaps using the now-correct .osu fetcher.
-    Removes false positives (beatmaps wrongly banned due to fetcher checksum bugs).
+    Re-verify automatic beatmap-policy bans using the now-correct .osu fetcher.
+    Manual bans are intentionally ignored so admin curation is never deleted by
+    a fetcher/checksum recovery pass.
     Returns a dict with counts of removed / kept entries.
     The next recalculate_banned_beatmap run will then restore BestScore entries.
     """
@@ -189,13 +190,19 @@ async def reverify_banned_beatmaps() -> dict:
     fetcher = await get_fetcher()
     removed: list[int] = []
     kept: list[int] = []
+    skipped_manual: list[int] = []
 
     async with with_db() as session:
-        banned_ids = (
-            await session.exec(select(BannedBeatmaps.beatmap_id).distinct())
+        banned_items = (
+            await session.exec(select(BannedBeatmaps))
         ).all()
 
-        for beatmap_id in banned_ids:
+        for banned_item in banned_items:
+            beatmap_id = banned_item.beatmap_id
+            if banned_item.source != "auto_policy":
+                skipped_manual.append(beatmap_id)
+                continue
+
             try:
                 beatmap_raw = await fetcher.get_or_fetch_beatmap_raw(redis, beatmap_id)
             except Exception:
@@ -233,7 +240,8 @@ async def reverify_banned_beatmaps() -> dict:
                 # Remove from BannedBeatmaps so the next hourly task restores PP.
                 await session.execute(
                     delete(BannedBeatmaps).where(
-                        BannedBeatmaps.beatmap_id == beatmap_id
+                        BannedBeatmaps.beatmap_id == beatmap_id,
+                        BannedBeatmaps.source == "auto_policy",
                     )
                 )
                 removed.append(beatmap_id)
@@ -256,4 +264,4 @@ async def reverify_banned_beatmaps() -> dict:
             len(kept),
         )
 
-    return {"removed": removed, "kept": kept}
+    return {"removed": removed, "kept": kept, "skipped_manual": skipped_manual}

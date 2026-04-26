@@ -150,7 +150,11 @@ async def calculate_pp(
         try:
             is_suspicious = is_suspicious_beatmap(beatmap)
             if is_suspicious:
-                session.add(BannedBeatmaps(beatmap_id=score.beatmap_id))
+                session.add(BannedBeatmaps(
+                    beatmap_id=score.beatmap_id,
+                    source="auto_policy",
+                    reason="suspicious beatmap structure during pp calculation",
+                ))
                 logger.warning(f"Beatmap {score.beatmap_id} is suspicious, banned")
                 return 0
         except Exception:
@@ -273,7 +277,11 @@ async def pre_fetch_and_calculate_pp(
             loop = asyncio.get_event_loop()
             is_sus = await loop.run_in_executor(None, _check_suspicious)
             if is_sus:
-                session.add(BannedBeatmaps(beatmap_id=beatmap_id))
+                session.add(BannedBeatmaps(
+                    beatmap_id=beatmap_id,
+                    source="auto_policy",
+                    reason="suspicious beatmap structure during prefetch pp calculation",
+                ))
                 logger.warning(f"Beatmap {beatmap_id} is suspicious, banned")
                 return 0, True
         except Exception:
