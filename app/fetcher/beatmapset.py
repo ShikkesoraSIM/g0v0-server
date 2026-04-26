@@ -91,6 +91,17 @@ class BeatmapsetFetcher(BaseFetcher):
         for beatmap in beatmapset.get("beatmaps") or []:
             if isinstance(beatmap, dict):
                 beatmap.setdefault("is_local", False)
+
+        # Older / graveyarded beatmapsets from osu.ppy.sh sometimes return
+        # genre/language as null, which the BeatmapsetModelDict adapter (with
+        # genre/language in its includes tuple) rejects with a model_type
+        # validation error. Substitute the "Unspecified" enum default so the
+        # payload validates and the sync continues — every other field on the
+        # set is still authoritative.
+        if not isinstance(beatmapset.get("genre"), dict):
+            beatmapset["genre"] = {"id": 1, "name": "Unspecified"}
+        if not isinstance(beatmapset.get("language"), dict):
+            beatmapset["language"] = {"id": 1, "name": "Unspecified"}
         return beatmapset
 
     @staticmethod
