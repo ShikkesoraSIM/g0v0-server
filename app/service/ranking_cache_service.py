@@ -395,7 +395,22 @@ class RankingCacheService:
                         await asyncio.sleep(0.1)
 
                 except Exception as e:
-                    logger.error(f"Error caching page {page} for {ruleset}:{type}: {e}")
+                    # Log the full validation error so failing user_id and field
+                    # path are visible (Pydantic ValidationError str() is
+                    # truncated by default loguru output). Include the user_id
+                    # of the row that triggered the failure when known so we can
+                    # attribute the bad data.
+                    failing_user_id: int | None = None
+                    try:
+                        failing_user_id = locals().get("statistics") and getattr(
+                            locals()["statistics"], "user_id", None
+                        )
+                    except Exception:
+                        pass
+                    logger.opt(exception=e).error(
+                        f"Error caching page {page} for {ruleset}:{type} "
+                        f"(failing_user_id={failing_user_id}): {e}"
+                    )
 
             logger.debug(f"Completed ranking cache refresh for {ruleset}:{type}")
 

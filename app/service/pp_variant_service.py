@@ -447,34 +447,53 @@ async def apply_pp_variant_to_user_response(
     global_rank = fallback_global_rank
     country_rank = fallback_country_rank
 
-    # Prefer exact pp-dev ranking from snapshot cache (or on-demand build).
-    # This provides real variant leaderboard parity for profile rank display.
-    # Uses its own DB session so cancellation on timeout properly releases the connection.
+    # Prefer exact pp-dev ranking from cached snapshot. Building one is O(N
+    # users) and recalculates pp for the top 50 on demand, which routinely
+    # exceeded the 6 s wait_for budget and timed out — leaving the profile
+    # response with a stale fallback rank anyway.
+    #
+    # New strategy: only ever READ the snapshot for the profile response. If
+    # it's missing, schedule a background build (so the next request hits a
+    # warm cache) and fall through to the fast pp/ranked_score approximation
+    # below. The profile request returns immediately either way.
     snapshot: list[dict[str, Any]] | None = None
     try:
-        from app.dependencies.database import engine as _engine
-        from sqlmodel.ext.asyncio.session import AsyncSession as _AsyncSession
+        cached_raw = await redis.get(_ranking_pp_dev_snapshot_cache_key(mode))
+        if cached_raw:
+            try:
+                payload = json.loads(cached_raw)
+                if isinstance(payload, list):
+                    snapshot = payload
+            except json.JSONDecodeError:
+                snapshot = None
+    except Exception as e:
+        logger.warning(f"pp-dev snapshot cache read failed (user_id={user_id}): {e}")
 
-        async def _snapshot_with_own_session():
-            async with _AsyncSession(_engine) as own_session:
-                return await get_pp_dev_ranking_snapshot(
-                    session=own_session,
-                    ruleset=mode,
-                    redis=redis,
-                    fetcher=fetcher,
+    if snapshot is None:
+        # Spawn background rebuild so subsequent requests are fast. Use its own
+        # session and don't await — this must NEVER block the profile response.
+        async def _rebuild_snapshot_bg() -> None:
+            try:
+                from app.dependencies.database import engine as _engine
+                from sqlmodel.ext.asyncio.session import AsyncSession as _AsyncSession
+
+                async with _AsyncSession(_engine) as own_session:
+                    await get_pp_dev_ranking_snapshot(
+                        session=own_session,
+                        ruleset=mode,
+                        redis=redis,
+                        fetcher=fetcher,
+                    )
+            except Exception as bg_err:
+                logger.debug(
+                    f"Background pp-dev snapshot rebuild failed for {mode.value}: {bg_err}"
                 )
 
-        snapshot = await asyncio.wait_for(
-            _snapshot_with_own_session(),
-            timeout=PP_DEV_PROFILE_SNAPSHOT_TIMEOUT_SECONDS,
-        )
-    except TimeoutError:
-        logger.warning(
-            "pp-dev ranking snapshot timed out for profile response "
-            f"(user_id={user_id}, mode={mode.value}, timeout={PP_DEV_PROFILE_SNAPSHOT_TIMEOUT_SECONDS}s)"
-        )
-    except Exception as e:
-        logger.warning(f"pp-dev ranking snapshot failed for profile response (user_id={user_id}): {e}")
+        try:
+            asyncio.create_task(_rebuild_snapshot_bg())
+        except RuntimeError:
+            # No running loop in some test contexts; safe to ignore.
+            pass
 
     if snapshot:
         global_rank, country_rank = get_user_ranks_from_snapshot(
