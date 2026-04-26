@@ -1429,7 +1429,11 @@ async def _process_score_events(score: "Score", session: AsyncSession):
                 },
                 "user": {
                     "username": username,
-                    "url": settings.web_url + "users/" + str(displaced_score.user.id),
+                    # Use the FK column directly. `displaced_score.user` would
+                    # trigger a lazy load on a relationship that is not preloaded
+                    # by `_process_score_events_background`'s joinedload chain,
+                    # which crashes with `greenlet_spawn has not been called`.
+                    "url": settings.web_url + "users/" + str(displaced_score.user_id),
                 },
             }
             session.add(rank_lost_event)
