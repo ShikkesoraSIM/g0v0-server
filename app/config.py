@@ -728,7 +728,11 @@ CALCULATOR_CONFIG='{}'
     ]
     suspicious_alert_new_account_pp_threshold: Annotated[
         float,
-        Field(default=900.0, description="æ–°è´¦å·é«˜ pp å‘Šè­¦é˜ˆå€¼"),
+        # private-server pp scales way higher than official, so a fresh account
+        # cracking 900pp is totally routine for returning players. bumped to a value
+        # high enough that this check effectively only fires on something absurd.
+        # tune via env if you want it to actually trigger.
+        Field(default=9000.0, description="æ–°è´¦å·é«˜ pp å‘Šè­¦é˜ˆå€¼"),
         "åä½œå¼Šè®¾ç½®",
     ]
     suspicious_alert_low_playcount_threshold: Annotated[
@@ -738,7 +742,10 @@ CALCULATOR_CONFIG='{}'
     ]
     suspicious_alert_low_playcount_pp_threshold: Annotated[
         float,
-        Field(default=700.0, description="ä½Ž playcount é«˜ pp å‘Šè­¦é˜ˆå€¼"),
+        # same reasoning as new-account threshold above. 700pp on <250 plays
+        # happens constantly on private servers. raised so this check no longer
+        # alerts on normal smurf/main returners.
+        Field(default=7000.0, description="ä½Ž playcount é«˜ pp å‘Šè­¦é˜ˆå€¼"),
         "åä½œå¼Šè®¾ç½®",
     ]
     suspicious_shared_ip_user_threshold: Annotated[
