@@ -480,6 +480,9 @@ class BannedBeatmaps(SQLModel, table=True):
     __tablename__: str = "banned_beatmaps"
     id: int | None = Field(primary_key=True, index=True, default=None)
     beatmap_id: int = Field(index=True)
+    source: str = Field(default="manual", sa_column=Column(VARCHAR(32), nullable=False, server_default="manual"))
+    reason: str | None = Field(default=None, sa_column=Column(VARCHAR(255), nullable=True))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
 
 
 async def calculate_beatmap_attributes(
