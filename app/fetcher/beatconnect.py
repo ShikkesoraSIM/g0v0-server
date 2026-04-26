@@ -97,8 +97,20 @@ def beatconnect_beatmapset_to_dict(payload: dict[str, Any]) -> BeatmapsetDict:
             }
         )
 
-    genre = payload.get("genre") if isinstance(payload.get("genre"), dict) else None
-    language = payload.get("language") if isinstance(payload.get("language"), dict) else None
+    raw_genre = payload.get("genre") if isinstance(payload.get("genre"), dict) else None
+    raw_language = payload.get("language") if isinstance(payload.get("language"), dict) else None
+
+    # BeatConnect sometimes omits genre/language entirely. The BeatmapsetUpdate
+    # validator expects BeatmapTranslationText ({"name": str, "id": int}) — None
+    # fails validation and used to spam ERROR logs every 1–2 s. Fall back to
+    # "Unspecified"/id=1 (matching the osu-web Genre/Language enum default) so
+    # the payload validates cleanly when BeatConnect didn't ship the field.
+    genre: dict[str, Any] = (
+        raw_genre if raw_genre else {"id": 1, "name": "Unspecified"}
+    )
+    language: dict[str, Any] = (
+        raw_language if raw_language else {"id": 1, "name": "Unspecified"}
+    )
 
     result: dict[str, Any] = {
         "id": set_id,
@@ -136,17 +148,10 @@ def beatconnect_beatmapset_to_dict(payload: dict[str, Any]) -> BeatmapsetDict:
         "play_count": int(payload.get("play_count") or 0),
         "availability": {"more_information": None, "download_disabled": False},
         "beatmaps": beatmaps,
+        "genre": genre,
+        "language": language,
         "ratings": [],
     }
-    # genre/language are NotRequired BeatmapTranslationText. Only include them
-    # when BeatConnect actually returned a dict — passing None fails Pydantic
-    # validation (`Input should be a valid dictionary or instance of
-    # BeatmapTranslationText`) and was the cause of the BeatmapsetUpdate
-    # validation spam in production logs.
-    if genre is not None:
-        result["genre"] = genre
-    if language is not None:
-        result["language"] = language
     return result  # type: ignore[return-value]
 
 
