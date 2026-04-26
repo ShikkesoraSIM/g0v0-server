@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import hashlib
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,14 @@ class SuspiciousAlertService:
     def _fingerprint(*parts: object) -> str:
         payload = "|".join(str(part or "") for part in parts)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:64]
+
+    @staticmethod
+    def _aware_utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     @staticmethod
     async def _create_alert(
@@ -365,6 +374,7 @@ class SuspiciousAlertService:
             reasons.append(f"high pp with low accuracy ({accuracy * 100:.2f}%)")
             severity = "critical"
 
+        join_date = cls._aware_utc(join_date)
         account_age_days = max(0, (utcnow() - join_date).days) if join_date else 0
         user_stats = (
             await session.exec(
