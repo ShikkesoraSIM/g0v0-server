@@ -180,7 +180,18 @@ async def _process_user_achievement(score_id: int):
 
 
 async def _process_user(score_id: int, user_id: int, redis: Redis, fetcher: Fetcher):
-    async with with_db() as session:
+    # Use expire_on_commit=False here. process_user calls session.commit()
+    # multiple times during stat / pp / leaderboard processing, and the
+    # default behaviour expires every loaded attribute on managed objects.
+    # Subsequent attribute reads (e.g. score.total_score, user.username)
+    # then trigger a synchronous lazy-load, which crashes with
+    # `greenlet_spawn has not been called` because we're not inside a
+    # greenlet when accessed. Disabling expiration keeps the in-memory
+    # attributes valid after commit and avoids the unnecessary refetch.
+    from app.dependencies.database import engine as _engine
+    from sqlmodel.ext.asyncio.session import AsyncSession as _AsyncSession
+
+    async with _AsyncSession(_engine, expire_on_commit=False) as session:
         user = await session.get(User, user_id)
         if not user:
             logger.warning(
