@@ -356,24 +356,21 @@ class BeatmapRawFetcher(BaseFetcher):
                 if expected_checksum:
                     payload_checksum = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest().lower()
                     if payload_checksum != expected_checksum:
-                        if is_local:
-                            logger.warning(
-                                "Beatmap {} from {}: checksum mismatch for local map (expected {}, got {})",
-                                beatmap_id,
-                                req_url,
-                                expected_checksum,
-                                payload_checksum,
-                            )
-                            last_error = NoBeatmapError("Checksum mismatch")
-                            continue
-
+                        # Always reject mismatched payloads — pp would be computed
+                        # against the wrong .osu version, which silently produces
+                        # incorrect rank / leaderboard entries. Try the next source
+                        # in the chain instead. The final fallback in the calling
+                        # function still allows official osu.ppy.sh to be reached
+                        # if every mirror is out of sync.
                         logger.warning(
-                            "Beatmap {} from {}: checksum mismatch (expected {}, got {}), accepting payload",
+                            "Beatmap {} from {}: checksum mismatch (expected {}, got {}), trying next source",
                             beatmap_id,
                             req_url,
                             expected_checksum,
                             payload_checksum,
                         )
+                        last_error = NoBeatmapError("Checksum mismatch")
+                        continue
 
                 logger.debug(f"Successfully fetched beatmap {beatmap_id} from {req_url}")
                 return body
@@ -427,12 +424,22 @@ class BeatmapRawFetcher(BaseFetcher):
                 payload_checksum = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest().lower()
                 expected_checksum = checksum.lower()
                 if payload_checksum != expected_checksum:
+                    # Reject mismatched payloads. Returning the wrong .osu version
+                    # would cause pp to be calculated against a beatmap that does
+                    # not match what the player actually played — the most common
+                    # cause of "my pp is wrong" reports. Return None so the caller
+                    # falls through to the next fetcher in the chain (osu.direct,
+                    # b.ppy.sh, archive download, then official). Cache the miss
+                    # so we don't keep re-asking BeatConnect for this beatmap on
+                    # every score.
                     logger.warning(
-                        "BeatConnect .osu fetch for beatmap {}: checksum mismatch (expected {}, got {}), accepting payload",
+                        "BeatConnect .osu fetch for beatmap {}: checksum mismatch (expected {}, got {}), rejecting and trying next source",
                         beatmap_id,
                         expected_checksum,
                         payload_checksum,
                     )
+                    await self._set_negative_cache(negative_cache_key, "checksum_mismatch")
+                    return None
 
             return body
         except Exception as e:
