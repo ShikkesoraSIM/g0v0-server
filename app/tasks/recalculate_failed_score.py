@@ -1,5 +1,6 @@
 from app.calculator import pre_fetch_and_calculate_pp
-from app.database.score import Score, calculate_user_pp
+from app.database.best_scores import BestScore
+from app.database.score import Score, calculate_user_pp, get_user_best_pp_in_beatmap
 from app.database.statistics import UserStatistics
 from app.dependencies.database import get_redis, with_db
 from app.dependencies.fetcher import get_fetcher
@@ -36,6 +37,37 @@ async def recalculate_failed_score():
                         f"Recalculated PP for score {score.id} (user: {score.user_id}) at {score.ended_at}: {pp}"
                     )
                     affected_user.add((score.user_id, score.gamemode))
+
+                    # Update BestScore so the score appears in the user's top plays.
+                    # Without this, a score that failed PP calc and was later fixed
+                    # would have correct PP on the score row but no BestScore entry,
+                    # making it invisible on the profile.
+                    if pp and pp > 0 and score.passed and score.ranked:
+                        try:
+                            previous_best = await get_user_best_pp_in_beatmap(
+                                session, score.beatmap_id, score.user_id, score.gamemode
+                            )
+                            if previous_best is None or pp > previous_best.pp:
+                                new_best = BestScore(
+                                    user_id=score.user_id,
+                                    score_id=score.id,
+                                    beatmap_id=score.beatmap_id,
+                                    gamemode=score.gamemode,
+                                    pp=pp,
+                                    acc=score.accuracy,
+                                )
+                                session.add(new_best)
+                                if previous_best is not None:
+                                    await session.delete(previous_best)
+                                logger.info(
+                                    f"Updated BestScore for user {score.user_id} "
+                                    f"beatmap {score.beatmap_id}: {pp:.2f}pp"
+                                )
+                        except Exception as best_err:
+                            logger.warning(
+                                f"Failed to update BestScore for score {score.id}: {best_err}"
+                            )
+
             await session.commit()
             for user_id, gamemode in affected_user:
                 stats = (

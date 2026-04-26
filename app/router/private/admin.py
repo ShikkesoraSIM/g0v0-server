@@ -1403,6 +1403,27 @@ async def remove_blacklisted_beatmap(
     await session.commit()
 
 
+@router.post(
+    "/admin/beatmaps/blacklist/reverify",
+    name="Re-verify banned beatmaps",
+    tags=["管理", "g0v0 API"],
+)
+async def reverify_blacklisted_beatmaps(
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    """
+    Re-verify every entry in BannedBeatmaps using the correct .osu fetcher.
+    Removes false positives (beatmaps wrongly banned due to checksum-mismatch bug).
+    The next hourly recalculate_banned_beatmap task will restore PP and BestScore
+    entries for any maps removed here. Admin only.
+    """
+    await require_admin(session, user_and_token)
+    from app.tasks.recalculate_banned_beatmap import reverify_banned_beatmaps
+    result = await reverify_banned_beatmaps()
+    return result
+
+
 # ========== Beatmap Management ==========
 
 @router.get(
