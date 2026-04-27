@@ -440,6 +440,14 @@ class BeatmapsetUpdateService:
                     new_db_beatmap = await Beatmap.from_resp_no_save(session, beatmap)  # pyright: ignore[reportArgumentType]
                     existing_beatmap = await session.get(Beatmap, change.beatmap_id)
                     if existing_beatmap:
+                        # Preserve the checksum we already have. The official osu! API
+                        # serves a different .osu byte stream than mirrors like BeatConnect,
+                        # so merging in the API checksum here makes every BeatConnect-
+                        # downloaded copy look stale — the client then prompts "update
+                        # available" on a map that's already correct. Same rule as
+                        # Beatmap.from_resp.
+                        if existing_beatmap.checksum:
+                            new_db_beatmap.checksum = existing_beatmap.checksum
                         await session.merge(new_db_beatmap)
                         if change.type == BeatmapChangeType.MAP_DELETED:
                             existing_beatmap.deleted_at = utcnow()
