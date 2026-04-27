@@ -209,6 +209,7 @@ async def pre_fetch_and_calculate_pp(
     redis: Redis,
     fetcher: "Fetcher",
     calculator_override: PerformanceCalculator | None = None,
+    raise_when_not_found: bool = False,
 ) -> tuple[float, bool]:
     """
     ä¼˜åŒ–ç‰ˆPPè®¡ç®—ï¼šé¢„å…ˆèŽ·å–beatmapæ–‡ä»¶å¹¶ä½¿ç”¨ç¼“å­˜
@@ -264,6 +265,9 @@ async def pre_fetch_and_calculate_pp(
         if beatmap_raw is None:
             beatmap_raw = await fetcher.get_or_fetch_beatmap_raw(redis, beatmap_id)
     except Exception as e:
+        from app.fetcher.beatmap_raw import NoBeatmapError
+        if raise_when_not_found and isinstance(e, NoBeatmapError):
+            raise
         logger.error(f"Failed to fetch beatmap {beatmap_id}: {e}")
         return 0, False
 

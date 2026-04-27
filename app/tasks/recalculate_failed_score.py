@@ -5,6 +5,7 @@ from app.database.statistics import UserStatistics
 from app.dependencies.database import get_redis, with_db
 from app.dependencies.fetcher import get_fetcher
 from app.dependencies.scheduler import get_scheduler
+from app.fetcher.beatmap_raw import NoBeatmapError
 from app.log import logger
 
 from sqlmodel import select
@@ -28,7 +29,17 @@ async def recalculate_failed_score():
                 score = await session.get(Score, score_id)
                 if score is None:
                     continue
-                pp, successed = await pre_fetch_and_calculate_pp(score, session, redis, fetcher)
+                try:
+                    pp, successed = await pre_fetch_and_calculate_pp(
+                        score, session, redis, fetcher, raise_when_not_found=True
+                    )
+                except NoBeatmapError:
+                    # The beatmap is gone (deleted or unreachable from every mirror).
+                    # Drop the score from the recalc queue so we don't loop on it forever.
+                    logger.warning(
+                        f"Beatmap {score.beatmap_id} unreachable for score {score_id}; dropping from recalc queue"
+                    )
+                    continue
                 if not successed:
                     need_add.add(score_id)
                 else:

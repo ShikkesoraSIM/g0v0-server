@@ -5,9 +5,11 @@
 
 import asyncio
 import json
+import sys
 from typing import TYPE_CHECKING, Literal
 
 from app.config import settings
+from app.const import NEW_SCORE_FORMAT_VER
 from app.database.statistics import UserStatistics, UserStatisticsModel
 from app.helpers.asset_proxy_helper import replace_asset_urls
 from app.log import logger
@@ -296,6 +298,81 @@ class RankingCacheService:
         except Exception as e:
             logger.error(f"Error caching country stats: {e}")
 
+    async def cache_top_scores(self, data: list, ruleset: GameMode, page: int = 1) -> None:
+        """Cache top scores for a specific game mode (private API top-scores endpoint)."""
+        try:
+            cache_key = f"top_scores:{ruleset}:page:{page}"
+            ttl = settings.ranking_cache_expire_minutes * 60
+            await self.redis.set(cache_key, safe_json_dumps(data), ex=ttl)
+            logger.debug(f"Cached top scores for {cache_key}")
+        except Exception as e:
+            logger.error(f"Error caching top scores: {e}")
+
+    async def get_cached_top_scores(self, ruleset: GameMode, page: int = 1) -> list[dict] | None:
+        """Get cached top scores for a specific game mode."""
+        try:
+            cache_key = f"top_scores:{ruleset}:page:{page}"
+            cached_data = await self.redis.get(cache_key)
+            if cached_data:
+                return json.loads(cached_data)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting cached top scores: {e}")
+            return None
+
+    async def refresh_top_scores_cache(
+        self, session: AsyncSession, ruleset: GameMode, max_pages: int | None = None
+    ) -> None:
+        """Refresh top scores cache for a ruleset."""
+        from app.database import BestScore, Score, ScoreModel
+
+        wheres = [
+            Score.gamemode == ruleset,
+            col(Score.id).in_(select(BestScore.score_id).where(BestScore.gamemode == ruleset)),
+        ]
+
+        if max_pages is None:
+            max_pages = settings.top_score_cache_max_pages
+
+        try:
+            logger.info(f"Starting top scores cache refresh for {ruleset}")
+            for page in range(1, max_pages + 1):
+                if page == 1:
+                    cursor = sys.maxsize
+                else:
+                    cursor = (
+                        await session.exec(
+                            select(Score.pp)
+                            .where(*wheres)
+                            .order_by(col(Score.pp).desc())
+                            .offset((page - 1) * 50 - 1)
+                            .limit(1)
+                        )
+                    ).first()
+                    if cursor is None:
+                        break
+                scores = (
+                    await session.exec(
+                        select(Score)
+                        .where(*wheres, col(Score.pp) <= cursor)
+                        .order_by(col(Score.pp).desc())
+                        .limit(50)
+                    )
+                ).all()
+                data = [
+                    await score.to_resp(
+                        session,
+                        api_version=NEW_SCORE_FORMAT_VER + 1,
+                        includes=ScoreModel.DEFAULT_SCORE_INCLUDES,
+                    )
+                    for score in scores
+                ]
+                await self.cache_top_scores(data, ruleset, page)
+                await asyncio.sleep(0.1)
+            logger.info(f"Completed top scores cache refresh for {ruleset}")
+        except Exception as e:
+            logger.error(f"Top scores cache refresh failed for {ruleset}: {e}")
+
     async def refresh_ranking_cache(
         self,
         session: AsyncSession,
@@ -559,8 +636,12 @@ class RankingCacheService:
             task = self.refresh_country_ranking_cache(session, mode)
             refresh_tasks.append(task)
 
+            # Top scores cache (private API)
+            task = self.refresh_top_scores_cache(session, mode)
+            refresh_tasks.append(task)
+
         # 并发执行刷新任务，但限制并发数
-        semaphore = asyncio.Semaphore(5)  # 最多同时5个任务
+        semaphore = asyncio.Semaphore(15)  # raised from 5 to absorb the extra top-score tasks
 
         async def bounded_refresh(task):
             async with semaphore:

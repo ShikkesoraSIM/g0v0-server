@@ -140,21 +140,32 @@ def truncate(text: str, limit: int = 100, ellipsis: str = "...") -> str:
     return text
 
 
-def check_image(content: bytes, size: int, width: int, height: int) -> str:
-    if len(content) > size:  # 10MB limit
-        raise HTTPException(status_code=400, detail="File size exceeds 10MB limit")
+def check_image(
+    content: bytes,
+    size: int,
+    width: int | None = None,
+    height: int | None = None,
+    allow_formats: list[str] | None = None,
+) -> str:
+    if allow_formats is None:
+        allow_formats = ["PNG", "JPEG", "GIF"]
+
+    if len(content) > size:
+        raise HTTPException(status_code=400, detail=f"File size exceeds {size} byte limit")
     elif len(content) == 0:
         raise HTTPException(status_code=400, detail="File cannot be empty")
     try:
         with Image.open(BytesIO(content)) as img:
-            if img.format not in ["PNG", "JPEG", "GIF"]:
+            if img.format not in allow_formats:
                 raise HTTPException(status_code=400, detail="Invalid image format")
-            if img.size[0] > width or img.size[1] > height:
+            if (width is not None and img.size[0] > width) or (height is not None and img.size[1] > height):
                 raise HTTPException(
                     status_code=400,
                     detail=f"Image size exceeds {width}x{height} pixels",
                 )
             return img.format.lower()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error processing image: {e}")
 

@@ -139,6 +139,8 @@ class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
     ]
     USER_PROFILE_INCLUDES: ClassVar[list[str]] = ["beatmap", "beatmapset", "user"]
 
+    DEFAULT_SCORE_INCLUDES: ClassVar[list[str]] = ["user", "user.country", "user.cover", "user.team"]
+
     # 基本字段
     beatmap_id: int = Field(index=True, foreign_key="beatmaps.id")
     id: int = Field(default=None, sa_column=Column(BigInteger, autoincrement=True, primary_key=True))
@@ -564,7 +566,8 @@ class Score(ScoreModel, table=True):
         includes: list[str] = [],
         show_nsfw_media: bool = False,
     ) -> "ScoreDict | LegacyScoreResp":
-        if api_version >= 20220705:
+        from app.const import NEW_SCORE_FORMAT_VER
+        if api_version >= NEW_SCORE_FORMAT_VER:
             return await ScoreModel.transform(self, includes=includes, show_nsfw_media=show_nsfw_media)
         return await LegacyScoreResp.from_db(session, self)
 

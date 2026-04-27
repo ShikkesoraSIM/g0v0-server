@@ -65,6 +65,7 @@ from .score import (
     ScoreStatistics,
 )
 from .score_token import ScoreToken, ScoreTokenResp
+from .screenshots import Screenshot
 from .search_beatmapset import SearchBeatmapsetsResp
 from .statistics import (
     UserStatistics,
@@ -155,6 +156,7 @@ __all__ = [
     "ScoreStatistics",
     "ScoreToken",
     "ScoreTokenResp",
+    "Screenshot",
     "SearchBeatmapsetsResp",
     "SuspiciousAlert",
     "Team",

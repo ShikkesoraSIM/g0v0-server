@@ -612,6 +612,12 @@ CALCULATOR_CONFIG='{}'
         "ç¼“å­˜è®¾ç½®",
         "æŽ’è¡Œæ¦œç¼“å­˜",
     ]
+    top_score_cache_max_pages: Annotated[
+        int,
+        Field(default=3, description="Pages of top-scores private API to cache"),
+        "cache settings",
+        "top scores cache",
+    ]
     ranking_cache_top_countries: Annotated[
         int,
         Field(default=20, description="ç¼“å­˜å‰Nä¸ªå›½å®¶çš„æŽ’è¡Œæ¦œ"),
