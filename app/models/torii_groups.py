@@ -154,6 +154,17 @@ TORII_GROUPS: dict[str, ToriiGroupDef] = {
         "has_playmodes": False,
         "is_probationary": False,
     },
+    # ── Special / cute ───────────────────────────────────────────────────────
+    "goof": {
+        "id": 1030,
+        "identifier": "torii-goof",
+        "name": "Goofball",
+        "short_name": "GOOF",
+        "colour": "#9CE5A0",  # soft pastel froggy green
+        "has_listings": False,
+        "has_playmodes": False,
+        "is_probationary": False,
+    },
 }
 
 # Groups derived automatically from boolean DB flags (is_admin, is_gmt, is_qat, is_bng)
