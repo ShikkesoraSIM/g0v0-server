@@ -101,6 +101,40 @@ class RegisterHashesResponse(BaseModel):
 from .router import router  # noqa: E402  (local import avoids circular deps)
 
 
+class ToriiHashesResponse(BaseModel):
+    """Lookup payload for the spectator: maps each known Torii executable hash to its
+    canonical client name. The spectator queries this once at startup (and on a
+    refresh interval) to verify which connected users are running a real Torii build.
+    """
+
+    hashes: dict[str, str]
+
+
+@router.get(
+    "/client-versions/torii-hashes",
+    name="List verified Torii client hashes",
+    tags=["Client Versions"],
+    response_model=ToriiHashesResponse,
+    description=(
+        "Returns the lowercase MD5 → client_name map for every executable registered "
+        "as 'osu! Torii'. Consumed by the spectator server to flag verified Torii "
+        "connections in presence broadcasts."
+    ),
+    dependencies=[Depends(_require_webhook_auth)],
+)
+async def list_torii_hashes(
+    verification_service: ClientVerificationService,
+) -> ToriiHashesResponse:
+    hashes: dict[str, str] = {}
+    for client_hash, (client_name, _version, _os) in verification_service.versions.items():
+        # Match the badge expectation on the client side (UserPresence.ClientName == "torii").
+        # We expose 'torii' for any hash whose client_name canonicalises to that, regardless
+        # of casing / spacing in the registered display name.
+        if (client_name or "").strip().lower().replace("!", "").replace(" ", "") == "osutorii":
+            hashes[client_hash] = "torii"
+    return ToriiHashesResponse(hashes=hashes)
+
+
 @router.post(
     "/client-versions/register",
     name="Register Torii client build hashes",
