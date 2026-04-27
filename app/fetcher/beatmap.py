@@ -209,6 +209,24 @@ class BeatmapFetcher(BaseFetcher):
             logger.debug("BeatConnect beatmap lookup failed for id={} md5={}: {}", beatmap_id, beatmap_checksum, e)
             return None
 
+    @staticmethod
+    def _inject_torii_defaults(payload: Any) -> Any:
+        """Inject defaults for Torii-specific fields the upstream APIs don't return.
+
+        The official osu! API (and most mirrors) don't know about Torii's
+        ``is_local`` flag. Without these defaults, ``adapter.validate_python``
+        rejects every primary lookup and we fall through to a more limited
+        mirror response, which results in incomplete metadata in the client
+        (grey diffs, "unknown" labels, etc.).
+        """
+        if not isinstance(payload, dict):
+            return payload
+        payload.setdefault("is_local", False)
+        beatmapset = payload.get("beatmapset")
+        if isinstance(beatmapset, dict):
+            beatmapset.setdefault("is_local", False)
+        return payload
+
     async def get_beatmap(self, beatmap_id: int | None = None, beatmap_checksum: str | None = None) -> BeatmapDict:
         if beatmap_id:
             params = {"id": beatmap_id}
@@ -220,15 +238,14 @@ class BeatmapFetcher(BaseFetcher):
 
         beatconnect_payload = await self._get_beatmap_from_beatconnect(beatmap_id, beatmap_checksum)
         if beatconnect_payload is not None:
-            return adapter.validate_python(beatconnect_payload)  # pyright: ignore[reportReturnType]
+            return adapter.validate_python(self._inject_torii_defaults(beatconnect_payload))  # pyright: ignore[reportReturnType]
 
         try:
-            return adapter.validate_python(  # pyright: ignore[reportReturnType]
-                await self.request_api(
-                    "https://osu.ppy.sh/api/v2/beatmaps/lookup",
-                    params=params,
-                )
+            primary_payload = await self.request_api(
+                "https://osu.ppy.sh/api/v2/beatmaps/lookup",
+                params=params,
             )
+            return adapter.validate_python(self._inject_torii_defaults(primary_payload))  # pyright: ignore[reportReturnType]
         except Exception as e:
             logger.warning(
                 "Primary beatmap lookup failed for id={} md5={} ({})",
