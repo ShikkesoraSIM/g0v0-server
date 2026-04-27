@@ -801,6 +801,19 @@ CALCULATOR_CONFIG='{}'
         "åä½œå¼Šè®¾ç½®",
     ]
 
+    client_version_webhook_secret: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "Secret token for the CI webhook that auto-registers new client build hashes. "
+                "Set to a long random string and configure the same value as the GitHub Actions secret "
+                "'TORII_VERSION_WEBHOOK_SECRET'. Leave empty to disable the endpoint."
+            ),
+        ),
+        "反作弊设置",
+    ]
+
     # å­˜å‚¨è®¾ç½®
     storage_service: Annotated[
         StorageServiceType,
