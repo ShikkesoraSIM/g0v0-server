@@ -278,6 +278,10 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
     beatmapset: "Beatmapset" = Relationship(back_populates="beatmaps", sa_relationship_kwargs={"lazy": "joined"})
     failtimes: FailTime | None = Relationship(back_populates="beatmap", sa_relationship_kwargs={"lazy": "joined"})
 
+    # osu! API returns mode as a string ("osu", "taiko", "fruits", "mania"),
+    # but some fallback sources (osu.direct, mirrors) return it as an integer.
+    _MODE_INT_TO_STR: dict[int, str] = {0: "osu", 1: "taiko", 2: "fruits", 3: "mania"}
+
     @classmethod
     async def from_resp_no_save(cls, _session: AsyncSession, resp: BeatmapDict) -> "Beatmap":
         d = {k: v for k, v in resp.items() if k != "beatmapset"}
@@ -290,6 +294,14 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             rank_status = BeatmapRankStatus(int(ranked))
         except (TypeError, ValueError):
             rank_status = BeatmapRankStatus.PENDING
+        # Normalise mode: convert integer form (0-3) to string if needed.
+        if isinstance(d.get("mode"), int):
+            d["mode"] = cls._MODE_INT_TO_STR.get(d["mode"], "osu")
+        # Also handle mode_int → mode if mode is missing entirely.
+        if "mode" not in d or d["mode"] is None:
+            mode_int = d.get("mode_int")
+            if isinstance(mode_int, int):
+                d["mode"] = cls._MODE_INT_TO_STR.get(mode_int, "osu")
         beatmap = cls.model_validate(
             {
                 **d,
@@ -316,7 +328,11 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             # changed since we first cached them.
             changed = False
             new_checksum = resp.get("checksum")
-            if new_checksum and (existing.checksum or "").lower() != new_checksum.lower():
+            # Only set the checksum if we don't already have one stored.
+            # Overwriting an existing checksum with the official osu! API value causes
+            # "update available" for players who downloaded via BeatConnect (different
+            # file checksums), so we preserve whatever checksum was first recorded.
+            if new_checksum and not existing.checksum:
                 existing.checksum = new_checksum
                 changed = True
             new_ranked = resp.get("ranked")
