@@ -486,7 +486,7 @@ class Score(ScoreModel, table=True):
     nsmall_tick_hit: int | None = Field(default=None, exclude=True)
     gamemode: GameMode = Field(index=True)
     pinned_order: int = Field(default=0, exclude=True)
-    map_md5: str = Field(max_length=32, index=True, exclude=True)
+    map_md5: str | None = Field(default=None, max_length=32, index=True, exclude=True)
 
     @field_validator("gamemode", mode="before")
     @classmethod
