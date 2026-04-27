@@ -354,30 +354,13 @@ RulesetRankedMods = dict[str, dict[str, Any]]
 RankedMods = dict[int, RulesetRankedMods]
 RANKED_MODS: RankedMods = {}
 
-# Standard / RX / AP should keep pp focused on the core ruleset plus explicitly
-# blessed Torii options like DA / CL / ST. The large "fun mod" expansion added a
-# bunch of experimental modifiers that were never meant to enter ranked pp.
+# Keep only the known-broken standard-family mods out of PP. Other Torii/lazer
+# mods remain ranked according to ranked_mods.json so we don't silently change
+# the server's mod economy.
 _STD_ALWAYS_UNRANKED_MODS = frozenset(
     {
-        "MR",
-        "RD",
-        "TP",
-        "AD",
         "AS",
-        "BR",
-        "BU",
-        "DF",
-        "DP",
-        "FR",
-        "GR",
         "MG",
-        "RP",
-        "SI",
-        "SY",
-        "TR",
-        "WD",
-        "WG",
-        "WU",
     }
 )
 
