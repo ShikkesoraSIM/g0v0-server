@@ -1159,8 +1159,15 @@ async def process_score(
     # fails before the commit, the token remains unbound and no orphan score exists.
     score_token.score_id = score.id
     await session.commit()  # Atomically commits: score row + score_token.score_id
-    score.processed = True
-    await session.commit()
+    # NOTE: do NOT set score.processed = True here. The spectator's
+    # ScoreProcessedSubscriber.RegisterForSingleScoreAsync uses processed=1 as
+    # the signal that PP + statistics have finished computing, and it will
+    # immediately broadcast UserScoreProcessed to the client when the flag is
+    # set. If we flip it now (right after INSERT, before _process_score_pp /
+    # _process_statistics have run), the client races _process_user, calls
+    # /me, gets stale stats, and the rank/PP popup either doesn't appear or
+    # shows a 0-delta update. The flag is flipped at the end of process_user(),
+    # right before the redis "score:processed" publish.
     await session.refresh(score)
 
     return score
@@ -1830,6 +1837,14 @@ async def process_user(
     "osu-channel:user:invalidate",
     json.dumps({"user_id": user_id})
     )
+
+    # Mark the score as fully processed *now*, after PP + statistics + leaderboard
+    # commits. The spectator (ScoreProcessedSubscriber) uses processed=1 as its
+    # immediate-fire shortcut for UserScoreProcessed, so the flip must happen
+    # AFTER all stat updates are visible — otherwise the client refetches /me
+    # before the new PP/rank are committed and the popup shows no change.
+    score.processed = True
+    await session.commit()
 
     # Notify client AFTER commit
     await redis.publish("osu-channel:score:processed", f'{{"ScoreId": {score_id}}}')
