@@ -269,6 +269,12 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
         ).one()
 
 
+# osu! API returns mode as a string ("osu", "taiko", "fruits", "mania"),
+# but some fallback sources (osu.direct, mirrors) return it as an integer (0-3).
+# Defined at module level because Pydantic v2 treats _-prefixed class vars as ModelPrivateAttr.
+_MODE_INT_TO_STR: dict[int, str] = {0: "osu", 1: "taiko", 2: "fruits", 3: "mania"}
+
+
 class Beatmap(AsyncAttrs, BeatmapModel, table=True):
     __tablename__: str = "beatmaps"
 
@@ -277,10 +283,6 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
     # optional
     beatmapset: "Beatmapset" = Relationship(back_populates="beatmaps", sa_relationship_kwargs={"lazy": "joined"})
     failtimes: FailTime | None = Relationship(back_populates="beatmap", sa_relationship_kwargs={"lazy": "joined"})
-
-    # osu! API returns mode as a string ("osu", "taiko", "fruits", "mania"),
-    # but some fallback sources (osu.direct, mirrors) return it as an integer.
-    _MODE_INT_TO_STR: dict[int, str] = {0: "osu", 1: "taiko", 2: "fruits", 3: "mania"}
 
     @classmethod
     async def from_resp_no_save(cls, _session: AsyncSession, resp: BeatmapDict) -> "Beatmap":
@@ -294,14 +296,15 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             rank_status = BeatmapRankStatus(int(ranked))
         except (TypeError, ValueError):
             rank_status = BeatmapRankStatus.PENDING
-        # Normalise mode: convert integer form (0-3) to string if needed.
+        # Normalise mode: osu! API returns string ("osu","taiko","fruits","mania")
+        # but some fallback sources (osu.direct, mirrors) return it as an integer.
+        # Pydantic v2 treats _-prefixed class attrs as ModelPrivateAttr so use module-level constant.
         if isinstance(d.get("mode"), int):
-            d["mode"] = cls._MODE_INT_TO_STR.get(d["mode"], "osu")
-        # Also handle mode_int → mode if mode is missing entirely.
+            d["mode"] = _MODE_INT_TO_STR.get(d["mode"], "osu")
         if "mode" not in d or d["mode"] is None:
             mode_int = d.get("mode_int")
             if isinstance(mode_int, int):
-                d["mode"] = cls._MODE_INT_TO_STR.get(mode_int, "osu")
+                d["mode"] = _MODE_INT_TO_STR.get(mode_int, "osu")
         beatmap = cls.model_validate(
             {
                 **d,
