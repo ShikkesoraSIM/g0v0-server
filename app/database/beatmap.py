@@ -479,6 +479,17 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
                     session.add(placeholder_set)
                     await session.commit()
 
+            # If the lookup was BY checksum (the client showed us its local md5)
+            # and the upstream API returned a different md5 for the same beatmap,
+            # honour the client's claim. Mirrors (BeatConnect, gatari, osu.direct)
+            # re-pack .osu files with subtly different byte layouts so their MD5s
+            # diverge from osu.ppy.sh's, even though the map plays identically.
+            # If we stored the upstream md5 here, every future lookup for the
+            # client's local file would miss and trigger a bogus "update
+            # available" prompt — even though the player can already submit
+            # scores on the map. Trust the client.
+            if md5 and resp.get("checksum") and resp["checksum"].lower() != md5.lower():
+                resp = {**resp, "checksum": md5}
             return await Beatmap.from_resp(session, resp)
         except Exception as e:
             # 3. If API fetch fails, re-check DB in case it was created concurrently
