@@ -29,7 +29,7 @@ from app.utils import utcnow
 
 from sqlalchemy import Column, DateTime, ForeignKey
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import BigInteger, Field, Relationship, SQLModel, UniqueConstraint, select
+from sqlmodel import BigInteger, Field, SQLModel, UniqueConstraint, select
 
 if TYPE_CHECKING:
     from .user import User
@@ -55,14 +55,15 @@ class Donation(SQLModel, table=True):
     # Nullable — anonymous donations or ones whose donor display name
     # didn't match any Torii user live here unlinked until an admin
     # links them via the queue.
+    #
+    # Intentionally NO Relationship() back-reference. The user.py module
+    # imports later in app/database/__init__.py than this one, so a
+    # forward-ref relationship can't resolve at class-init time. Callers
+    # who need the linked User look it up explicitly via session.get().
     user_id: int | None = Field(
         default=None,
         sa_column=Column(BigInteger, ForeignKey("lazer_users.id", ondelete="SET NULL"), index=True, nullable=True),
     )
-    # `Optional["User"]` instead of `"User | None"` — SQLModel/SQLAlchemy's
-    # relationship resolver can't parse the PEP 604 union syntax inside a
-    # forward-ref string, which throws InvalidRequestError on app startup.
-    user: "User" = Relationship()  # type: ignore[assignment]
 
     provider: str = Field(max_length=32, index=True)
     provider_transaction_id: str = Field(max_length=128)
