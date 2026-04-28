@@ -31,11 +31,12 @@ from app.database.donation import (
     match_user_for_kofi,
     months_for_amount,
 )
-from app.dependencies.database import Database
+from app.dependencies.database import engine
 from app.log import log
 
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .router import router
 
@@ -185,7 +186,12 @@ def _build_discord_embed(
     ),
     include_in_schema=False,  # internal infrastructure, not for clients
 )
-async def kofi_webhook(request: Request, session: Database):
+async def kofi_webhook(request: Request):
+    # Use a dedicated AsyncSession with expire_on_commit=False — the
+    # request-scoped `Database` dependency expires loaded attributes on
+    # commit, which then triggers sync lazy-loads against the async
+    # engine and crashes with `greenlet_spawn has not been called`.
+    # Same workaround as `_process_user` in score.py.
     expected_token = (settings.kofi_verification_token or "").strip()
     if not expected_token:
         # Misconfigured server. Return 503 (Ko-fi will retry with backoff)
@@ -225,11 +231,58 @@ async def kofi_webhook(request: Request, session: Database):
         raise HTTPException(status_code=401, detail="Invalid verification token.")
 
     provider = "kofi"
+    amount_cents = _parse_amount_to_cents(payload.amount)
+    grants_supporter = payload.type in ("Donation", "Subscription")
+    months_granted = months_for_amount(amount_cents, payload.currency) if grants_supporter else 0
 
-    # Idempotency — Ko-fi retries on non-200, so we MUST handle dupes.
-    if await is_duplicate(
-        session, provider=provider, provider_transaction_id=payload.kofi_transaction_id
-    ):
+    matched_user = None
+    new_tier_label: str | None = None
+    duplicate = False
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        # Idempotency — Ko-fi retries on non-200, so we MUST handle dupes.
+        if await is_duplicate(
+            session, provider=provider, provider_transaction_id=payload.kofi_transaction_id
+        ):
+            duplicate = True
+        else:
+            matched_user = await match_user_for_kofi(
+                session,
+                message=payload.message,
+                from_name=payload.from_name,
+            )
+
+            donation = Donation(
+                user_id=matched_user.id if matched_user else None,
+                provider=provider,
+                provider_transaction_id=payload.kofi_transaction_id,
+                provider_message_id=payload.message_id,
+                amount_cents=amount_cents,
+                currency=payload.currency,
+                is_recurring=payload.is_subscription_payment,
+                is_first_recurring=payload.is_first_subscription_payment,
+                tier_name=payload.tier_name,
+                donor_display_name=payload.from_name,
+                donor_message=payload.message,
+                donor_message_is_public=payload.is_public,
+                donor_email=payload.email,
+                months_granted=months_granted,
+            )
+            session.add(donation)
+
+            if matched_user is not None and months_granted > 0:
+                await apply_supporter_grant(session, user=matched_user, months_granted=months_granted)
+                from app.models.torii_groups import (
+                    supporter_tier_key_for_months,
+                    TORII_GROUPS,
+                )
+                tier_key = supporter_tier_key_for_months(matched_user.total_supporter_months)
+                if tier_key and tier_key in TORII_GROUPS:
+                    new_tier_label = TORII_GROUPS[tier_key]["name"]
+
+            await session.commit()
+
+    if duplicate:
         logger.info(
             "Duplicate Ko-fi webhook ignored (txn={})", payload.kofi_transaction_id
         )
@@ -243,54 +296,6 @@ async def kofi_webhook(request: Request, session: Database):
             is_duplicate_event=True,
         ))
         return {"status": "ok", "duplicate": True}
-
-    amount_cents = _parse_amount_to_cents(payload.amount)
-
-    # Shop orders / commissions don't grant supporter status (we can wire
-    # specific shop items to perks later if we add a shop). Donations &
-    # subscriptions all roll into supporter time.
-    grants_supporter = payload.type in ("Donation", "Subscription")
-    months_granted = months_for_amount(amount_cents, payload.currency) if grants_supporter else 0
-
-    matched_user = await match_user_for_kofi(
-        session,
-        message=payload.message,
-        from_name=payload.from_name,
-    )
-
-    donation = Donation(
-        user_id=matched_user.id if matched_user else None,
-        provider=provider,
-        provider_transaction_id=payload.kofi_transaction_id,
-        provider_message_id=payload.message_id,
-        amount_cents=amount_cents,
-        currency=payload.currency,
-        is_recurring=payload.is_subscription_payment,
-        is_first_recurring=payload.is_first_subscription_payment,
-        tier_name=payload.tier_name,
-        donor_display_name=payload.from_name,
-        donor_message=payload.message,
-        donor_message_is_public=payload.is_public,
-        donor_email=payload.email,
-        months_granted=months_granted,
-    )
-    session.add(donation)
-
-    # If we matched a user, bump their counters in the same transaction
-    # so the donation row + supporter grant land atomically.
-    new_tier_label: str | None = None
-    if matched_user is not None and months_granted > 0:
-        await apply_supporter_grant(session, user=matched_user, months_granted=months_granted)
-        # Build a friendly tier label for the Discord embed.
-        from app.models.torii_groups import (
-            supporter_tier_key_for_months,
-            TORII_GROUPS,
-        )
-        tier_key = supporter_tier_key_for_months(matched_user.total_supporter_months)
-        if tier_key and tier_key in TORII_GROUPS:
-            new_tier_label = TORII_GROUPS[tier_key]["name"]
-
-    await session.commit()
 
     # Best-effort Discord forwarding AFTER the DB write — we want the
     # state durable before announcing.
