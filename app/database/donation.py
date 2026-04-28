@@ -59,7 +59,10 @@ class Donation(SQLModel, table=True):
         default=None,
         sa_column=Column(BigInteger, ForeignKey("lazer_users.id", ondelete="SET NULL"), index=True, nullable=True),
     )
-    user: "User | None" = Relationship()
+    # `Optional["User"]` instead of `"User | None"` — SQLModel/SQLAlchemy's
+    # relationship resolver can't parse the PEP 604 union syntax inside a
+    # forward-ref string, which throws InvalidRequestError on app startup.
+    user: "User" = Relationship()  # type: ignore[assignment]
 
     provider: str = Field(max_length=32, index=True)
     provider_transaction_id: str = Field(max_length=128)
