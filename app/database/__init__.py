@@ -20,6 +20,7 @@ from .beatmapset import (
 from .beatmapset_ratings import BeatmapRating
 from .best_scores import BestScore
 from .briefing_radar import ToriiBriefingRadarSnapshot
+from .donation import Donation
 from .chat import (
     ChannelType,
     ChatChannel,
@@ -104,6 +105,7 @@ __all__ = [
     "BeatmapsetDict",
     "BeatmapsetModel",
     "BestScore",
+    "Donation",
     "ChannelType",
     "ChatChannel",
     "ChatChannelDict",

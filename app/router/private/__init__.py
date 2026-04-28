@@ -6,6 +6,7 @@ from . import (  # noqa: F401
     avatar,
     beatmapset,
     cover,
+    donations,
     mod_alerts,
     oauth,
     password,

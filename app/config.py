@@ -820,6 +820,24 @@ CALCULATOR_CONFIG='{}'
         "反作弊设置",
     ]
 
+    # ── Donations ────────────────────────────────────────────────────────────
+    # Ko-fi sends a `verification_token` field with every webhook so we can
+    # cheaply confirm requests are coming from Ko-fi (it's plain-text but
+    # paired with HTTPS — sufficient for the threat model). When unset, the
+    # Ko-fi webhook endpoint refuses ALL requests.
+    kofi_verification_token: Annotated[
+        str,
+        Field(default="", description="Ko-fi webhook verification token (env: KOFI_VERIFICATION_TOKEN)"),
+        "Donations",
+    ]
+    # Optional Discord webhook URL — when set, every donation event posts
+    # a small embed there for live tracking. Leave blank to disable.
+    discord_donations_webhook_url: Annotated[
+        str,
+        Field(default="", description="Discord webhook URL for donation events (optional)"),
+        "Donations",
+    ]
+
     # å­˜å‚¨è®¾ç½®
     storage_service: Annotated[
         StorageServiceType,

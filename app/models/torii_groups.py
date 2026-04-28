@@ -149,7 +149,40 @@ TORII_GROUPS: dict[str, ToriiGroupDef] = {
         "identifier": "torii-supporter",
         "name": "Torii Supporter",
         "short_name": "SUP",
-        "colour": "#FFCA28",
+        "colour": "#FF7FC8",  # warm pink — matches the supporter-hearts aura
+        "has_listings": False,
+        "has_playmodes": False,
+        "is_probationary": False,
+    },
+    # ── Supporter loyalty tiers ──────────────────────────────────────────────
+    # Auto-assigned by `build_groups` based on User.total_supporter_months.
+    # Cumulative — once you cross a threshold, you keep that tier forever.
+    "supporter-bronze": {
+        "id": 1022,
+        "identifier": "torii-supporter-bronze",
+        "name": "Bronze Supporter",
+        "short_name": "BRZ",
+        "colour": "#CD7F32",  # warm copper
+        "has_listings": False,
+        "has_playmodes": False,
+        "is_probationary": False,
+    },
+    "supporter-silver": {
+        "id": 1023,
+        "identifier": "torii-supporter-silver",
+        "name": "Silver Supporter",
+        "short_name": "SLV",
+        "colour": "#C0C0C0",  # cool platinum
+        "has_listings": False,
+        "has_playmodes": False,
+        "is_probationary": False,
+    },
+    "supporter-gold": {
+        "id": 1024,
+        "identifier": "torii-supporter-gold",
+        "name": "Gold Supporter",
+        "short_name": "GLD",
+        "colour": "#FFD700",  # rich gold
         "has_listings": False,
         "has_playmodes": False,
         "is_probationary": False,
@@ -176,13 +209,43 @@ FLAG_GROUPS: dict[str, str] = {
 }
 
 
+# Supporter loyalty thresholds.
+#
+# Cumulative months across ALL donations a user has made → which tier
+# group they earn. Crossing a threshold is permanent (we never demote);
+# the tier reflects "how long have you supported in total."
+#
+# This is intentionally TIME-based, not money-based: a 12-month $5 donor
+# and a 12-month $50 donor both earn silver. Removes the optics of
+# "richer donors get fancier perks" and keeps the framing as "we thank
+# you for supporting over time," not "we sell tiered cosmetics."
+SUPPORTER_TIER_THRESHOLDS: list[tuple[int, str]] = [
+    (36, "supporter-gold"),    # 3+ years
+    (12, "supporter-silver"),  # 1-3 years
+    (6,  "supporter-bronze"),  # 6-11 months
+    (1,  "supporter"),         # 1-5 months
+]
+
+
+def supporter_tier_key_for_months(total_months: int) -> str | None:
+    """Pick the highest-priority supporter tier for a cumulative month count.
+    Returns None when the user has never donated (0 months).
+    """
+    for threshold, key in SUPPORTER_TIER_THRESHOLDS:
+        if total_months >= threshold:
+            return key
+    return None
+
+
 def build_groups(user: object) -> list[dict]:
     """
     Build the `groups` API array for a user.
 
     Sources (in priority order):
-    1. Flag-based roles  (is_admin → admin, is_gmt → mod, …)
-    2. Explicit titles   (User.torii_titles JSON list of TORII_GROUPS keys)
+    1. Flag-based roles    (is_admin → admin, is_gmt → mod, …)
+    2. Explicit titles     (User.torii_titles JSON list of TORII_GROUPS keys)
+    3. Supporter loyalty   (derived from User.total_supporter_months —
+                            see SUPPORTER_TIER_THRESHOLDS)
     """
     seen: set[str] = set()
     result: list[dict] = []
@@ -215,5 +278,12 @@ def build_groups(user: object) -> list[dict]:
     custom: list[str] = getattr(user, "torii_titles", None) or []
     for key in custom:
         _add(key)
+
+    # 3. Derived supporter tier — only the highest tier the user
+    # qualifies for is added (we deliberately don't stack bronze + silver).
+    months = getattr(user, "total_supporter_months", 0) or 0
+    tier = supporter_tier_key_for_months(months)
+    if tier is not None:
+        _add(tier)
 
     return result

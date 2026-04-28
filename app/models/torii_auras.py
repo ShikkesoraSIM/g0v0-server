@@ -105,8 +105,33 @@ TORII_AURAS: dict[str, AuraDefinition] = {
         aura_id="supporter-hearts",
         display_name="Supporter Hearts",
         description="Slow pink hearts with a heartbeat pulse.",
-        owning_groups=("supporter",),
+        owning_groups=("supporter", "supporter-bronze", "supporter-silver", "supporter-gold"),
         default_priority=40,
+    ),
+    # Supporter loyalty tiers — same heart motif, escalating colour palette
+    # (copper / silver / gold). Owning_groups widens for higher tiers so a
+    # gold supporter can pick any of the lower-tier hearts if they prefer.
+    # Time-based unlocks from total_supporter_months in lazer_users.
+    "supporter-hearts-bronze": AuraDefinition(
+        aura_id="supporter-hearts-bronze",
+        display_name="Bronze Supporter Hearts",
+        description="Warm copper hearts — unlocks at 6 cumulative months of supporting.",
+        owning_groups=("supporter-bronze", "supporter-silver", "supporter-gold"),
+        default_priority=39,
+    ),
+    "supporter-hearts-silver": AuraDefinition(
+        aura_id="supporter-hearts-silver",
+        display_name="Silver Supporter Hearts",
+        description="Cool platinum hearts — unlocks at 12 cumulative months of supporting.",
+        owning_groups=("supporter-silver", "supporter-gold"),
+        default_priority=38,
+    ),
+    "supporter-hearts-gold": AuraDefinition(
+        aura_id="supporter-hearts-gold",
+        display_name="Gold Supporter Hearts",
+        description="Rich gold hearts — unlocks at 36 cumulative months of supporting.",
+        owning_groups=("supporter-gold",),
+        default_priority=37,
     ),
     "goof-leaves": AuraDefinition(
         aura_id="goof-leaves",

@@ -899,6 +899,16 @@ class User(AsyncAttrs, UserModel, table=True):
     # aura is done by torii_auras.resolve_effective_aura_id so consumers
     # don't have to repeat the sentinel logic.
     equipped_aura: str | None = Field(default=None, max_length=64, nullable=True)
+    # Cumulative months of Torii-supporter time this user has bought via
+    # any donation provider. Drives the supporter loyalty tier resolution
+    # in torii_groups.SUPPORTER_TIER_THRESHOLDS — 1/6/12/36 months → SUP /
+    # bronze / silver / gold respectively. Time-based, never decremented.
+    total_supporter_months: int = Field(default=0, nullable=False)
+    # Optional override: if the user's Ko-fi display name differs from
+    # their Torii username, they can set this so inbound donations match
+    # without needing @username in the message field. Case-insensitive
+    # comparison on the matcher side.
+    kofi_display_name: str | None = Field(default=None, max_length=128, nullable=True)
     pw_bcrypt: str = Field(max_length=60)
     silence_end_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     donor_end_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
