@@ -21,7 +21,7 @@ state mutation logic lives here and can be unit-tested without HTTP.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from app.models.torii_groups import supporter_tier_key_for_months
@@ -223,7 +223,14 @@ async def apply_supporter_grant(
     user.has_supported = True
     user.total_supporter_months = (user.total_supporter_months or 0) + months_granted
 
-    base = max(user.donor_end_at or utcnow(), utcnow())
+    # MySQL DateTime columns may round-trip as tz-naive in some driver configs
+    # even when the column is declared TIMESTAMP(timezone=True). Normalise so
+    # we never crash on "can't compare offset-naive and offset-aware datetimes".
+    now = utcnow()
+    existing = user.donor_end_at
+    if existing is not None and existing.tzinfo is None:
+        existing = existing.replace(tzinfo=timezone.utc)
+    base = max(existing, now) if existing is not None else now
     user.donor_end_at = base + timedelta(days=30 * months_granted)
 
     # Map cumulative months to support_level so any client reading the
