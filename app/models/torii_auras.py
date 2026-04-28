@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.torii_groups import FLAG_GROUPS
+from app.models.torii_groups import FLAG_GROUPS, is_currently_supporting
 
 
 # Sentinel values stored in `lazer_users.equipped_aura`.
@@ -134,12 +134,24 @@ def user_group_keys(user: object) -> set[str]:
     """Resolve the set of short group keys a user holds.
 
     Mirrors the logic in `torii_groups.build_groups` but returns the bare
-    keys (no API dict) so we can do entitlement checks cheaply.
+    keys (no API dict) so we can do entitlement checks cheaply. MUST stay
+    aligned with build_groups so the catalog endpoint and the public
+    /me/groups response agree on what a user owns.
     """
     keys: set[str] = {key for flag, key in FLAG_GROUPS.items() if getattr(user, flag, False)}
     custom: list[str] | None = getattr(user, "torii_titles", None)
     if custom:
         keys.update(custom)
+    # "supporter" is granted live based on donor_end_at, not stored as a
+    # flag/title — pull it in here so an active supporter's catalog
+    # actually surfaces the supporter aura.
+    if is_currently_supporting(user):
+        keys.add("supporter")
+    # "donator" is permanent once has_supported flips. Doesn't grant any
+    # aura (no aura's owning_groups include it) but kept here for
+    # symmetry with build_groups in case future auras want to.
+    if getattr(user, "has_supported", False):
+        keys.add("donator")
     return keys
 
 
