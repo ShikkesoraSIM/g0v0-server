@@ -144,45 +144,36 @@ TORII_GROUPS: dict[str, ToriiGroupDef] = {
         "has_playmodes": False,
         "is_probationary": False,
     },
+    # ── Supporter / Donator ──────────────────────────────────────────────────
+    # Two distinct groups, intentionally non-hierarchical:
+    #
+    #   "supporter" — granted ONLY while a user is currently supporting
+    #     (donor_end_at > now). Carries the active title + aura. Goes away
+    #     when their paid window lapses; comes back instantly on re-donate.
+    #
+    #   "donator"   — granted FOREVER once a user has ever made a donation
+    #     (has_supported = true). Tiny permanent badge, no title / no aura.
+    #     Recognises the historical fact ("you helped at some point") without
+    #     any "former" past-tense connotation.
+    #
+    # Active donors get BOTH groups. Past donors keep just "donator".
+    # Never-donated users have neither.
     "supporter": {
         "id": 1021,
         "identifier": "torii-supporter",
         "name": "Torii Supporter",
         "short_name": "SUP",
-        "colour": "#FF7FC8",  # warm pink — matches the supporter-hearts aura
+        "colour": "#FF7FC8",  # warm pink — the default supporter aura colour
         "has_listings": False,
         "has_playmodes": False,
         "is_probationary": False,
     },
-    # ── Supporter loyalty tiers ──────────────────────────────────────────────
-    # Auto-assigned by `build_groups` based on User.total_supporter_months.
-    # Cumulative — once you cross a threshold, you keep that tier forever.
-    "supporter-bronze": {
+    "donator": {
         "id": 1022,
-        "identifier": "torii-supporter-bronze",
-        "name": "Bronze Supporter",
-        "short_name": "BRZ",
-        "colour": "#CD7F32",  # warm copper
-        "has_listings": False,
-        "has_playmodes": False,
-        "is_probationary": False,
-    },
-    "supporter-silver": {
-        "id": 1023,
-        "identifier": "torii-supporter-silver",
-        "name": "Silver Supporter",
-        "short_name": "SLV",
-        "colour": "#C0C0C0",  # cool platinum
-        "has_listings": False,
-        "has_playmodes": False,
-        "is_probationary": False,
-    },
-    "supporter-gold": {
-        "id": 1024,
-        "identifier": "torii-supporter-gold",
-        "name": "Gold Supporter",
-        "short_name": "GLD",
-        "colour": "#FFD700",  # rich gold
+        "identifier": "torii-donator",
+        "name": "Donator",
+        "short_name": "DON",
+        "colour": "#A78BFA",  # soft lilac — distinct from supporter pink
         "has_listings": False,
         "has_playmodes": False,
         "is_probationary": False,
@@ -209,43 +200,45 @@ FLAG_GROUPS: dict[str, str] = {
 }
 
 
-# Supporter loyalty thresholds.
-#
-# Cumulative months across ALL donations a user has made → which tier
-# group they earn. Crossing a threshold is permanent (we never demote);
-# the tier reflects "how long have you supported in total."
-#
-# This is intentionally TIME-based, not money-based: a 12-month $5 donor
-# and a 12-month $50 donor both earn silver. Removes the optics of
-# "richer donors get fancier perks" and keeps the framing as "we thank
-# you for supporting over time," not "we sell tiered cosmetics."
-SUPPORTER_TIER_THRESHOLDS: list[tuple[int, str]] = [
-    (36, "supporter-gold"),    # 3+ years
-    (12, "supporter-silver"),  # 1-3 years
-    (6,  "supporter-bronze"),  # 6-11 months
-    (1,  "supporter"),         # 1-5 months
-]
+def is_currently_supporting(user: object) -> bool:
+    """Live supporter status — true iff the user has an active donation
+    window (donor_end_at strictly in the future).
 
-
-def supporter_tier_key_for_months(total_months: int) -> str | None:
-    """Pick the highest-priority supporter tier for a cumulative month count.
-    Returns None when the user has never donated (0 months).
+    The stored `lazer_users.is_supporter` flag may be stale (we never
+    flip it back to false at lapse time on the DB; that would need a
+    cron). This helper is the single source of truth: callers in
+    `build_groups`, the `is_supporter` API serializer, and the aura
+    entitlement checks all go through here, so a lapsed donor sees the
+    correct (false) state immediately on their next request without us
+    needing to background-process anything.
     """
-    for threshold, key in SUPPORTER_TIER_THRESHOLDS:
-        if total_months >= threshold:
-            return key
-    return None
+    from app.utils import utcnow
+    end_at = getattr(user, "donor_end_at", None)
+    if end_at is None:
+        return False
+    # MySQL DateTime columns sometimes round-trip as tz-naive; normalise
+    # before comparison so we never throw "can't compare offset-naive...".
+    if end_at.tzinfo is None:
+        from datetime import timezone
+        end_at = end_at.replace(tzinfo=timezone.utc)
+    return end_at > utcnow()
 
 
 def build_groups(user: object) -> list[dict]:
     """
     Build the `groups` API array for a user.
 
-    Sources (in priority order):
-    1. Flag-based roles    (is_admin → admin, is_gmt → mod, …)
-    2. Explicit titles     (User.torii_titles JSON list of TORII_GROUPS keys)
-    3. Supporter loyalty   (derived from User.total_supporter_months —
-                            see SUPPORTER_TIER_THRESHOLDS)
+    Sources:
+    1. Flag-based roles  (is_admin → admin, is_gmt → mod, …)
+    2. Explicit titles   (User.torii_titles JSON list of TORII_GROUPS keys)
+    3. Supporter         (granted while `is_currently_supporting` — drops
+                          off automatically when the donation window lapses)
+    4. Donator           (granted permanently to anyone with `has_supported`,
+                          regardless of whether they're currently active)
+
+    A currently-active donor gets BOTH "supporter" AND "donator". A past
+    donor (lapsed or never re-upped) keeps just "donator". Never-donated
+    users get neither.
     """
     seen: set[str] = set()
     result: list[dict] = []
@@ -279,11 +272,15 @@ def build_groups(user: object) -> list[dict]:
     for key in custom:
         _add(key)
 
-    # 3. Derived supporter tier — only the highest tier the user
-    # qualifies for is added (we deliberately don't stack bronze + silver).
-    months = getattr(user, "total_supporter_months", 0) or 0
-    tier = supporter_tier_key_for_months(months)
-    if tier is not None:
-        _add(tier)
+    # 3. Active supporter — granted only while donor_end_at is still in
+    # the future. Carries the visible "Torii Supporter" title + the aura.
+    if is_currently_supporting(user):
+        _add("supporter")
+
+    # 4. Donator badge — granted permanently to anyone who has ever
+    # donated. Coexists with "supporter" for active donors; stays alone
+    # for past donors. Doesn't carry an aura, just a small recognition.
+    if getattr(user, "has_supported", False):
+        _add("donator")
 
     return result

@@ -101,37 +101,17 @@ TORII_AURAS: dict[str, AuraDefinition] = {
         owning_groups=("qat",),
         default_priority=30,
     ),
-    "supporter-hearts": AuraDefinition(
-        aura_id="supporter-hearts",
-        display_name="Supporter Hearts",
-        description="Slow pink hearts with a heartbeat pulse.",
-        owning_groups=("supporter", "supporter-bronze", "supporter-silver", "supporter-gold"),
+    # Supporter aura — single, no tiers, no colour variants (yet).
+    # Granted only while a user is currently in the active supporter
+    # window (server-side, the "supporter" group in build_groups appears
+    # iff is_currently_supporting; lapsed donors lose the aura but keep
+    # their permanent "donator" badge).
+    "supporter-aura": AuraDefinition(
+        aura_id="supporter-aura",
+        display_name="Supporter Aura",
+        description="Pink hearts, granted while you're an active Torii Supporter.",
+        owning_groups=("supporter",),
         default_priority=40,
-    ),
-    # Supporter loyalty tiers — same heart motif, escalating colour palette
-    # (copper / silver / gold). Owning_groups widens for higher tiers so a
-    # gold supporter can pick any of the lower-tier hearts if they prefer.
-    # Time-based unlocks from total_supporter_months in lazer_users.
-    "supporter-hearts-bronze": AuraDefinition(
-        aura_id="supporter-hearts-bronze",
-        display_name="Bronze Supporter Hearts",
-        description="Warm copper hearts — unlocks at 6 cumulative months of supporting.",
-        owning_groups=("supporter-bronze", "supporter-silver", "supporter-gold"),
-        default_priority=39,
-    ),
-    "supporter-hearts-silver": AuraDefinition(
-        aura_id="supporter-hearts-silver",
-        display_name="Silver Supporter Hearts",
-        description="Cool platinum hearts — unlocks at 12 cumulative months of supporting.",
-        owning_groups=("supporter-silver", "supporter-gold"),
-        default_priority=38,
-    ),
-    "supporter-hearts-gold": AuraDefinition(
-        aura_id="supporter-hearts-gold",
-        display_name="Gold Supporter Hearts",
-        description="Rich gold hearts — unlocks at 36 cumulative months of supporting.",
-        owning_groups=("supporter-gold",),
-        default_priority=37,
     ),
     "goof-leaves": AuraDefinition(
         aura_id="goof-leaves",

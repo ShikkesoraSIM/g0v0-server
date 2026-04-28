@@ -7,7 +7,7 @@ from app.models.beatmap import BeatmapRankStatus
 from app.models.notification import NotificationName
 from app.models.score import GameMode
 from app.models.torii_auras import resolve_effective_aura_id
-from app.models.torii_groups import build_groups
+from app.models.torii_groups import build_groups, is_currently_supporting
 from app.models.user import Country, Page
 from app.path import STATIC_DIR
 from app.utils import utcnow
@@ -399,7 +399,24 @@ class UserModel(DatabaseModel[UserDict]):
         # raw stored sentinel ("default" / "none") is intentionally hidden
         # here so other clients don't have to know about the sentinels —
         # only the /me settings endpoint exposes the raw stored value.
-        return resolve_effective_aura_id(obj, getattr(obj, "equipped_aura", None))
+        # Also: aura only renders while the user is currently supporting,
+        # so lapsed donors stop showing their aura even if their stored
+        # equipped_aura value still says "supporter-aura".
+        resolved = resolve_effective_aura_id(obj, getattr(obj, "equipped_aura", None))
+        if resolved == "supporter-aura" and not is_currently_supporting(obj):
+            return None
+        return resolved
+
+    @ondemand
+    @staticmethod
+    async def is_supporter(_session: AsyncSession, obj: "User") -> bool:
+        # Live "is currently supporting" — overrides the stored DB flag
+        # so a lapsed donor (donor_end_at < now) reads as False on every
+        # API surface immediately, without needing a cron to flip the
+        # column. Stored field stays True until the next donation flow
+        # touches the user; that's fine — we always go through this
+        # resolver for public reads.
+        return is_currently_supporting(obj)
 
     @ondemand
     @staticmethod
@@ -900,9 +917,11 @@ class User(AsyncAttrs, UserModel, table=True):
     # don't have to repeat the sentinel logic.
     equipped_aura: str | None = Field(default=None, max_length=64, nullable=True)
     # Cumulative months of Torii-supporter time this user has bought via
-    # any donation provider. Drives the supporter loyalty tier resolution
-    # in torii_groups.SUPPORTER_TIER_THRESHOLDS — 1/6/12/36 months → SUP /
-    # bronze / silver / gold respectively. Time-based, never decremented.
+    # any donation provider. Stored as a permanent counter — never
+    # decremented even after donor_end_at lapses. Used as a "thank-you"
+    # statistic and as the unlock key for any future colour-variant
+    # aura system (not in the schema yet, but the field is here so we
+    # don't need a migration when we add one).
     total_supporter_months: int = Field(default=0, nullable=False)
     # Optional override: if the user's Ko-fi display name differs from
     # their Torii username, they can set this so inbound donations match

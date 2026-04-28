@@ -272,13 +272,10 @@ async def kofi_webhook(request: Request):
 
             if matched_user is not None and months_granted > 0:
                 await apply_supporter_grant(session, user=matched_user, months_granted=months_granted)
-                from app.models.torii_groups import (
-                    supporter_tier_key_for_months,
-                    TORII_GROUPS,
-                )
-                tier_key = supporter_tier_key_for_months(matched_user.total_supporter_months)
-                if tier_key and tier_key in TORII_GROUPS:
-                    new_tier_label = TORII_GROUPS[tier_key]["name"]
+                # We deliberately don't compute a "tier label" anymore —
+                # the model has no tiers. The Discord embed surfaces
+                # cumulative months as a plain number; that's enough.
+                new_tier_label = None
 
             await session.commit()
 

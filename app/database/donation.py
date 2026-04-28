@@ -24,7 +24,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from app.models.torii_groups import supporter_tier_key_for_months
 from app.utils import utcnow
 
 from sqlalchemy import Column, DateTime, ForeignKey
@@ -233,14 +232,11 @@ async def apply_supporter_grant(
     base = max(existing, now) if existing is not None else now
     user.donor_end_at = base + timedelta(days=30 * months_granted)
 
-    # Map cumulative months to support_level so any client reading the
-    # native osu! field (hex-icon count) shows something sensible.
-    tier_key = supporter_tier_key_for_months(user.total_supporter_months)
-    user.support_level = {
-        "supporter-gold":   4,
-        "supporter-silver": 3,
-        "supporter-bronze": 2,
-        "supporter":        1,
-    }.get(tier_key or "", 0)
+    # support_level is the osu! native "supporter hex count" field. We
+    # use it as a simple presence indicator (1 if currently supporting,
+    # 0 otherwise) — not as a tier escalator, since we deliberately
+    # have no tier system. The hex icon shows up in the lazer client
+    # whenever this is non-zero.
+    user.support_level = 1
 
     session.add(user)
