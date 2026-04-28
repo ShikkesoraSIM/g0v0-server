@@ -6,12 +6,21 @@ from app.dependencies.database import Database, get_redis
 from app.dependencies.fetcher import get_fetcher
 from app.dependencies.user import UserAndToken, get_current_user, get_current_user_and_token
 from app.models.score import GameMode
+from app.models.torii_auras import (
+    AURA_SENTINEL_DEFAULT,
+    AURA_SENTINEL_NONE,
+    aura_to_api_dict,
+    available_auras_for_user,
+    is_aura_id_known,
+    is_aura_allowed_for_user,
+    resolve_effective_aura_id,
+)
 from app.service.pp_variant_service import apply_pp_variant_to_user_response, normalize_pp_variant
 from app.utils import api_doc
 
 from .router import router
 
-from fastapi import Path, Query, Security
+from fastapi import HTTPException, Path, Query, Security
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
@@ -43,6 +52,126 @@ async def get_user_beatmapset_favourites(
         select(FavouriteBeatmapset.beatmapset_id).where(FavouriteBeatmapset.user_id == current_user.id)
     )
     return BeatmapsetIds(beatmapset_ids=list(beatmapset_ids.all()))
+
+
+# ---------------------------------------------------------------------------
+# Aura cosmetics — pick which particle effect renders behind the user's name
+# everywhere it appears (chat, profile, leaderboards, ...).
+#
+# `aura-catalog`  : list the auras the current user is entitled to + their
+#                   currently-stored pick (the raw value, including sentinels)
+#                   plus the resolved aura id everyone else sees.
+# `equipped-aura` : update the stored pick. Server validates ownership
+#                   before persisting; the client never has to be the source
+#                   of truth on which auras a user can equip.
+#
+# IMPORTANT: these MUST be declared before `/me/{ruleset}` below — FastAPI
+# matches in registration order and the wildcard would otherwise swallow
+# `/me/aura-catalog` and try to parse "aura-catalog" as a GameMode.
+# ---------------------------------------------------------------------------
+
+
+class AuraCatalogEntry(BaseModel):
+    id: str
+    display_name: str
+    description: str
+    owning_groups: list[str]
+
+
+class AuraCatalogResponse(BaseModel):
+    # Stable sentinel constants surfaced so clients don't have to hardcode
+    # the strings — they can read these and pass them straight back to the
+    # PATCH endpoint when the user picks "Default" or "None".
+    sentinel_default: str = AURA_SENTINEL_DEFAULT
+    sentinel_none: str = AURA_SENTINEL_NONE
+
+    # All auras this user has the right to equip, ordered for display.
+    available: list[AuraCatalogEntry]
+
+    # The raw stored value (incl. sentinels). null when never picked.
+    current_setting: str | None
+
+    # Resolved aura id — what other users see on this user's name right
+    # now. Mirrors what the standard APIUser.equipped_aura field carries.
+    effective_aura_id: str | None
+
+
+class UpdateEquippedAuraBody(BaseModel):
+    # Accepts: null / "default" / "none" / any concrete aura id from the
+    # catalog. Anything else, or an id the user doesn't own, gets a 4xx.
+    aura_id: str | None = None
+
+
+@router.get(
+    "/me/aura-catalog",
+    response_model=AuraCatalogResponse,
+    name="List equipable auras for the current user",
+    description=(
+        "Returns the set of aura cosmetics the current user is entitled to equip "
+        "(based on their groups), plus their current pick and the resolved id "
+        "that other clients see. Used by the settings picker in the lazer client "
+        "and the web frontend."
+    ),
+    tags=["user", "auras"],
+)
+async def get_aura_catalog(
+    current_user: Annotated[User, Security(get_current_user, scopes=["identify"])],
+):
+    available = available_auras_for_user(current_user)
+    return AuraCatalogResponse(
+        available=[AuraCatalogEntry(**aura_to_api_dict(a)) for a in available],
+        current_setting=current_user.equipped_aura,
+        effective_aura_id=resolve_effective_aura_id(current_user, current_user.equipped_aura),
+    )
+
+
+@router.patch(
+    "/me/equipped-aura",
+    response_model=AuraCatalogResponse,
+    name="Update equipped aura",
+    description=(
+        "Set the current user's equipped aura. Body: `{aura_id: <string|null>}`. "
+        "Accepts a sentinel ('default' / 'none'), null (treated as 'default'), "
+        "or any aura id from the catalog the user is entitled to. Returns the "
+        "updated catalog so the client can update its UI in one round-trip."
+    ),
+    tags=["user", "auras"],
+)
+async def update_equipped_aura(
+    session: Database,
+    body: UpdateEquippedAuraBody,
+    current_user: Annotated[User, Security(get_current_user, scopes=["identify"])],
+):
+    new_value = body.aura_id
+
+    # Reject unknown values up front so a typo never ends up persisted.
+    if not is_aura_id_known(new_value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown aura id: {new_value!r}. Use one of the catalog ids, "
+            f"'{AURA_SENTINEL_DEFAULT}', '{AURA_SENTINEL_NONE}', or null.",
+        )
+
+    # Real aura ids must belong to a group the user holds.
+    if not is_aura_allowed_for_user(current_user, new_value):
+        raise HTTPException(
+            status_code=403,
+            detail=f"You don't have access to aura {new_value!r}.",
+        )
+
+    # Sentinels stored verbatim so a future read can distinguish "explicit
+    # opt-out" from "never picked" if behaviour ever needs to differ.
+    current_user.equipped_aura = new_value
+    session.add(current_user)
+    await session.commit()
+    await session.refresh(current_user)
+
+    available = available_auras_for_user(current_user)
+    return AuraCatalogResponse(
+        available=[AuraCatalogEntry(**aura_to_api_dict(a)) for a in available],
+        current_setting=current_user.equipped_aura,
+        effective_aura_id=resolve_effective_aura_id(current_user, current_user.equipped_aura),
+    )
 
 
 @router.get(

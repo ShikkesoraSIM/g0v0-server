@@ -6,6 +6,7 @@ from app.config import settings
 from app.models.beatmap import BeatmapRankStatus
 from app.models.notification import NotificationName
 from app.models.score import GameMode
+from app.models.torii_auras import resolve_effective_aura_id
 from app.models.torii_groups import build_groups
 from app.models.user import Country, Page
 from app.path import STATIC_DIR
@@ -124,6 +125,11 @@ class UserDict(TypedDict):
     is_qat: NotRequired[bool]
     is_bng: NotRequired[bool]
     groups: NotRequired[list[dict]]
+    # Resolved aura id (torii_auras.TORII_AURAS key) currently rendered for
+    # this user. None when the user has no eligible groups or has explicitly
+    # opted out. The raw stored value (incl. sentinels) is exposed
+    # separately as `equipped_aura_setting` on /me responses only.
+    equipped_aura: NotRequired[str | None]
     active_tournament_banners: NotRequired[list[dict]]
     graveyard_beatmapset_count: NotRequired[int]
     loved_beatmapset_count: NotRequired[int]
@@ -208,6 +214,10 @@ class UserModel(DatabaseModel[UserDict]):
         "country",
         "cover",
         "groups",
+        # Resolved aura id (sentinel-translated) so any client rendering
+        # this user's name knows which particle preset to attach. Cheap to
+        # compute (pure CPU on already-loaded fields) — no extra query.
+        "equipped_aura",
         "team",
     ]
     LIST_INCLUDES: ClassVar[list[str]] = [
@@ -259,6 +269,9 @@ class UserModel(DatabaseModel[UserDict]):
         "comments_count",
         "follower_count",
         "groups",
+        # Resolved aura also exposed on the profile-header path so the big
+        # username on /users/{id} renders with it without an extra include.
+        "equipped_aura",
         "mapping_follower_count",
         "previous_usernames",
         "support_level",
@@ -378,6 +391,15 @@ class UserModel(DatabaseModel[UserDict]):
     @staticmethod
     async def groups(_session: AsyncSession, obj: "User") -> list[dict]:
         return build_groups(obj)
+
+    @ondemand
+    @staticmethod
+    async def equipped_aura(_session: AsyncSession, obj: "User") -> str | None:
+        # Return the *resolved* aura id every consumer should render. The
+        # raw stored sentinel ("default" / "none") is intentionally hidden
+        # here so other clients don't have to know about the sentinels —
+        # only the /me settings endpoint exposes the raw stored value.
+        return resolve_effective_aura_id(obj, getattr(obj, "equipped_aura", None))
 
     @ondemand
     @staticmethod
@@ -871,6 +893,12 @@ class User(AsyncAttrs, UserModel, table=True):
     priv: int = Field(default=1)
     is_admin: bool = Field(default=False)
     torii_titles: list[str] = Field(default=[], sa_column=Column(JSON))
+    # Stored aura preset key. NULL / "default" → group-default mapping;
+    # "none" → explicit opt-out; otherwise an entry in
+    # app.models.torii_auras.TORII_AURAS. Resolution into the effective
+    # aura is done by torii_auras.resolve_effective_aura_id so consumers
+    # don't have to repeat the sentinel logic.
+    equipped_aura: str | None = Field(default=None, max_length=64, nullable=True)
     pw_bcrypt: str = Field(max_length=60)
     silence_end_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     donor_end_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
