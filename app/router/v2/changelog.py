@@ -20,6 +20,50 @@ _STREAM_DISPLAY_NAME = "Torii"
 
 _RAW_BUILDS: list[dict[str, Any]] = [
     # --------------------------------------------------------------------------
+    # April 29, 2026 — Aura visual quality overhaul (final release)
+    # --------------------------------------------------------------------------
+    {
+        "id": 20260429,
+        "version": "2026.429.1",
+        "display_version": "2026.429.1-torii",
+        "created_at": _ts(2026, 4, 29, 3, 0),
+        "users": 0,
+        "entries": [
+            ("add", "auras", "User auras now render in EVERY context the username appears: slanted song-select leaderboard, V2 leaderboard, in-game gameplay HUD, chat lines, all four user panels (Brick / Grid / List / Rank), and the profile header."),
+            ("fix", "auras", "Glow halo now hugs the actual letter shapes of the username (Photoshop-style outer glow) instead of rendering as a rectangular box behind the bounding box. Implemented via a buffered text mirror with gaussian blur."),
+            ("fix", "auras", "Particle spawn area now bound to the rendered text bounds instead of the wrapper width — fixes particles drifting visibly to the right of the username in TruncatingSpriteText contexts (slanted leaderboard, gameplay HUD)."),
+            ("fix", "auras", "Slanted song-select leaderboard alignment fixed — UserAuraContainer.Wrap now preserves the wrapped target's Shear so the wrapper renders upright together with the text + glow + emitter inside it."),
+            ("fix", "auras", "Particle sizes now scale with the username's font size — chat-density rows (~13px) get proportionally tiny particles, profile-header usernames (~32-40px) get larger ones."),
+            ("fix", "auras", "Admin glow softened from saturated cherry red to a coral-leaning pink-red so it reads as a glowy halo behind chat names instead of a wall of saturation."),
+            ("fix", "auras", "Anchor.Centre right-drift bug fixed for direct-add particles (Admin sparkles, Dev bits/brackets) — the entire Dev aura was visibly shifted right of the name."),
+            ("add", "auras", "Dev aura adds two new particle types: small 0/1 binary digits and operator glyphs (slash / asterisk / equals / plus). Cadence bumped to 170ms and MaxAlive to 12 so the variety actually shows."),
+            ("fix", "auras", "Goof leaves now spread in a wider envelope around the username instead of bunching on top of the letters — they read as a halo of leaves drifting nearby."),
+            ("add", "auras", "AuraPreset gains GlowColour property; six default presets (Admin / Dev / Mod / QAT / Supporter / Goof) all set their own halo tint matching their particle palette."),
+            ("misc", "tests", "Added TestSceneUserAuras (synthetic grid for tuning) and TestSceneAurasInRealUI (real production drawables — leaderboards, chat, panels, profile header — wired up with fake users carrying each preset's group, so reviewers can see every aura against every UI surface in one place)."),
+        ],
+    },
+    # --------------------------------------------------------------------------
+    # April 28, 2026 — Donations + Supporter aura
+    # --------------------------------------------------------------------------
+    {
+        "id": 20260428,
+        "version": "2026.428.0",
+        "display_version": "2026.428.0-torii",
+        "created_at": _ts(2026, 4, 28, 18, 0),
+        "users": 0,
+        "entries": [
+            ("add", "donations", "Donation pipeline live end-to-end via Ko-fi: donations grant the donor a Supporter title + pink hearts aura while the donor is currently supporting, plus a permanent Donator badge for everyone who has ever donated. Lapsed donors lose the active aura but keep the Donator badge."),
+            ("add", "donations", "Discord forwarding for every donation event — matched donations post a celebratory embed, unmatched donations post an amber embed prompting admin review, duplicate webhook deliveries post a grey 'no-op' embed."),
+            ("add", "donations", "Atomic webhook handler with idempotency on (provider, provider_transaction_id) so Ko-fi retries can't double-credit a donor."),
+            ("add", "auras", "Single Supporter Aura (pink hearts rising slowly) replaces the previous bronze / silver / gold tier system. No tiers, no premium-tier optics — donations cover server costs proportionally and there is no gameplay advantage."),
+            ("add", "web", "Heart 'Support Torii' button in the navbar (next to search and bell) opens a small popover with a CTA to Ko-fi. Mirrors osu!'s 'support the game' affordance with Torii's pink palette."),
+            ("add", "web", "Matching heart link in the home footer for users scrolling to the bottom."),
+            ("add", "admin", "New 'Donations' tab in the admin panel: queue of unmatched donations with an inline 'Torii username' input and a Match button per row. Calls the same apply_supporter_grant the webhook uses, so manual and automatic matches produce byte-identical state."),
+            ("add", "admin", "Donations stats card: total raised by currency, total donations, currently active supporters, lifetime donators, and pending unmatched count."),
+            ("misc", "server", "Schema migration: donations table + total_supporter_months counter on lazer_users + kofi_display_name field for auto-matching future donations from the same donor."),
+        ],
+    },
+    # --------------------------------------------------------------------------
     # April 26, 2026
     # --------------------------------------------------------------------------
     {
