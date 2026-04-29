@@ -275,6 +275,27 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
 _MODE_INT_TO_STR: dict[int, str] = {0: "osu", 1: "taiko", 2: "fruits", 3: "mania"}
 
 
+def _normalize_beatmap_payload(d: dict) -> dict:
+    """Coerce raw mirror payloads into shapes that pass Beatmap pydantic
+    validation.
+
+    Currently fixes the ``mode`` field: the official osu! API returns it as a
+    string enum value ("osu", "taiko", ...), but the osu.direct fallback (and
+    other community mirrors) hand back the integer ruleset id. The
+    ``GameMode`` enum on ``Beatmap.mode`` is string-valued so the int
+    validates as ``input_type=int`` and pydantic refuses it. We map 0..3 to
+    the canonical string and fall through to ``mode_int`` if ``mode`` is
+    missing entirely.
+    """
+    if isinstance(d.get("mode"), int) and not isinstance(d.get("mode"), bool):
+        d["mode"] = _MODE_INT_TO_STR.get(d["mode"], "osu")
+    if "mode" not in d or d["mode"] is None:
+        mode_int = d.get("mode_int")
+        if isinstance(mode_int, int) and not isinstance(mode_int, bool):
+            d["mode"] = _MODE_INT_TO_STR.get(mode_int, "osu")
+    return d
+
+
 class Beatmap(AsyncAttrs, BeatmapModel, table=True):
     __tablename__: str = "beatmaps"
 
@@ -296,15 +317,8 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             rank_status = BeatmapRankStatus(int(ranked))
         except (TypeError, ValueError):
             rank_status = BeatmapRankStatus.PENDING
-        # Normalise mode: osu! API returns string ("osu","taiko","fruits","mania")
-        # but some fallback sources (osu.direct, mirrors) return it as an integer.
-        # Pydantic v2 treats _-prefixed class attrs as ModelPrivateAttr so use module-level constant.
-        if isinstance(d.get("mode"), int):
-            d["mode"] = _MODE_INT_TO_STR.get(d["mode"], "osu")
-        if "mode" not in d or d["mode"] is None:
-            mode_int = d.get("mode_int")
-            if isinstance(mode_int, int):
-                d["mode"] = _MODE_INT_TO_STR.get(mode_int, "osu")
+        # Coerce mode int->string for osu.direct/mirror payloads. See helper.
+        d = _normalize_beatmap_payload(d)
         beatmap = cls.model_validate(
             {
                 **d,
@@ -377,6 +391,11 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
 
             # Build beatmap payload without nested beatmapset object.
             d = {k: v for k, v in resp_dict.items() if k != "beatmapset"}
+            # Coerce mode int->string for osu.direct/mirror payloads — same
+            # logic as `from_resp_no_save` so a Beatmapset.from_resp() that
+            # cascades into batch insertion doesn't trip the GameMode enum
+            # validator with `input_type=int`.
+            d = _normalize_beatmap_payload(d)
 
             existing = (await session.exec(select(Beatmap).where(Beatmap.id == bid))).first()
             if existing is None:
@@ -495,10 +514,31 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
                         bid or md5,
                         set_error,
                     )
-                    placeholder_set = await Beatmapset.from_resp_no_save(placeholder_payload)
-                    placeholder_set.is_local = False
-                    session.add(placeholder_set)
-                    await session.commit()
+                    # Re-check existence inside the placeholder branch. Previously
+                    # we always added the placeholder, but a second concurrent
+                    # request (or a retry from the spectator's 3x retry loop)
+                    # could land here just after the first one committed,
+                    # tripping `Duplicate entry 'NNNNN' for key beatmapsets.PRIMARY`.
+                    # That puts the session into PendingRollbackError and breaks
+                    # every subsequent request on the same session.
+                    existing_set = await session.get(Beatmapset, beatmapset_id)
+                    if existing_set is None:
+                        placeholder_set = await Beatmapset.from_resp_no_save(placeholder_payload)
+                        placeholder_set.is_local = False
+                        session.add(placeholder_set)
+                        try:
+                            await session.commit()
+                        except Exception as commit_exc:
+                            # Lost the race — another request inserted it first.
+                            # Roll back and pretend we always saw the existing row;
+                            # the row content is identical (same beatmapset_id +
+                            # placeholder fields) so callers don't notice.
+                            await session.rollback()
+                            logger.debug(
+                                "Placeholder set {} insert race ({}); using existing row",
+                                beatmapset_id,
+                                commit_exc,
+                            )
 
             # If the lookup was BY checksum (the client showed us its local md5)
             # and the upstream API returned a different md5 for the same beatmap,

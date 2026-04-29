@@ -579,9 +579,20 @@ class Beatmapset(AsyncAttrs, BeatmapsetModel, table=True):
 
         beatmapset_id = resp["id"]
         beatmapset = await cls.from_resp_no_save(resp)
-        if not (await session.exec(select(exists()).where(Beatmapset.id == beatmapset_id))).first():
+        # Race-safe insertion: another request may have just committed the row
+        # (multiplayer's CreateRoom retries 3x via the spectator, and the first
+        # call may still be in flight). Use a primary-key lookup + try/except
+        # rather than a stale `exists()` probe so we don't trip
+        # `Duplicate entry 'NNNNN' for key beatmapsets.PRIMARY` and poison the
+        # session with a PendingRollbackError.
+        existing_set = await session.get(Beatmapset, beatmapset_id)
+        if existing_set is None:
             session.add(beatmapset)
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                # Lost the race; the row is now there from the concurrent call.
         beatmaps = resp.get("beatmaps", [])
         await Beatmap.from_resp_batch(session, beatmaps, from_=from_)
         beatmapset = (await session.exec(select(Beatmapset).where(Beatmapset.id == beatmapset_id))).one()

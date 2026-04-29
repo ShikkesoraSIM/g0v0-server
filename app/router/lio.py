@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from app.const import BANCHOBOT_ID
+from app.database.beatmap import Beatmap
 from app.database.chat import ChannelType, ChatChannel, ChatMessage, MessageType
 from app.database.playlists import Playlist as DBPlaylist
 from app.database.room import Room
@@ -266,7 +267,13 @@ async def _create_room(db: Database, room_data: dict[str, Any]) -> tuple[Room, i
     return room, host_user_id
 
 
-async def _add_playlist_items(db: Database, room_id: int, room_data: dict[str, Any], host_user_id: int) -> None:
+async def _add_playlist_items(
+    db: Database,
+    fetcher: Fetcher,
+    room_id: int,
+    room_data: dict[str, Any],
+    host_user_id: int,
+) -> None:
     """Add playlist items to the room."""
     initial_playlist = room_data.get("initial_playlist", [])
     legacy_playlist = room_data.get("playlist", [])
@@ -286,6 +293,23 @@ async def _add_playlist_items(db: Database, room_id: int, room_data: dict[str, A
 
     # Validate playlist items
     _validate_playlist_items(items_raw)
+
+    # Torii: spectator may pass a beatmap_id that hasn't been fetched into the
+    # local `beatmaps` table yet (the user picked a map nobody on this server
+    # has played before). Without this pre-fetch the INSERT below trips the
+    # `room_playlists.beatmap_id -> beatmaps.id` FK and we get a 500 +
+    # half-created zombie room. Resolve each beatmap (which auto-bootstraps the
+    # beatmapset row too) before touching room_playlists.
+    for item_data in items_raw:
+        beatmap_id = item_data["beatmap_id"]
+        if not beatmap_id:
+            continue
+        resolved = await Beatmap.get_or_fetch(db, fetcher, bid=beatmap_id)
+        if resolved is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Beatmap {beatmap_id} could not be fetched from any mirror",
+            )
 
     # Insert playlist items
     for item_data in items_raw:
@@ -501,6 +525,7 @@ async def _transfer_ownership_or_end_room(db: Database, room_id: int, leaving_us
 async def create_multiplayer_room(
     room_data: dict[str, Any],
     db: Database,
+    fetcher: Fetcher,
 ) -> int:
     """Create a new multiplayer room with initial playlist."""
     try:
@@ -522,7 +547,7 @@ async def create_multiplayer_room(
             if host_user:
                 await server.batch_join_channel([host_user], channel)
             # Add playlist items
-            await _add_playlist_items(db, room_id, room_data, host_user_id)
+            await _add_playlist_items(db, fetcher, room_id, room_data, host_user_id)
 
             # Add host as participant
             # await _add_host_as_participant(db, room_id, host_user_id)
@@ -530,11 +555,28 @@ async def create_multiplayer_room(
             await db.commit()
             return room_id
 
-        except HTTPException:
-            # Clean up room if playlist creation fails
-            await db.delete(room)
-            await db.commit()
-            raise
+        # Torii: catch ANY failure during post-room-row setup (playlist FK
+        # violations from unknown beatmap_ids, chat-channel hiccups, etc.) so
+        # the partially-created room row gets rolled back. The previous
+        # narrower `except HTTPException` let SQLAlchemy IntegrityError leak
+        # through, leaving zombie rooms in the lounge that nobody could join.
+        except Exception as exc:
+            logger.debug(f"Room creation post-setup failed for room {room_id}: {exc!r}")
+            try:
+                await db.rollback()
+                # Re-fetch in the fresh transaction so we can delete the row.
+                stale_room = await db.get(Room, room_id)
+                if stale_room is not None:
+                    await db.delete(stale_room)
+                    await db.commit()
+            except Exception as cleanup_exc:
+                logger.debug(f"Zombie-room cleanup for {room_id} failed: {cleanup_exc!r}")
+            if isinstance(exc, HTTPException):
+                raise
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to finish creating room: {exc}",
+            )
 
     except HTTPException:
         raise
