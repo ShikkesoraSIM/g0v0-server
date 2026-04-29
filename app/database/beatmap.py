@@ -378,17 +378,38 @@ class Beatmap(AsyncAttrs, BeatmapModel, table=True):
             # Build beatmap payload without nested beatmapset object.
             d = {k: v for k, v in resp_dict.items() if k != "beatmapset"}
 
-            beatmap = Beatmap.model_validate(
-                {
-                    **d,
-                    "beatmapset_id": beatmapset_id,
-                    "id": bid,
-                    "beatmap_status": rank_status,
-                }
-            )
-            if not (await session.exec(select(exists()).where(Beatmap.id == bid))).first():
+            existing = (await session.exec(select(Beatmap).where(Beatmap.id == bid))).first()
+            if existing is None:
+                beatmap = Beatmap.model_validate(
+                    {
+                        **d,
+                        "beatmapset_id": beatmapset_id,
+                        "id": bid,
+                        "beatmap_status": rank_status,
+                    }
+                )
                 session.add(beatmap)
-            beatmaps.append(beatmap)
+                beatmaps.append(beatmap)
+            else:
+                # Heal previously-poisoned rows. A historical bug had us prefer
+                # the BeatConnect set fetcher, which always returned
+                # `checksum: None` for every difficulty in a set. Those rows are
+                # still in the DB and break the lazer client's
+                # `MatchesOnlineVersion` gate. When a fresh fetch (now via osu!
+                # API) carries a real checksum, fill it in. Likewise refresh
+                # rank status if upstream advanced — keeping the existing
+                # behaviour conservative for fields we already have.
+                changed = False
+                new_checksum = resp_dict.get("checksum")
+                if new_checksum and not existing.checksum:
+                    existing.checksum = new_checksum
+                    changed = True
+                if existing.beatmap_status != rank_status:
+                    existing.beatmap_status = rank_status
+                    changed = True
+                if changed:
+                    session.add(existing)
+                beatmaps.append(existing)
         await session.commit()
         for beatmap in beatmaps:
             await session.refresh(beatmap)

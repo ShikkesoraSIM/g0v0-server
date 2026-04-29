@@ -184,14 +184,37 @@ class BeatmapsetFetcher(BaseFetcher):
 
     async def get_beatmapset(self, beatmap_set_id: int) -> BeatmapsetDict:
         logger.opt(colors=True).debug(f"get_beatmapset: <y>{beatmap_set_id}</y>")
+
+        # See the matching comment in BeatmapFetcher.get_beatmap: BeatConnect's
+        # set payload omits per-difficulty MD5 checksums, so preferring it over
+        # osu! API leaves the lazer client unable to verify whether its locally
+        # cached file matches upstream. That breaks the
+        # `MatchesOnlineVersion` gate inside RealmPopulatingOnlineLookupSource
+        # which guards status updates, so the V2 song-select pill / leaderboard
+        # never picks up Torii's `effective_rank_status` promotion. Hit osu! API
+        # first (canonical metadata + checksums) and only fall back to
+        # BeatConnect if the upstream call genuinely fails.
+        try:
+            payload = await self.request_api(f"https://osu.ppy.sh/api/v2/beatmapsets/{beatmap_set_id}")
+            payload = self._ensure_local_flags(payload)
+            return adapter.validate_python(payload)  # pyright: ignore[reportReturnType]
+        except Exception as e:
+            logger.warning(
+                "osu! API beatmapset lookup failed for {} ({}); falling back to BeatConnect",
+                beatmap_set_id,
+                e,
+            )
+
         beatconnect_payload = await self._get_beatmapset_from_beatconnect(beatmap_set_id)
         if beatconnect_payload is not None:
+            logger.warning(
+                "Beatmapset {} resolved via BeatConnect last-resort fallback — beatmap checksums will be missing",
+                beatmap_set_id,
+            )
             return adapter.validate_python(beatconnect_payload)  # pyright: ignore[reportReturnType]
 
-        payload = await self.request_api(f"https://osu.ppy.sh/api/v2/beatmapsets/{beatmap_set_id}")
-        payload = self._ensure_local_flags(payload)
-        return adapter.validate_python(  # pyright: ignore[reportReturnType]
-            payload
+        raise RuntimeError(
+            f"All beatmapset metadata sources exhausted for set_id={beatmap_set_id}"
         )
 
     async def search_beatmapset(

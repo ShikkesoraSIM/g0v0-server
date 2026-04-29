@@ -24,6 +24,39 @@ def generate_hash(data) -> str:
     return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
 
 
+def _has_missing_beatmap_checksums(payload) -> bool:
+    """Detect cached responses produced before the BeatConnect fetcher reorder.
+
+    BeatConnect's set payload returns ``checksum: null`` for every difficulty,
+    and that value flows straight through into our previous Redis cache. The
+    lazer client then reads ``checksum`` from the response, writes ``""`` into
+    ``OnlineMD5Hash``, and trips ``MatchesOnlineVersion`` so neither the status
+    pill nor the leaderboard refresh after Torii promotes a graveyard map. We
+    detect that shape so the cache layer can self-purge without operator
+    intervention.
+    """
+    if not isinstance(payload, dict):
+        return False
+
+    beatmaps = payload.get("beatmaps")
+    if not isinstance(beatmaps, list) or not beatmaps:
+        return False
+
+    # Locally uploaded sets have no upstream checksum to preserve, so don't
+    # treat them as poisoned.
+    if payload.get("is_local"):
+        return False
+
+    for bm in beatmaps:
+        if not isinstance(bm, dict):
+            continue
+        if bm.get("is_local"):
+            continue
+        if not (bm.get("checksum") or ""):
+            return True
+    return False
+
+
 class BeatmapsetCacheService:
     """Beatmapset缓存服务"""
 
@@ -53,8 +86,23 @@ class BeatmapsetCacheService:
             cache_key = self._get_beatmapset_cache_key(beatmapset_id)
             cached_data = await self.redis.get(cache_key)
             if cached_data:
+                payload = json.loads(cached_data)
+                if _has_missing_beatmap_checksums(payload):
+                    # The cache may contain payloads from before the fetcher
+                    # reorder fix — those have `checksum: null` for every
+                    # difficulty because BeatConnect was being preferred over
+                    # osu! API. Returning that to the lazer client breaks the
+                    # `MatchesOnlineVersion` gate downstream and causes stuck
+                    # "Leaderboards not available" / stale status. Drop the
+                    # entry so the next request hits the database (which now
+                    # heals itself via Beatmapset.get_or_fetch).
+                    logger.info(
+                        f"Discarding cached beatmapset {beatmapset_id}: missing per-difficulty checksums"
+                    )
+                    await self.redis.delete(cache_key)
+                    return None
                 logger.debug(f"Beatmapset cache hit for {beatmapset_id}")
-                return json.loads(cached_data)
+                return payload
             return None
         except (ValueError, TypeError, AttributeError) as e:
             logger.error(f"Error getting beatmapset from cache: {e}")
@@ -82,8 +130,17 @@ class BeatmapsetCacheService:
             cache_key = self._get_beatmap_lookup_cache_key(beatmap_id)
             cached_data = await self.redis.get(cache_key)
             if cached_data:
-                logger.debug(f"Beatmap lookup cache hit for {beatmap_id}")
                 data = json.loads(cached_data)
+                if _has_missing_beatmap_checksums(data):
+                    # See `get_beatmapset_from_cache`: drop legacy entries that
+                    # have null per-difficulty checksums so the next request
+                    # heals itself.
+                    logger.info(
+                        f"Discarding cached beatmap-lookup {beatmap_id}: missing per-difficulty checksums"
+                    )
+                    await self.redis.delete(cache_key)
+                    return None
+                logger.debug(f"Beatmap lookup cache hit for {beatmap_id}")
                 return data
             return None
         except (ValueError, TypeError, AttributeError) as e:

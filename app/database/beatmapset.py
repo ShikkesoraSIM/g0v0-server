@@ -595,6 +595,35 @@ class Beatmapset(AsyncAttrs, BeatmapsetModel, table=True):
         # 1. First check if it exists in local DB (including user-uploaded ones)
         beatmapset = await session.get(Beatmapset, sid)
         if beatmapset:
+            # Heal sets that were originally fetched via the broken BeatConnect
+            # path — they're missing per-difficulty checksums, which breaks the
+            # lazer client's `MatchesOnlineVersion` gate downstream. Locally
+            # uploaded sets are exempt: they don't live on osu!web at all.
+            if not beatmapset.is_local:
+                cached_beatmaps = await beatmapset.awaitable_attrs.beatmaps
+                if any(
+                    b is not None and not b.is_local and not (b.checksum or "")
+                    for b in cached_beatmaps
+                ):
+                    try:
+                        logger.info(
+                            "Beatmapset {} has beatmap rows missing checksums; refetching from upstream",
+                            sid,
+                        )
+                        resp = await fetcher.get_beatmapset(sid)
+                        # Re-running `from_resp` (which now updates existing
+                        # rows with missing checksums via from_resp_batch)
+                        # heals the cached entries in place. We don't re-issue
+                        # the background sync update — this is just a one-off
+                        # fix-up for the on-disk row.
+                        await cls.from_resp(session, resp)
+                        await session.refresh(beatmapset)
+                    except Exception as heal_error:
+                        logger.warning(
+                            "Failed to heal beatmapset {} checksums: {}",
+                            sid,
+                            heal_error,
+                        )
             return beatmapset
 
         # 2. If not in DB, try fetching from external API
