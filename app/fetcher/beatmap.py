@@ -236,23 +236,30 @@ class BeatmapFetcher(BaseFetcher):
             raise ValueError("Either beatmap_id or beatmap_checksum must be provided.")
         logger.opt(colors=True).debug(f"get_beatmap: <y>{params}</y>")
 
-        # Order matters here. BeatConnect's `/api/beatmap/{set}/` payload does NOT
-        # carry per-difficulty MD5 checksums (it always returns `checksum: null`),
-        # and using it as the primary metadata source poisons our DB with rows
-        # that have no checksum. That breaks the lazer client's
-        # `MatchesOnlineVersion` gate (MD5Hash != OnlineMD5Hash → "" mismatch),
-        # which in turn keeps `RealmPopulatingOnlineLookupSource.updateRealmBeatmapSet`
-        # from propagating server-side status promotions (graveyard → approved
-        # via `effective_rank_status`). Vanilla lazer pointing at Torii would
-        # show stale status and stuck "Leaderboards not available" even though
-        # the server is doing the right thing — purely because the metadata
-        # fetcher discarded the checksum upstream.
+        # BeatConnect stays the primary metadata source: it's the paid mirror
+        # we use everywhere else, and keeping it on top avoids hammering osu!'s
+        # newly-tightened API rate limits during normal browsing.
         #
-        # Use osu! API as primary so we always get a real checksum. Fall back
-        # to osu.direct (which DOES return file_md5) if the primary call fails,
-        # and only use BeatConnect as a last resort — its metadata response
-        # remains useful for cover art / display fields when both upstreams are
-        # unreachable, even though it can't supply a checksum.
+        # The catch: BeatConnect's `/api/beatmap/{set}/` payload never carries
+        # per-difficulty MD5 checksums (the response only has id, version,
+        # mode, difficulty, *_count, ar/cs/od/hp, total_length, max_combo, bpm).
+        # If we left those rows with `checksum=null`, the lazer client's
+        # `RealmPopulatingOnlineLookupSource.updateRealmBeatmapSet` would
+        # write `OnlineMD5Hash = ""`, trip the `MatchesOnlineVersion` gate
+        # downstream, and prevent Torii's `effective_rank_status` promotion
+        # from ever reaching the realm row — which is exactly what manifests
+        # as the "graveyard pill flips to approved but leaderboard stays
+        # unavailable" symptom in song select.
+        #
+        # Fix: when BeatConnect is the source, ALSO query osu.direct (a free,
+        # rate-limit-friendly community mirror that does return `file_md5`)
+        # and merge its checksums in. osu! API is only consulted if both
+        # mirrors fail.
+        beatconnect_payload = await self._get_beatmap_from_beatconnect(beatmap_id, beatmap_checksum)
+        if beatconnect_payload is not None:
+            await self._enrich_beatmap_with_osu_direct_checksum(beatconnect_payload)
+            return adapter.validate_python(self._inject_torii_defaults(beatconnect_payload))  # pyright: ignore[reportReturnType]
+
         try:
             primary_payload = await self.request_api(
                 "https://osu.ppy.sh/api/v2/beatmaps/lookup",
@@ -266,20 +273,31 @@ class BeatmapFetcher(BaseFetcher):
                 beatmap_checksum,
                 e,
             )
+            fallback = await self._get_beatmap_from_osu_direct(beatmap_id, beatmap_checksum)
+            if fallback is not None:
+                return fallback
+            raise
 
-        fallback = await self._get_beatmap_from_osu_direct(beatmap_id, beatmap_checksum)
-        if fallback is not None:
-            return fallback
+    async def _enrich_beatmap_with_osu_direct_checksum(self, beatmap_payload: dict) -> None:
+        """Fill in `checksum` on a single BeatConnect-sourced beatmap dict.
 
-        beatconnect_payload = await self._get_beatmap_from_beatconnect(beatmap_id, beatmap_checksum)
-        if beatconnect_payload is not None:
-            logger.warning(
-                "Beatmap {} resolved via BeatConnect last-resort fallback — checksum will be missing",
-                beatmap_id or beatmap_checksum,
-            )
-            return adapter.validate_python(self._inject_torii_defaults(beatconnect_payload))  # pyright: ignore[reportReturnType]
-
-        # No source returned data — re-raise the primary failure so callers see a real error.
-        raise RuntimeError(
-            f"All beatmap metadata sources exhausted for id={beatmap_id} md5={beatmap_checksum}"
-        )
+        Mutates ``beatmap_payload`` in place. Best-effort: silently leaves
+        the field as-is if osu.direct is unreachable / doesn't recognise
+        the id. The healing pathways in `Beatmap.from_resp` /
+        `BeatmapsetCacheService` will pick up the slack later if needed.
+        """
+        if beatmap_payload.get("checksum"):
+            return
+        bid = beatmap_payload.get("id")
+        if bid is None:
+            return
+        try:
+            direct_payload = await self._get_beatmap_from_osu_direct(int(bid), None)
+        except Exception as e:
+            logger.debug("osu.direct checksum supplement failed for {}: {}", bid, e)
+            return
+        if direct_payload is None:
+            return
+        direct_md5 = direct_payload.get("checksum")
+        if direct_md5:
+            beatmap_payload["checksum"] = direct_md5

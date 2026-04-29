@@ -185,37 +185,128 @@ class BeatmapsetFetcher(BaseFetcher):
     async def get_beatmapset(self, beatmap_set_id: int) -> BeatmapsetDict:
         logger.opt(colors=True).debug(f"get_beatmapset: <y>{beatmap_set_id}</y>")
 
-        # See the matching comment in BeatmapFetcher.get_beatmap: BeatConnect's
-        # set payload omits per-difficulty MD5 checksums, so preferring it over
-        # osu! API leaves the lazer client unable to verify whether its locally
-        # cached file matches upstream. That breaks the
+        # BeatConnect remains the primary metadata source — it's our paid
+        # mirror and using it everywhere keeps us off osu!'s tightened API
+        # rate limits during routine browsing.
+        #
+        # BeatConnect doesn't return per-difficulty MD5 checksums though,
+        # which would otherwise leave us writing `checksum: null` into the
+        # DB. The lazer client downstream uses the response's checksum field
+        # to populate `OnlineMD5Hash`; with an empty string there, the
         # `MatchesOnlineVersion` gate inside RealmPopulatingOnlineLookupSource
-        # which guards status updates, so the V2 song-select pill / leaderboard
-        # never picks up Torii's `effective_rank_status` promotion. Hit osu! API
-        # first (canonical metadata + checksums) and only fall back to
-        # BeatConnect if the upstream call genuinely fails.
+        # fails (local md5 != "") and Torii's `effective_rank_status`
+        # promotion never reaches the realm row. The user-visible result is
+        # the "graveyard pill flips to approved but leaderboard remains
+        # unavailable" symptom in song select.
+        #
+        # Fix: after BeatConnect succeeds, consult osu.direct (free, no
+        # osu!-API quota cost) for the per-difficulty checksums and splice
+        # them into the BeatConnect payload before we hand it back. Falling
+        # all the way through to osu! API stays as a last resort so a
+        # double-mirror outage doesn't take detail pages down completely.
+        beatconnect_payload = await self._get_beatmapset_from_beatconnect(beatmap_set_id)
+        if beatconnect_payload is not None:
+            await self._enrich_set_with_osu_direct_checksums(beatmap_set_id, beatconnect_payload)
+            return adapter.validate_python(beatconnect_payload)  # pyright: ignore[reportReturnType]
+
         try:
             payload = await self.request_api(f"https://osu.ppy.sh/api/v2/beatmapsets/{beatmap_set_id}")
             payload = self._ensure_local_flags(payload)
             return adapter.validate_python(payload)  # pyright: ignore[reportReturnType]
         except Exception as e:
             logger.warning(
-                "osu! API beatmapset lookup failed for {} ({}); falling back to BeatConnect",
+                "Both BeatConnect and osu! API failed for beatmapset {}: {}",
                 beatmap_set_id,
                 e,
             )
+            raise
 
-        beatconnect_payload = await self._get_beatmapset_from_beatconnect(beatmap_set_id)
-        if beatconnect_payload is not None:
-            logger.warning(
-                "Beatmapset {} resolved via BeatConnect last-resort fallback — beatmap checksums will be missing",
+    async def _enrich_set_with_osu_direct_checksums(
+        self,
+        beatmap_set_id: int,
+        beatmapset_payload: dict,
+    ) -> None:
+        """Splice per-difficulty `file_md5`s from osu.direct into a BeatConnect set.
+
+        Mutates ``beatmapset_payload`` in place. Best-effort: failure is
+        logged at debug level and the payload is returned as-is so callers
+        downstream still get the BeatConnect response. Healing pathways
+        (`Beatmap.from_resp_batch`, `BeatmapsetCacheService.get_beatmapset_from_cache`)
+        will pick up the slack on the next request if needed.
+        """
+        beatmaps = beatmapset_payload.get("beatmaps") or []
+        if not beatmaps:
+            return
+        # Skip the supplemental call entirely if every difficulty already has
+        # a checksum (e.g. served from a previously-healed cache layer).
+        if all(bm.get("checksum") for bm in beatmaps if isinstance(bm, dict)):
+            return
+
+        try:
+            async with AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                resp = await client.get(
+                    "https://osu.direct/api/get_beatmaps",
+                    params={"s": beatmap_set_id, "limit": 100},
+                    headers={
+                        "User-Agent": "ToriiBeatmapsetFetcher/1.0 (+https://lazer.shikkesora.com)",
+                        "Accept": "application/json,*/*;q=0.8",
+                    },
+                )
+        except Exception as e:
+            logger.debug("osu.direct set checksum supplement failed for {}: {}", beatmap_set_id, e)
+            return
+
+        if resp.status_code >= 400:
+            logger.debug(
+                "osu.direct set checksum supplement got HTTP {} for {}",
+                resp.status_code,
                 beatmap_set_id,
             )
-            return adapter.validate_python(beatconnect_payload)  # pyright: ignore[reportReturnType]
+            return
 
-        raise RuntimeError(
-            f"All beatmapset metadata sources exhausted for set_id={beatmap_set_id}"
-        )
+        try:
+            rows = resp.json()
+        except Exception as e:
+            logger.debug("osu.direct set checksum supplement non-JSON for {}: {}", beatmap_set_id, e)
+            return
+
+        if not isinstance(rows, list):
+            return
+
+        md5_by_id: dict[int, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                row_id = int(row.get("beatmap_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            md5 = str(row.get("file_md5") or "")
+            if row_id and md5:
+                md5_by_id[row_id] = md5
+
+        if not md5_by_id:
+            return
+
+        filled = 0
+        for bm in beatmaps:
+            if not isinstance(bm, dict) or bm.get("checksum"):
+                continue
+            try:
+                bid = int(bm.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            md5 = md5_by_id.get(bid)
+            if md5:
+                bm["checksum"] = md5
+                filled += 1
+
+        if filled:
+            logger.debug(
+                "Filled {} checksums for set {} via osu.direct supplement",
+                filled,
+                beatmap_set_id,
+            )
 
     async def search_beatmapset(
         self, query: SearchQueryModel, cursor: Cursor, redis_client: redis.Redis
