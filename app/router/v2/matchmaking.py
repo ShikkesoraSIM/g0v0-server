@@ -17,8 +17,10 @@ service.
 from datetime import datetime
 from typing import Annotated, Any
 
+from app.database.beatmap import Beatmap
 from app.database.matchmaking import (
     MatchmakingPool,
+    MatchmakingPoolBeatmap,
     MatchmakingPoolType,
     MatchmakingRoomResult,
     MatchmakingUserEloHistory,
@@ -32,7 +34,7 @@ from .router import router
 
 from fastapi import HTTPException, Path, Query, Security, status
 from pydantic import BaseModel, Field
-from sqlmodel import col, desc, select
+from sqlmodel import col, desc, func, select
 
 
 # ───────────────────────────── response models ─────────────────────────────
@@ -327,3 +329,410 @@ async def patch_matchmaking_pool(
     await db.refresh(pool)
 
     return MatchmakingPoolResponse.model_validate(pool, from_attributes=True)
+
+
+# ───────────────────── admin (full pool + beatmap CRUD) ────────────────────
+
+
+def _require_admin(current_user: User) -> None:
+    """Privilege gate shared by every mutation in the admin section."""
+    if not getattr(current_user, "is_admin", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can mutate matchmaking pools.",
+        )
+
+
+class MatchmakingPoolCreate(BaseModel):
+    """Request body for POST /matchmaking/pools."""
+
+    ruleset_id: int = Field(ge=0, le=7, description="0=osu, 1=taiko, 2=catch, 3=mania, 4-7=RX/AP variants.")
+    name: str = Field(min_length=1, max_length=255)
+    type: MatchmakingPoolType = MatchmakingPoolType.QUICK_PLAY
+    active: bool = False
+    lobby_size: int = Field(default=8, ge=2, le=64)
+    rating_search_radius: int = Field(default=200, ge=10, le=9999)
+    rating_search_radius_max: int = Field(default=9999, ge=10, le=9999)
+    rating_search_radius_exp: int = Field(default=15, ge=1, le=600)
+
+
+class MatchmakingPoolUpdate(BaseModel):
+    """Request body for PUT /matchmaking/pools/{id}.
+
+    All fields are optional; only fields actually provided are written.
+    Use this for the in-place edit form on the admin UI.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    type: MatchmakingPoolType | None = None
+    active: bool | None = None
+    lobby_size: int | None = Field(default=None, ge=2, le=64)
+    rating_search_radius: int | None = Field(default=None, ge=10, le=9999)
+    rating_search_radius_max: int | None = Field(default=None, ge=10, le=9999)
+    rating_search_radius_exp: int | None = Field(default=None, ge=1, le=600)
+
+
+class MatchmakingPoolBeatmapResponse(BaseModel):
+    """Single beatmap row inside a pool, joined with the parent
+    `beatmaps` table so the admin UI can show the title without a
+    second round trip."""
+
+    id: int
+    pool_id: int
+    beatmap_id: int
+    rating: int
+    rating_sig: float
+    selection_count: int
+    # Light beatmap snippet (only what the admin UI shows in a row).
+    mode: str | None = None
+    version: str | None = None
+    artist: str | None = None
+    title: str | None = None
+    difficulty_rating: float | None = None
+    total_length: int | None = None
+
+
+class BulkBeatmapAddRequest(BaseModel):
+    """Pool seed-by-IDs request. Admins paste a textarea full of beatmap
+    ids (newline / comma / space separated) into the UI; the frontend
+    parses them client-side and POSTs the list here."""
+
+    beatmap_ids: list[int] = Field(min_length=1, max_length=500)
+    initial_rating: int = Field(default=1500, ge=0, le=5000)
+    initial_rating_sig: float = Field(default=150.0, ge=1, le=1000)
+
+
+class BulkBeatmapAddResponse(BaseModel):
+    added: list[int] = Field(description="Beatmap ids that landed in the pool.")
+    skipped_already_in_pool: list[int] = Field(default_factory=list)
+    skipped_not_found: list[int] = Field(default_factory=list)
+    skipped_wrong_mode: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Beatmap exists but its mode doesn't match the pool's ruleset "
+            "(e.g. mania map being added to an osu pool). Skipped to keep "
+            "the pool consistent — the queue's rating distribution is "
+            "per-mode."
+        ),
+    )
+
+
+@router.post(
+    "/matchmaking/pools",
+    response_model=MatchmakingPoolResponse,
+    status_code=status.HTTP_201_CREATED,
+    description="Admin-only: create a new matchmaking pool.",
+    tags=["Matchmaking"],
+)
+async def create_matchmaking_pool(
+    db: Database,
+    payload: MatchmakingPoolCreate,
+    current_user: Annotated[User, Security(get_current_user, scopes=["*"])],
+) -> MatchmakingPoolResponse:
+    _require_admin(current_user)
+
+    pool = MatchmakingPool(**payload.model_dump())
+    db.add(pool)
+    await db.commit()
+    await db.refresh(pool)
+    return MatchmakingPoolResponse.model_validate(pool, from_attributes=True)
+
+
+@router.put(
+    "/matchmaking/pools/{pool_id}",
+    response_model=MatchmakingPoolResponse,
+    description="Admin-only: edit pool config in-place. Pass any subset of fields.",
+    tags=["Matchmaking"],
+)
+async def update_matchmaking_pool(
+    db: Database,
+    pool_id: Annotated[int, Path(description="Pool id")],
+    payload: MatchmakingPoolUpdate,
+    current_user: Annotated[User, Security(get_current_user, scopes=["*"])],
+) -> MatchmakingPoolResponse:
+    _require_admin(current_user)
+
+    pool = await db.get(MatchmakingPool, pool_id)
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pool {pool_id} not found")
+
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(pool, key, value)
+    db.add(pool)
+    await db.commit()
+    await db.refresh(pool)
+    return MatchmakingPoolResponse.model_validate(pool, from_attributes=True)
+
+
+@router.delete(
+    "/matchmaking/pools/{pool_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "Admin-only: delete a pool. Cascades to its `matchmaking_pool_beatmaps` "
+        "rows. Refuses to delete a pool that has user_stats / elo_history "
+        "associated with it (tells the operator to deactivate it instead) "
+        "so the audit trail stays intact."
+    ),
+    tags=["Matchmaking"],
+)
+async def delete_matchmaking_pool(
+    db: Database,
+    pool_id: Annotated[int, Path(description="Pool id")],
+    current_user: Annotated[User, Security(get_current_user, scopes=["*"])],
+) -> None:
+    _require_admin(current_user)
+
+    pool = await db.get(MatchmakingPool, pool_id)
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pool {pool_id} not found")
+
+    # Block deletes when there's history. We don't want to drop elo
+    # rows silently — that would corrupt rolling rank graphs.
+    history_count = (
+        await db.exec(
+            select(func.count())
+            .select_from(MatchmakingUserEloHistory)
+            .where(MatchmakingUserEloHistory.pool_id == pool_id)
+        )
+    ).one()
+    stats_count = (
+        await db.exec(
+            select(func.count())
+            .select_from(MatchmakingUserStats)
+            .where(MatchmakingUserStats.pool_id == pool_id)
+        )
+    ).one()
+    if (history_count or 0) > 0 or (stats_count or 0) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Pool {pool_id} has {history_count} elo-history rows + {stats_count} "
+                "user-stats rows. Deactivate it instead (PATCH active=false)."
+            ),
+        )
+
+    # Drop the beatmap rows first (no FK from beatmaps→pool keeps this trivial).
+    pool_beatmaps = (
+        await db.exec(select(MatchmakingPoolBeatmap).where(MatchmakingPoolBeatmap.pool_id == pool_id))
+    ).all()
+    for pb in pool_beatmaps:
+        await db.delete(pb)
+    await db.delete(pool)
+    await db.commit()
+
+
+@router.get(
+    "/matchmaking/pools/{pool_id}/beatmaps",
+    response_model=list[MatchmakingPoolBeatmapResponse],
+    description="List the beatmaps currently in a pool (paginated).",
+    tags=["Matchmaking"],
+)
+async def list_matchmaking_pool_beatmaps(
+    db: Database,
+    pool_id: Annotated[int, Path(description="Pool id")],
+    cursor: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[MatchmakingPoolBeatmapResponse]:
+    pool = await db.get(MatchmakingPool, pool_id)
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pool {pool_id} not found")
+
+    rows = (
+        await db.exec(
+            select(MatchmakingPoolBeatmap)
+            .where(MatchmakingPoolBeatmap.pool_id == pool_id)
+            .order_by(MatchmakingPoolBeatmap.id)
+            .offset(cursor)
+            .limit(limit)
+        )
+    ).all()
+
+    if not rows:
+        return []
+
+    # Single round-trip to fetch every parent beatmap (and beatmapset for
+    # artist/title). Manual join to avoid the relationship's lazy-loader
+    # which would issue 60 individual SELECTs from a hot path.
+    bids = list({r.beatmap_id for r in rows})
+    beatmap_lookup: dict[int, dict[str, Any]] = {}
+    if bids:
+        bm_rows = (
+            await db.exec(
+                select(
+                    Beatmap.id,
+                    Beatmap.mode,
+                    Beatmap.version,
+                    Beatmap.difficulty_rating,
+                    Beatmap.total_length,
+                    Beatmap.beatmapset_id,
+                ).where(col(Beatmap.id).in_(bids))
+            )
+        ).all()
+        # Beatmapset for artist/title — fetched cheaply by id.
+        from app.database.beatmap import Beatmapset
+
+        set_ids = list({r[5] for r in bm_rows})
+        set_lookup: dict[int, tuple[str, str]] = {}
+        if set_ids:
+            set_rows = (
+                await db.exec(
+                    select(Beatmapset.id, Beatmapset.artist, Beatmapset.title).where(col(Beatmapset.id).in_(set_ids))
+                )
+            ).all()
+            set_lookup = {sid: (artist or "", title or "") for sid, artist, title in set_rows}
+
+        for bid, mode, version, diff, length, set_id in bm_rows:
+            artist, title = set_lookup.get(set_id, ("", ""))
+            beatmap_lookup[bid] = {
+                "mode": str(mode) if mode is not None else None,
+                "version": version,
+                "difficulty_rating": float(diff) if diff is not None else None,
+                "total_length": int(length) if length is not None else None,
+                "artist": artist,
+                "title": title,
+            }
+
+    return [
+        MatchmakingPoolBeatmapResponse(
+            id=r.id or 0,
+            pool_id=r.pool_id,
+            beatmap_id=r.beatmap_id,
+            rating=int(r.rating or 1500),
+            rating_sig=float(r.rating_sig or 150.0),
+            selection_count=r.selection_count,
+            **(beatmap_lookup.get(r.beatmap_id, {})),
+        )
+        for r in rows
+    ]
+
+
+# Map ruleset id -> the canonical lower-case `mode` value g0v0 stores.
+_RULESET_TO_MODE: dict[int, str] = {
+    0: "osu",
+    1: "taiko",
+    2: "fruits",
+    3: "mania",
+    4: "osurx",
+    5: "osuap",
+    6: "taikorx",
+    7: "fruitsrx",
+}
+
+
+@router.post(
+    "/matchmaking/pools/{pool_id}/beatmaps",
+    response_model=BulkBeatmapAddResponse,
+    description=(
+        "Admin-only: bulk-add beatmaps to a pool by id. Skips duplicates, "
+        "missing beatmaps, and beatmaps whose mode doesn't match the pool's "
+        "ruleset — the response itemises each skip reason so the admin UI "
+        "can surface a concise validation summary."
+    ),
+    tags=["Matchmaking"],
+)
+async def bulk_add_pool_beatmaps(
+    db: Database,
+    pool_id: Annotated[int, Path(description="Pool id")],
+    payload: BulkBeatmapAddRequest,
+    current_user: Annotated[User, Security(get_current_user, scopes=["*"])],
+) -> BulkBeatmapAddResponse:
+    _require_admin(current_user)
+
+    pool = await db.get(MatchmakingPool, pool_id)
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pool {pool_id} not found")
+
+    requested = list(dict.fromkeys(payload.beatmap_ids))  # de-dupe, preserve order
+
+    # Existing beatmaps in the pool — used to skip dup adds without
+    # incurring an INSERT-then-rollback cost.
+    existing_in_pool = {
+        bid
+        for bid, in (
+            await db.exec(
+                select(MatchmakingPoolBeatmap.beatmap_id).where(MatchmakingPoolBeatmap.pool_id == pool_id)
+            )
+        ).all()
+    }
+
+    # Validate each requested id against the beatmaps table in one shot.
+    valid_rows = (
+        await db.exec(
+            select(Beatmap.id, Beatmap.mode).where(col(Beatmap.id).in_(requested))
+        )
+    ).all()
+    valid_lookup: dict[int, str] = {bid: str(mode) for bid, mode in valid_rows}
+
+    pool_mode = _RULESET_TO_MODE.get(pool.ruleset_id, "osu")
+
+    added: list[int] = []
+    skipped_dup: list[int] = []
+    skipped_missing: list[int] = []
+    skipped_wrong_mode: list[int] = []
+
+    for bid in requested:
+        if bid in existing_in_pool:
+            skipped_dup.append(bid)
+            continue
+        bmap_mode = valid_lookup.get(bid)
+        if bmap_mode is None:
+            skipped_missing.append(bid)
+            continue
+        # Mode mismatch — keep the pool homogeneous.
+        if bmap_mode.lower() != pool_mode:
+            skipped_wrong_mode.append(bid)
+            continue
+
+        db.add(
+            MatchmakingPoolBeatmap(
+                pool_id=pool_id,
+                beatmap_id=bid,
+                mods=[],
+                rating=payload.initial_rating,
+                rating_sig=payload.initial_rating_sig,
+                selection_count=0,
+            )
+        )
+        added.append(bid)
+
+    if added:
+        await db.commit()
+
+    return BulkBeatmapAddResponse(
+        added=added,
+        skipped_already_in_pool=skipped_dup,
+        skipped_not_found=skipped_missing,
+        skipped_wrong_mode=skipped_wrong_mode,
+    )
+
+
+@router.delete(
+    "/matchmaking/pools/{pool_id}/beatmaps/{beatmap_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description="Admin-only: remove a beatmap from a pool.",
+    tags=["Matchmaking"],
+)
+async def delete_pool_beatmap(
+    db: Database,
+    pool_id: Annotated[int, Path(description="Pool id")],
+    beatmap_id: Annotated[int, Path(description="Beatmap id to remove from this pool")],
+    current_user: Annotated[User, Security(get_current_user, scopes=["*"])],
+) -> None:
+    _require_admin(current_user)
+
+    row = (
+        await db.exec(
+            select(MatchmakingPoolBeatmap)
+            .where(MatchmakingPoolBeatmap.pool_id == pool_id)
+            .where(MatchmakingPoolBeatmap.beatmap_id == beatmap_id)
+        )
+    ).first()
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Beatmap {beatmap_id} is not in pool {pool_id}",
+        )
+
+    await db.delete(row)
+    await db.commit()
