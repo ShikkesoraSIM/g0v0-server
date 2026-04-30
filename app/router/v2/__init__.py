@@ -3,6 +3,7 @@ from . import (  # noqa: F401
     beatmapset,
     briefing,
     changelog,
+    matchmaking,
     me,
     misc,
     ranking,
