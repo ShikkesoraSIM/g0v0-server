@@ -736,3 +736,186 @@ async def delete_pool_beatmap(
 
     await db.delete(row)
     await db.commit()
+
+
+class BulkBeatmapsetAddRequest(BaseModel):
+    """Pool seed-by-mapset-IDs.
+
+    Admin pastes mapset ids (the number after `/beatmapsets/` on the
+    osu.ppy.sh URL) and we expand each one into all its difficulties
+    that match the pool's mode AND fit a difficulty / length window.
+    Saves the operator from copying every individual diff id.
+    """
+
+    beatmapset_ids: list[int] = Field(min_length=1, max_length=200)
+    initial_rating: int = Field(default=1500, ge=0, le=5000)
+    initial_rating_sig: float = Field(default=150.0, ge=1, le=1000)
+    # Optional difficulty window — defaults to a sensible "intermediate"
+    # cut so an admin can paste a "best of" beatmapset list and not get
+    # 8★ insanes flooded into a 3★ quick-play pool.
+    min_sr: float = Field(default=2.5, ge=0.0, le=15.0)
+    max_sr: float = Field(default=6.5, ge=0.0, le=15.0)
+    min_length_seconds: int = Field(default=60, ge=1, le=3600)
+    max_length_seconds: int = Field(default=300, ge=1, le=3600)
+
+
+class BulkBeatmapsetAddResponse(BaseModel):
+    """Per-mapset breakdown of what landed in the pool.
+
+    `added` is a flat list of beatmap ids (the actual rows that got
+    written), to make it trivial for the admin UI to refresh the
+    rotation table without round-tripping the pool.
+    """
+
+    added: list[int] = Field(description="Beatmap ids that landed in the pool.")
+    skipped_already_in_pool: list[int] = Field(default_factory=list)
+    skipped_outside_window: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Beatmaps that exist in the set but fall outside the requested "
+            "SR / length window. Surface these so the operator can widen "
+            "the window if they wanted everything."
+        ),
+    )
+    skipped_wrong_mode: list[int] = Field(default_factory=list)
+    mapsets_not_found: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Mapset ids that resolved zero rows — either the set isn't on "
+            "this server's beatmaps cache yet, or every diff in it was a "
+            "different mode. The admin UI surfaces these for re-input."
+        ),
+    )
+
+
+@router.post(
+    "/matchmaking/pools/{pool_id}/beatmapsets",
+    response_model=BulkBeatmapsetAddResponse,
+    description=(
+        "Admin-only: bulk-add every difficulty from each mapset that fits "
+        "the pool's mode and the request's SR / length window. The "
+        "common operator workflow is: copy mapset ids from osu.ppy.sh "
+        "search results, paste them, leave the defaults, click add."
+    ),
+    tags=["Matchmaking"],
+)
+async def bulk_add_pool_beatmapsets(
+    db: Database,
+    pool_id: Annotated[int, Path(description="Pool id")],
+    payload: BulkBeatmapsetAddRequest,
+    current_user: Annotated[User, Security(get_current_user, scopes=["*"])],
+) -> BulkBeatmapsetAddResponse:
+    _require_admin(current_user)
+
+    pool = await db.get(MatchmakingPool, pool_id)
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pool {pool_id} not found")
+
+    # De-dupe mapset ids preserving order.
+    requested = list(dict.fromkeys(payload.beatmapset_ids))
+    pool_mode = _RULESET_TO_MODE.get(pool.ruleset_id, "osu")
+
+    # Existing beatmaps in pool — used to skip duplicates without an
+    # INSERT-rollback round-trip.
+    existing_in_pool = {
+        bid
+        for bid, in (
+            await db.exec(
+                select(MatchmakingPoolBeatmap.beatmap_id).where(MatchmakingPoolBeatmap.pool_id == pool_id)
+            )
+        ).all()
+    }
+
+    # Resolve ALL diffs of every requested mapset in one SELECT. Matching
+    # the pool's mode happens in this query so we don't have to filter
+    # downstream — `skipped_wrong_mode` only collects diffs whose mapset
+    # had at least one matching diff (else we report the whole mapset as
+    # not_found).
+    rows = (
+        await db.exec(
+            select(
+                Beatmap.id,
+                Beatmap.beatmapset_id,
+                Beatmap.mode,
+                Beatmap.difficulty_rating,
+                Beatmap.total_length,
+                Beatmap.beatmap_status,
+                Beatmap.deleted_at,
+            ).where(col(Beatmap.beatmapset_id).in_(requested))
+        )
+    ).all()
+
+    # Bucket per mapset for the response breakdown.
+    by_set: dict[int, list[tuple[int, str, float, int, str, Any]]] = {}
+    for row in rows:
+        bid, set_id, mode, sr, length, beatmap_status, deleted_at = row
+        by_set.setdefault(int(set_id), []).append(
+            (int(bid), str(mode), float(sr or 0.0), int(length or 0), str(beatmap_status), deleted_at)
+        )
+
+    added: list[int] = []
+    skipped_dup: list[int] = []
+    skipped_outside: list[int] = []
+    skipped_wrong_mode: list[int] = []
+    mapsets_not_found: list[int] = []
+
+    for set_id in requested:
+        diffs = by_set.get(set_id, [])
+        if not diffs:
+            mapsets_not_found.append(set_id)
+            continue
+
+        any_kept = False
+        for bid, mode, sr, length, beatmap_status, deleted_at in diffs:
+            # Hard filters that must pass regardless of window.
+            if deleted_at is not None:
+                continue  # deleted maps never get re-added
+            if beatmap_status not in ("RANKED", "APPROVED"):
+                # Don't pollute pools with graveyarded / qualified mid-air
+                # changes. The operator can drop the filter explicitly via
+                # the per-id endpoint if they really want one.
+                continue
+            if mode.lower() != pool_mode:
+                skipped_wrong_mode.append(bid)
+                continue
+            if not (payload.min_sr <= sr <= payload.max_sr):
+                skipped_outside.append(bid)
+                continue
+            if not (payload.min_length_seconds <= length <= payload.max_length_seconds):
+                skipped_outside.append(bid)
+                continue
+            if bid in existing_in_pool:
+                skipped_dup.append(bid)
+                any_kept = True
+                continue
+
+            db.add(
+                MatchmakingPoolBeatmap(
+                    pool_id=pool_id,
+                    beatmap_id=bid,
+                    mods=[],
+                    rating=payload.initial_rating,
+                    rating_sig=payload.initial_rating_sig,
+                    selection_count=0,
+                )
+            )
+            added.append(bid)
+            existing_in_pool.add(bid)
+            any_kept = True
+
+        if not any_kept:
+            # Every diff in this mapset was filtered out. Report the
+            # mapset itself as "not found in this pool's window" so the
+            # admin UI can prompt to widen filters or skip.
+            mapsets_not_found.append(set_id)
+
+    if added:
+        await db.commit()
+
+    return BulkBeatmapsetAddResponse(
+        added=added,
+        skipped_already_in_pool=skipped_dup,
+        skipped_outside_window=skipped_outside,
+        skipped_wrong_mode=skipped_wrong_mode,
+        mapsets_not_found=mapsets_not_found,
+    )
