@@ -53,19 +53,32 @@ _RULESETS = [
 ]
 
 # Quick-play: 8-player free-for-all, wider initial radius for fast matchmaking.
+# Difficulty / length window deliberately sane — quick play is the entry point
+# for casual queueing so we want intermediate maps that the median ranked
+# player can actually finish.
 _DEFAULT_QUICKPLAY = {
     "lobby_size": 8,
     "rating_search_radius": 200,
     "rating_search_radius_max": 9999,
     "rating_search_radius_exp": 15,
+    "min_sr": 3.0,
+    "max_sr": 5.5,
+    "min_length": 90,
+    "max_length": 240,
 }
 
-# Ranked play: 1v1, tighter initial radius + slower expand horizon.
+# Ranked play: 1v1, tighter initial radius + slower expand horizon. Slightly
+# higher SR floor / ceiling because the players who opt into ranked tend to
+# bring more skill than the median quick-play queue.
 _DEFAULT_RANKED = {
     "lobby_size": 2,
     "rating_search_radius": 100,
     "rating_search_radius_max": 9999,
     "rating_search_radius_exp": 30,
+    "min_sr": 4.0,
+    "max_sr": 6.5,
+    "min_length": 90,
+    "max_length": 240,
 }
 
 # Per-pool beatmap cap. Spectator's MATCHMAKING_POOL_SIZE default is 50;
@@ -152,11 +165,27 @@ def _ensure_pool(cur, *, ruleset_id, name, pool_type, defaults):
     return cur.lastrowid, True
 
 
-def _fill_pool_beatmaps(cur, pool_id, gamemode, cap):
-    """Top up `matchmaking_pool_beatmaps` with ranked maps in length window.
+def _fill_pool_beatmaps(cur, pool_id, gamemode, cap, *, min_sr, max_sr, min_length, max_length):
+    """Top up `matchmaking_pool_beatmaps` with curated ranked maps.
 
     Returns (added, total_after). Existing rows are left alone — only the
     diff is inserted, so re-runs don't churn `selection_count`.
+
+    Filters:
+      - mode matches the pool's ruleset (string enum)
+      - beatmap_status IN ('RANKED', 'APPROVED')   — earlier this used
+        BETWEEN 1 AND 2, which MySQL silently coerced into "ENUM positions
+        1 and 2" = ('GRAVEYARD', 'WIP'). Result: every pool was filled with
+        graveyard junk and 40+★ joke maps. Comparing against the literal
+        enum strings makes MySQL do a value-equal check and avoids that
+        whole class of bugs.
+      - total_length and difficulty_rating windows from the per-pool
+        config (set in _DEFAULT_QUICKPLAY / _DEFAULT_RANKED). This is
+        what gets the pool to "playable maps" instead of "everything
+        ranked".
+      - ORDER BY id ASC keeps the selection deterministic across runs
+        — admins can always trust that the first re-run produces the
+        same maps and won't see selection_count get nuked.
     """
     cur.execute(
         "SELECT beatmap_id FROM matchmaking_pool_beatmaps WHERE pool_id = %s",
@@ -168,17 +197,17 @@ def _fill_pool_beatmaps(cur, pool_id, gamemode, cap):
     if needed <= 0:
         return 0, len(existing_ids)
 
-    # Same filter shape the spectator's GetMatchmakingGlobalPoolBeatmapsAsync
-    # uses (mode, total_length window, ranked/approved status).
     cur.execute(
         """
         SELECT id FROM beatmaps
         WHERE mode = %s
           AND deleted_at IS NULL
-          AND beatmap_status BETWEEN 1 AND 2
-          AND total_length BETWEEN 60 AND 300
+          AND beatmap_status IN ('RANKED', 'APPROVED')
+          AND total_length BETWEEN %s AND %s
+          AND difficulty_rating BETWEEN %s AND %s
+        ORDER BY id ASC
         """,
-        (gamemode,),
+        (gamemode, min_length, max_length, min_sr, max_sr),
     )
     candidates = [row["id"] for row in cur.fetchall()]
 
@@ -201,10 +230,19 @@ def _fill_pool_beatmaps(cur, pool_id, gamemode, cap):
     return added, len(existing_ids) + added
 
 
-def main(activate_quickplay_osu: bool) -> None:
+def main(activate_quickplay_osu: bool, *, wipe_first: bool = False) -> None:
     conn = _connect()
     try:
         with conn.cursor() as cur:
+            if wipe_first:
+                # Operator opt-in. Use this when an earlier seed run polluted
+                # pools with garbage maps (e.g. the historical bug where the
+                # status filter matched GRAVEYARD/WIP). The pools themselves
+                # stay; only their beatmap rotations get cleared so the
+                # selection_count history isn't lost on un-affected pools.
+                cur.execute("DELETE FROM matchmaking_pool_beatmaps")
+                print(f"[!] wiped {cur.rowcount} pool_beatmap rows")
+
             for ruleset_id, mode, ruleset_name in _RULESETS:
                 # quick-play pool
                 qp_id, qp_new = _ensure_pool(
@@ -214,7 +252,16 @@ def main(activate_quickplay_osu: bool) -> None:
                     pool_type="quick_play",
                     defaults=_DEFAULT_QUICKPLAY,
                 )
-                qp_added, qp_total = _fill_pool_beatmaps(cur, qp_id, mode, _BEATMAP_POOL_CAP)
+                qp_added, qp_total = _fill_pool_beatmaps(
+                    cur,
+                    qp_id,
+                    mode,
+                    _BEATMAP_POOL_CAP,
+                    min_sr=_DEFAULT_QUICKPLAY["min_sr"],
+                    max_sr=_DEFAULT_QUICKPLAY["max_sr"],
+                    min_length=_DEFAULT_QUICKPLAY["min_length"],
+                    max_length=_DEFAULT_QUICKPLAY["max_length"],
+                )
                 marker_qp = "[+]" if qp_new else "[=]"
                 print(
                     f"{marker_qp} pool {qp_id} ruleset={ruleset_id} type=quick_play "
@@ -229,7 +276,16 @@ def main(activate_quickplay_osu: bool) -> None:
                     pool_type="ranked_play",
                     defaults=_DEFAULT_RANKED,
                 )
-                rp_added, rp_total = _fill_pool_beatmaps(cur, rp_id, mode, _BEATMAP_POOL_CAP)
+                rp_added, rp_total = _fill_pool_beatmaps(
+                    cur,
+                    rp_id,
+                    mode,
+                    _BEATMAP_POOL_CAP,
+                    min_sr=_DEFAULT_RANKED["min_sr"],
+                    max_sr=_DEFAULT_RANKED["max_sr"],
+                    min_length=_DEFAULT_RANKED["min_length"],
+                    max_length=_DEFAULT_RANKED["max_length"],
+                )
                 marker_rp = "[+]" if rp_new else "[=]"
                 print(
                     f"{marker_rp} pool {rp_id} ruleset={ruleset_id} type=ranked_play "
@@ -262,5 +318,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Flip the osu! quick-play pool to active=1 (smoke-testing convenience).",
     )
+    ap.add_argument(
+        "--wipe-pool-beatmaps",
+        action="store_true",
+        help=(
+            "Delete every row from matchmaking_pool_beatmaps before re-seeding. "
+            "Use this to recover from a botched earlier seed (e.g. the GRAVEYARD "
+            "leak where the legacy filter pulled in joke maps). selection_count "
+            "is reset for every map but the pools themselves stay intact."
+        ),
+    )
     args = ap.parse_args()
-    main(args.activate_quickplay_osu)
+    main(args.activate_quickplay_osu, wipe_first=args.wipe_pool_beatmaps)
