@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from app.models.model import UTCBaseModel
 from app.models.mods import APIMod
 
-from sqlalchemy import Column, DateTime, Enum as SAEnum, Float, ForeignKey, Index, SmallInteger
+from sqlalchemy import Column, DateTime, Enum as SAEnum, Float, ForeignKey, Index, SmallInteger, Text
 from sqlmodel import (
     JSON,
     BigInteger,
@@ -91,6 +91,11 @@ class MatchmakingPoolBase(SQLModel, UTCBaseModel):
         sa_column=Column(SmallInteger, nullable=False),
     )
     name: str = Field(max_length=255)
+    # Admin-editable blurb shown on the public ranking page under the pool
+    # name. Kept TEXT (no length cap) so admins can drop a paragraph,
+    # link to an event, or paste tournament rules without fighting a
+    # tight character limit.
+    description: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     active: bool = Field(default=True)
     # Discriminator the spectator uses to pick MatchmakingMatchController vs
     # RankedPlayMatchController. Defaults to quick_play so existing rows

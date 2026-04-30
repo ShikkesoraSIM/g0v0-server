@@ -34,6 +34,7 @@ from .router import router
 
 from fastapi import HTTPException, Path, Query, Security, status
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlmodel import col, desc, func, select
 
 
@@ -44,12 +45,20 @@ class MatchmakingPoolResponse(BaseModel):
     id: int
     ruleset_id: int
     name: str
+    description: str | None = None
     type: MatchmakingPoolType
     active: bool
     lobby_size: int
     rating_search_radius: int
     rating_search_radius_max: int
     rating_search_radius_exp: int
+    # Activity counters surface "is this pool actually alive?" without
+    # hammering the user/elo tables on every render. Populated lazily by
+    # `list_matchmaking_pools` and `_with_activity` to skip the work for
+    # endpoints that don't need them (e.g. PATCH responses).
+    unique_players: int | None = Field(default=None)
+    matches_today: int | None = Field(default=None)
+    matches_this_week: int | None = Field(default=None)
 
 
 class MatchmakingLeaderboardEntry(BaseModel):
@@ -116,6 +125,73 @@ async def _hydrate_users_minimal(session: Database, user_ids: set[int]) -> dict[
 # ─────────────────────────────── endpoints ─────────────────────────────────
 
 
+async def _hydrate_activity(
+    db: Database,
+    pool_ids: list[int],
+) -> dict[int, dict[str, int]]:
+    """Compute (unique_players, matches_today, matches_this_week) per pool
+    in a couple of grouped queries so the public ranking page doesn't fan
+    out into one COUNT query per pool. Returns a flat lookup dict keyed
+    by pool_id.
+
+    All zeros are returned for pools with no activity instead of None so
+    the JSON response is shape-stable across pools.
+    """
+    if not pool_ids:
+        return {}
+
+    # unique_players per pool: distinct users that have a stats row.
+    players_rows = (
+        await db.exec(
+            select(
+                MatchmakingUserStats.pool_id,
+                func.count(func.distinct(MatchmakingUserStats.user_id)),
+            )
+            .where(col(MatchmakingUserStats.pool_id).in_(pool_ids))
+            .group_by(MatchmakingUserStats.pool_id)
+        )
+    ).all()
+    unique_by_pool = {pid: int(c or 0) for pid, c in players_rows}
+
+    # matches_today: rows in the last 24h. The eloh row is two-sided
+    # (winner + loser) so divide by 2 to count distinct matches.
+    today_rows = (
+        await db.exec(
+            select(
+                MatchmakingUserEloHistory.pool_id,
+                func.count(MatchmakingUserEloHistory.id),
+            )
+            .where(col(MatchmakingUserEloHistory.pool_id).in_(pool_ids))
+            .where(MatchmakingUserEloHistory.created_at >= func.date_sub(func.now(), text("INTERVAL 1 DAY")))
+            .group_by(MatchmakingUserEloHistory.pool_id)
+        )
+    ).all()
+    today_by_pool = {pid: int((c or 0) // 2) for pid, c in today_rows}
+
+    # matches_this_week: same shape, 7-day window.
+    week_rows = (
+        await db.exec(
+            select(
+                MatchmakingUserEloHistory.pool_id,
+                func.count(MatchmakingUserEloHistory.id),
+            )
+            .where(col(MatchmakingUserEloHistory.pool_id).in_(pool_ids))
+            .where(MatchmakingUserEloHistory.created_at >= func.date_sub(func.now(), text("INTERVAL 7 DAY")))
+            .group_by(MatchmakingUserEloHistory.pool_id)
+        )
+    ).all()
+    week_by_pool = {pid: int((c or 0) // 2) for pid, c in week_rows}
+
+    return {
+        pid: {
+            "unique_players": unique_by_pool.get(pid, 0),
+            "matches_today": today_by_pool.get(pid, 0),
+            "matches_this_week": week_by_pool.get(pid, 0),
+        }
+        for pid in pool_ids
+    }
+
+
 @router.get(
     "/matchmaking/pools",
     response_model=list[MatchmakingPoolResponse],
@@ -136,6 +212,17 @@ async def list_matchmaking_pools(
         MatchmakingPoolType | None,
         Query(description="Filter by pool type (quick_play / ranked_play)."),
     ] = None,
+    with_activity: Annotated[
+        bool,
+        Query(
+            description=(
+                "Populate `unique_players`, `matches_today`, `matches_this_week` "
+                "in the response. Default true for the public ranking page; admin "
+                "clients can pass false to avoid the extra COUNT queries when "
+                "they only need the config rows."
+            ),
+        ),
+    ] = True,
 ) -> list[MatchmakingPoolResponse]:
     stmt = select(MatchmakingPool)
     if not include_inactive:
@@ -147,7 +234,21 @@ async def list_matchmaking_pools(
     stmt = stmt.order_by(MatchmakingPool.ruleset_id, MatchmakingPool.id)
 
     rows = (await db.exec(stmt)).all()
-    return [MatchmakingPoolResponse.model_validate(r, from_attributes=True) for r in rows]
+
+    activity: dict[int, dict[str, int]] = {}
+    if with_activity and rows:
+        activity = await _hydrate_activity(db, [r.id for r in rows if r.id is not None])
+
+    out: list[MatchmakingPoolResponse] = []
+    for r in rows:
+        payload = MatchmakingPoolResponse.model_validate(r, from_attributes=True)
+        if r.id in activity:
+            counts = activity[r.id]
+            payload.unique_players = counts["unique_players"]
+            payload.matches_today = counts["matches_today"]
+            payload.matches_this_week = counts["matches_this_week"]
+        out.append(payload)
+    return out
 
 
 @router.get(
@@ -348,6 +449,7 @@ class MatchmakingPoolCreate(BaseModel):
 
     ruleset_id: int = Field(ge=0, le=7, description="0=osu, 1=taiko, 2=catch, 3=mania, 4-7=RX/AP variants.")
     name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
     type: MatchmakingPoolType = MatchmakingPoolType.QUICK_PLAY
     active: bool = False
     lobby_size: int = Field(default=8, ge=2, le=64)
@@ -364,6 +466,7 @@ class MatchmakingPoolUpdate(BaseModel):
     """
 
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
     type: MatchmakingPoolType | None = None
     active: bool | None = None
     lobby_size: int | None = Field(default=None, ge=2, le=64)
