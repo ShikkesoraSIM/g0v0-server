@@ -59,7 +59,19 @@ class EmailVerificationService:
             metadata = {"type": "email_verification", "user_id": user_id, "code": code, "country": country_code}
 
             # 如果使用 MailerSend，直接发送并返回 message_id
-            if settings.email_provider == "mailersend":
+            if settings.email_provider == "resend":
+                from app.service.resend_service import get_resend_service
+
+                resend_service = get_resend_service()
+                response = await resend_service.send_email(
+                    to_email=email,
+                    subject=subject,
+                    content=plain_content,
+                    html_content=html_content,
+                    metadata=metadata,
+                )
+                return response
+            elif settings.email_provider == "mailersend":
                 from app.service.mailersend_service import get_mailersend_service
 
                 mailersend_service = get_mailersend_service()

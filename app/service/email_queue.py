@@ -35,6 +35,7 @@ class EmailQueue:
 
         # MailerSend 服务（延迟初始化）
         self._mailersend_service = None
+        self._resend_service = None
 
     async def _run_in_executor(self, func, *args):
         """在线程池中运行同步操作"""
@@ -218,6 +219,8 @@ class EmailQueue:
         """
         if self.email_provider == "mailersend":
             return await self._send_email_mailersend(email_data)
+        elif self.email_provider == "resend":
+            return await self._send_email_resend(email_data)
         else:
             return await self._send_email_smtp(email_data)
 
@@ -316,6 +319,35 @@ class EmailQueue:
 
         except Exception as e:
             logger.error(f"Failed to send email via MailerSend: {e}")
+            return False
+
+    async def _send_email_resend(self, email_data: dict[str, Any]) -> bool:
+        """Send email via Resend (mirror of _send_email_mailersend)."""
+        try:
+            if self._resend_service is None:
+                from app.service.resend_service import get_resend_service
+                self._resend_service = get_resend_service()
+            to_email = email_data.get("to_email", "")
+            subject = email_data.get("subject", "")
+            content = email_data.get("content", "")
+            html_content = email_data.get("html_content", "")
+            metadata_str = email_data.get("metadata", "{}")
+            metadata = json.loads(metadata_str) if metadata_str else {}
+            response = await self._resend_service.send_email(
+                to_email=to_email,
+                subject=subject,
+                content=content,
+                html_content=html_content if html_content else None,
+                metadata=metadata,
+            )
+            if response and response.get("id"):
+                logger.info(f"Email sent via Resend, message_id: {response['id']}")
+                return True
+            else:
+                logger.error("Resend response missing id")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to send email via Resend: {e}")
             return False
 
 

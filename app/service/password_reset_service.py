@@ -285,17 +285,22 @@ class PasswordResetService:
                 return False, "Invalid verification request."
 
             try:
+                # Cache user.id BEFORE commit. SQLAlchemy expires loaded
+                # objects on commit by default, so reading user.id afterwards
+                # triggers a lazy-reload that fails with MissingGreenlet
+                # (sync IO inside an awaited path) on async sessions.
+                user_id = user.id
                 user.pw_bcrypt = get_password_hash(new_password)
                 await session.commit()
 
-                tokens_deleted = await invalidate_user_tokens(session, user.id)
+                tokens_deleted = await invalidate_user_tokens(session, user_id)
 
                 await redis.delete(reset_code_key)
                 await redis.delete(attempts_key)
 
                 logger.info(
                     "Password reset success for user_id=%s email=%s ip=%s ua=%s invalidated_tokens=%s",
-                    user.id,
+                    user_id,
                     normalized_email,
                     ip_address,
                     user_agent[:200],

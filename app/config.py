@@ -401,7 +401,7 @@ CALCULATOR_CONFIG='{}'
         "éªŒè¯æœåŠ¡è®¾ç½®",
     ]
     email_provider: Annotated[
-        Literal["smtp", "mailersend"],
+        Literal["smtp", "mailersend", "resend"],
         Field(default="smtp", description="é‚®ä»¶å‘é€æä¾›å•†ï¼šsmtpï¼ˆSMTPï¼‰æˆ– mailersendï¼ˆMailerSendï¼‰"),
         "éªŒè¯æœåŠ¡è®¾ç½®",
     ]
@@ -444,6 +444,16 @@ CALCULATOR_CONFIG='{}'
         str,
         Field(default="", description="MailerSend å‘ä»¶äººé‚®ç®±ï¼ˆéœ€è¦åœ¨ MailerSend ä¸­éªŒè¯ï¼‰"),
         "éªŒè¯æœåŠ¡è®¾ç½®",
+    ]
+    resend_api_key: Annotated[
+        str,
+        Field(default="", description="Resend API Key (re_...). Free tier: 3K/month, no per-recipient cap."),
+        "验证服务设置",
+    ]
+    resend_from_email: Annotated[
+        str,
+        Field(default="", description="Resend sender email (must be on a domain verified in your Resend account)."),
+        "验证服务设置",
     ]
 
     # ç›‘æŽ§é…ç½®
