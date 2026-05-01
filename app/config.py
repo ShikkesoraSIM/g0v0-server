@@ -774,6 +774,16 @@ CALCULATOR_CONFIG='{}'
         Field(default=4, description="åŒä¸€ IP å‘½ä¸­å¤šè´¦å·çš„ä¸¥é‡çº§åˆ«é˜ˆå€¼"),
         "åä½œå¼Šè®¾ç½®",
     ]
+    suspicious_alerts_ignored_ips: Annotated[
+        str,
+        Field(default="", description="Comma-separated CIDR/IP list to suppress suspicious-login alerts (admin VPN exits, home ISP, etc)."),
+        "验证服务设置",
+    ]
+    suspicious_alerts_ignored_user_ids: Annotated[
+        str,
+        Field(default="", description="Comma-separated user ids to suppress suspicious-login alerts (admin alt accounts)."),
+        "验证服务设置",
+    ]
     banned_name: Annotated[
         list[str],
         Field(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import ipaddress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -28,6 +29,65 @@ if TYPE_CHECKING:
 logger = log("SuspiciousAlert")
 
 GENERIC_CLIENT_LABELS = {"", "unknown", "osu!", "osu!lazer", "lazer", "osulazer"}
+
+
+def _parse_ignored_ip_networks(raw: str | None) -> list:
+    """Parse a comma-separated CIDR list into ip_network objects.
+
+    Used by suspicious-login alerting to skip self-inflicted alerts when
+    the admin / owner is logging in from a known infrastructure IP
+    (their VPN exit, home ISP, etc) — which would otherwise trip the
+    'shared IP across N accounts' rule because the admin maintains
+    multiple alt accounts from the same connection.
+
+    Bad entries are silently skipped — bad config shouldn't crash the
+    auth path.
+    """
+    if not raw:
+        return []
+    out = []
+    for entry in str(raw).split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            out.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning(f"suspicious_alerts_ignored_ips: skipping invalid CIDR/IP {entry!r}")
+    return out
+
+
+def _parse_ignored_user_ids(raw: str | None) -> set[int]:
+    """Parse a comma-separated list of user ids."""
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for entry in str(raw).split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            out.add(int(entry))
+        except ValueError:
+            logger.warning(f"suspicious_alerts_ignored_user_ids: skipping non-int {entry!r}")
+    return out
+
+
+def _is_ip_in_networks(ip_str: str, networks: list) -> bool:
+    if not networks:
+        return False
+    try:
+        ip_obj = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    for net in networks:
+        try:
+            if ip_obj in net:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
 
 
 @dataclass(slots=True)
@@ -278,6 +338,35 @@ class SuspiciousAlertService:
             return AlertResult(created=False)
 
         ip_address = str(ip_address)
+
+        # Owner/admin self-exemption. Three independent ways to suppress an
+        # alert for a login that is known-legit:
+        #   1) the user account is on the explicit exempt list (Shikkesora's
+        #      alts: test2, cloudflare, testing123, etc).
+        #   2) the user is an admin — admins maintain multiple test accounts
+        #      and trigger the shared-IP rule constantly during ops.
+        #   3) the source IP is on the trusted-infrastructure list (the
+        #      admin's home ISP, VPN exit, etc).
+        # All three are configured via .env so a deploy can be tightened
+        # back without code change.
+        ignored_user_ids = _parse_ignored_user_ids(getattr(settings, "suspicious_alerts_ignored_user_ids", ""))
+        if user_id in ignored_user_ids:
+            return AlertResult(created=False)
+
+        ignored_networks = _parse_ignored_ip_networks(getattr(settings, "suspicious_alerts_ignored_ips", ""))
+        if _is_ip_in_networks(ip_address, ignored_networks):
+            return AlertResult(created=False)
+
+        # Admin exemption — fetch is_admin flag for this user. Cheap query;
+        # only runs when other guards didn't match.
+        try:
+            admin_row = await session.exec(select(User.is_admin).where(User.id == user_id))
+            is_admin = bool(admin_row.first())
+        except Exception:
+            is_admin = False
+        if is_admin:
+            return AlertResult(created=False)
+
         reasons: list[str] = []
         severity = "warning"
 
