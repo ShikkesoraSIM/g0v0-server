@@ -1119,6 +1119,15 @@ async def update_user(
             raise HTTPException(status_code=422, detail="username is already in use")
         raise HTTPException(status_code=422, detail="invalid user update payload")
     await session.refresh(user)
+
+    # Notify connected lazer clients that this user's public payload has
+    # changed (groups / titles flipping in or out, badge awarded, country
+    # rename, …). They re-fetch via GetUserRequest and re-render badges +
+    # auras + the rest in place — no sign-out / restart required, and no
+    # need for the admin to ping the user manually.
+    from app.service.user_update_publisher import publish_user_updated
+    await publish_user_updated(user.id)
+
     return await user_to_dict(user, session)
 
 

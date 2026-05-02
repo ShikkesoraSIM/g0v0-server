@@ -16,6 +16,7 @@ from app.models.torii_auras import (
     resolve_effective_aura_id,
 )
 from app.service.pp_variant_service import apply_pp_variant_to_user_response, normalize_pp_variant
+from app.service.user_update_publisher import publish_user_updated
 from app.utils import api_doc
 
 from .router import router
@@ -165,6 +166,14 @@ async def update_equipped_aura(
     session.add(current_user)
     await session.commit()
     await session.refresh(current_user)
+
+    # Fan out a UserUpdated notification so every connected lazer client
+    # currently rendering this user (chat lines, dashboard online list,
+    # leaderboard rows, the user's own profile, ...) refetches the public
+    # payload and re-resolves the new aura without anyone having to close
+    # / reopen anything. Best-effort: a publish failure does not roll back
+    # the DB write.
+    await publish_user_updated(current_user.id)
 
     available = available_auras_for_user(current_user)
     return AuraCatalogResponse(
