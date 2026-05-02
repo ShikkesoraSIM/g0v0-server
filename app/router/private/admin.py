@@ -993,6 +993,19 @@ async def update_user(
     # in-place reassignment below would silently mutate this snapshot too.
     titles_before: list[str] = list(user.torii_titles or [])
 
+    # Snapshot the actor's username NOW, while the session still has live
+    # attribute state. Reading it after the commit below would trigger an
+    # async lazy-load on an expired attribute and crash with
+    # "greenlet_spawn has not been called" (the request-scoped session
+    # uses expire_on_commit=True). user_to_dict at the end of this
+    # endpoint works because we await session.refresh(user) right after
+    # the commit, but actor_user belongs to a different load path and
+    # never gets refreshed.
+    actor_user_for_log = user_and_token[0] if user_and_token else None
+    actor_username_for_log: str | None = (
+        actor_user_for_log.username if actor_user_for_log is not None else None
+    )
+
     if user_data.username is not None:
         normalized_username = user_data.username.strip()
         if not normalized_username:
@@ -1139,14 +1152,14 @@ async def update_user(
     # the modal without flipping any titles produces no spam. The actor
     # is the admin who made the change — surfaced in the embed footer so
     # the channel reads as an audit log, not just a notifications stream.
-    actor_user = user_and_token[0] if user_and_token else None
-    actor_username = actor_user.username if actor_user is not None else None
+    # actor_username_for_log was captured at the top of the endpoint
+    # before the commit (see comment there for the lazy-load rationale).
     from app.service.discord_title_feed import notify_titles_changed
     await notify_titles_changed(
         target_user=user,
         before=titles_before,
         after=list(user.torii_titles or []),
-        actor_username=actor_username,
+        actor_username=actor_username_for_log,
     )
 
     return await user_to_dict(user, session)
