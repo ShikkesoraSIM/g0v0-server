@@ -122,77 +122,64 @@ class PasswordResetService:
     async def send_password_reset_email(self, email: str, code: str, username: str) -> bool:
         """Queue password reset email."""
         try:
-            html_content = f"""
+            # NOTE: This template is intentionally light-themed with inline
+            # styles on every element. Gmail Web aggressively strips <style>
+            # blocks; if the email is dark-themed and the user is in light
+            # mode, the body text (which Gmail keeps) becomes light-on-light
+            # and is invisible. Light theme works in both modes because
+            # Gmail auto-darkens light emails for dark-mode users, but does
+            # NOT auto-lighten dark emails for light-mode users.
+            html_content = f"""\
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="utf-8">
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            color: #e8e8f0;
-            background: #12121a;
-        }}
-        .container {{
-            max-width: 600px;
-            margin: 0 auto;
-            background: #1d1f2a;
-            border: 1px solid #2a2e3b;
-            border-radius: 12px;
-            overflow: hidden;
-        }}
-        .header {{
-            background: #ed8ea6;
-            color: white;
-            padding: 20px;
-            text-align: center;
-        }}
-        .content {{
-            padding: 24px;
-        }}
-        .code {{
-            background: #12121a;
-            border: 2px solid #ed8ea6;
-            border-radius: 8px;
-            padding: 16px;
-            text-align: center;
-            font-size: 28px;
-            font-weight: bold;
-            letter-spacing: 4px;
-            margin: 18px 0;
-            color: #ffffff;
-        }}
-        .notice {{
-            background: #2a2230;
-            border: 1px solid #74445d;
-            border-radius: 8px;
-            padding: 12px;
-            margin-top: 16px;
-        }}
-        .footer {{
-            font-size: 12px;
-            color: #9ea3b7;
-            margin-top: 18px;
-        }}
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light only">
+    <meta name="supported-color-schemes" content="light only">
+    <title>Torii Password Reset</title>
 </head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h2 style="margin:0;">Torii Password Reset</h2>
-        </div>
-        <div class="content">
-            <p>Hello {username},</p>
-            <p>Use the verification code below to reset your password:</p>
-            <div class="code">{code}</div>
-            <p>This code expires in <strong>10 minutes</strong> and can only be used once.</p>
-            <div class="notice">
-                If you did not request this, ignore this email and your password will remain unchanged.
-            </div>
-            <p class="footer">This message was sent automatically by Torii. Please do not reply.</p>
-        </div>
-    </div>
+<body style="margin:0;padding:0;background-color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;color:#333333;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f5f5f5;">
+        <tr>
+            <td align="center" style="padding:24px 12px;">
+                <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #ececec;">
+                    <tr>
+                        <td style="background:linear-gradient(135deg,#ED8EA6 0%,#FF6B9D 100%);background-color:#ED8EA6;color:#ffffff;padding:32px 20px;text-align:center;">
+                            <h1 style="margin:0;font-size:26px;font-weight:600;color:#ffffff;">Torii Password Reset</h1>
+                            <p style="margin:8px 0 0 0;font-size:15px;color:#ffffff;opacity:0.92;">Reset your account password</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding:36px 30px;background-color:#ffffff;color:#333333;">
+                            <p style="margin:0 0 16px 0;font-size:17px;font-weight:600;color:#222222;">Hello {username},</p>
+                            <p style="margin:0 0 24px 0;font-size:15px;line-height:1.6;color:#555555;">
+                                Use the verification code below to reset your password:
+                            </p>
+                            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#fafafa;border:2px solid #ED8EA6;border-radius:12px;margin:8px 0 24px 0;">
+                                <tr>
+                                    <td align="center" style="padding:24px 16px;">
+                                        <div style="font-family:'Courier New',Consolas,monospace;font-size:34px;font-weight:bold;letter-spacing:6px;color:#ED8EA6;">{code}</div>
+                                        <div style="margin-top:12px;font-size:13px;color:#666666;">Expires in <strong style="color:#333333;">10 minutes</strong> &middot; one-time use</div>
+                                    </td>
+                                </tr>
+                            </table>
+                            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#fff3cd;border-left:4px solid #ffc107;border-radius:6px;margin:0 0 24px 0;">
+                                <tr>
+                                    <td style="padding:14px 18px;font-size:14px;line-height:1.5;color:#856404;">
+                                        If you did not request this, ignore this email and your password will remain unchanged.
+                                    </td>
+                                </tr>
+                            </table>
+                            <p style="margin:0;font-size:12px;color:#999999;text-align:center;">
+                                This message was sent automatically by Torii. Please do not reply.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
 </body>
 </html>
 """
