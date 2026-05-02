@@ -987,6 +987,12 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Snapshot for the Discord title-grant feed: captured BEFORE any
+    # mutation so we can post a clean before→after diff once the commit
+    # succeeds. list() copies the JSON-decoded list — without the copy,
+    # in-place reassignment below would silently mutate this snapshot too.
+    titles_before: list[str] = list(user.torii_titles or [])
+
     if user_data.username is not None:
         normalized_username = user_data.username.strip()
         if not normalized_username:
@@ -1127,6 +1133,21 @@ async def update_user(
     # need for the admin to ping the user manually.
     from app.service.user_update_publisher import publish_user_updated
     await publish_user_updated(user.id)
+
+    # Discord feed: post a diff embed when the title list changed during
+    # this update. Skipped automatically when before == after, so saving
+    # the modal without flipping any titles produces no spam. The actor
+    # is the admin who made the change — surfaced in the embed footer so
+    # the channel reads as an audit log, not just a notifications stream.
+    actor_user = user_and_token[0] if user_and_token else None
+    actor_username = actor_user.username if actor_user is not None else None
+    from app.service.discord_title_feed import notify_titles_changed
+    await notify_titles_changed(
+        target_user=user,
+        before=titles_before,
+        after=list(user.torii_titles or []),
+        actor_username=actor_username,
+    )
 
     return await user_to_dict(user, session)
 

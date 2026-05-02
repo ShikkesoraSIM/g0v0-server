@@ -857,6 +857,16 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="Discord webhook URL for donation events (optional)"),
         "Donations",
     ]
+    # Discord webhook URL for the admin "title feed" channel. When an admin
+    # grants or revokes a Torii title (DEV / BUG / GOOF / MOD / etc.) the
+    # server posts a single embed naming the user, the actor, and the
+    # add/remove diff. Leave blank to disable. Same security model as the
+    # donations webhook (best-effort, never blocks the API call).
+    discord_title_feed_webhook_url: Annotated[
+        str,
+        Field(default="", description="Discord webhook URL for admin title-grant feed (optional)"),
+        "Donations",
+    ]
 
     # å­˜å‚¨è®¾ç½®
     storage_service: Annotated[
