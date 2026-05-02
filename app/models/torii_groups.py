@@ -189,6 +189,21 @@ TORII_GROUPS: dict[str, ToriiGroupDef] = {
         "has_playmodes": False,
         "is_probationary": False,
     },
+    # Granted manually to community members who reported a real bug that
+    # got fixed. Free to receive (no money / no role required) — meant to
+    # be common, so the matching aura is intentionally lowkey (mint bugs
+    # crawling along the username baseline). No display tier, no playmode
+    # gating, just a quiet thank-you badge + aura.
+    "bug-finder": {
+        "id": 1031,
+        "identifier": "torii-bug-finder",
+        "name": "Bug Finder",
+        "short_name": "BUG",
+        "colour": "#8CE0C5",  # mint — matches the bug-finder-bugs aura palette
+        "has_listings": False,
+        "has_playmodes": False,
+        "is_probationary": False,
+    },
 }
 
 # Groups derived automatically from boolean DB flags (is_admin, is_gmt, is_qat, is_bng)

@@ -120,6 +120,21 @@ TORII_AURAS: dict[str, AuraDefinition] = {
         owning_groups=("goof",),
         default_priority=50,
     ),
+    # Recognition tier for community bug-finders — free to receive and
+    # therefore expected to be common. Highest default_priority among the
+    # group fallbacks so it never wins the tiebreak when the same user
+    # also owns a flashier group (admin / dev / mod / qat / supporter /
+    # goof). The visual itself (client side) is intentionally subdued —
+    # mint bug glyphs crawling slowly along the baseline of the username,
+    # never more than a few alive at once. Aligns with
+    # BugFinderAuraPreset.cs in torii-osu.
+    "bug-finder-bugs": AuraDefinition(
+        aura_id="bug-finder-bugs",
+        display_name="Bug Finder",
+        description="Tiny mint bugs slowly crawling along your name — thanks for the bug report!",
+        owning_groups=("bug-finder",),
+        default_priority=80,
+    ),
 }
 
 
