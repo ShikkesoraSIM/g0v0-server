@@ -372,6 +372,25 @@ async def register_user(
                 await db.commit()
         except Exception as suspicious_err:
             logger.warning(f"Failed to record suspicious registration alert for user {new_user.id}: {suspicious_err}")
+
+        # Discord feed: post a celebratory embed for the new account.
+        # Wrapped in its own try/except so any failure (Discord down,
+        # network blip, embed builder bug) cannot escape this block and
+        # trigger the outer rollback — the account is already committed
+        # at this point and rollback would only affect the suspicious-
+        # alert row, not undo registration.
+        try:
+            from app.service.discord_account_feed import notify_account_created
+            # user_agent.is_client tells us whether the request came in
+            # from osu! itself (true) or a browser (false). Surface that
+            # in the embed so admins can spot odd patterns at a glance
+            # (e.g. a spike of "web" registrations vs the usual mix).
+            source_label = "osu! client" if user_agent.is_client else "web"
+            await notify_account_created(user=new_user, source_label=source_label)
+        except Exception as discord_err:
+            logger.warning(
+                f"Failed to post Discord new-account embed for user {new_user.id}: {discord_err}"
+            )
     except Exception:
         await db.rollback()
         # æ‰“å°è¯¦ç»†é”™è¯¯ä¿¡æ¯ç”¨äºŽè°ƒè¯•
