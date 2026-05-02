@@ -35,8 +35,8 @@ from dataclasses import dataclass
 
 from sqlmodel import select
 
-from app.database import User
-from app.dependencies.database import get_session_factory
+from app.database import User  # noqa: F401  (kept so the User module's relationships register)
+from app.dependencies.database import with_db
 from app.service.client_verification_service import (
     get_client_verification_service,
     init_client_verification_service,
@@ -60,8 +60,7 @@ class CandidateHash:
 async def collect_lazer_hashes_from_login_log() -> list[CandidateHash]:
     """Group every distinct (hash, version) pair seen in user_login_log
     where the client_label matches the lazer release pattern."""
-    factory = get_session_factory()
-    async with factory() as session:
+    async with with_db() as session:
         # Pull the raw rows; sqlmodel/sqlalchemy will type the result
         # tuples for us. We don't need the user info for the registration
         # itself — purely de-duping by hash + extracted version.
