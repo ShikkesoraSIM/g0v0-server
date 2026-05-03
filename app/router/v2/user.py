@@ -474,11 +474,32 @@ async def get_user_info(
 
     user_resp = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical_user_resp), show_nsfw_media)
 
-    # å¼‚æ­¥ç¼”å­˜ canonical result
+    # å¼‚æ­¥ç¼“å­˜ canonical result
     background_task.add_task(cache_service.cache_user, canonical_user_resp, None, None, resolved_pp_variant)
     # Pre-warm the pp_dev variant so toggling is instant.
     if resolved_pp_variant == "stable":
         background_task.add_task(prewarm_pp_dev_profile_background, redis, searched_user.id, None)
+
+    # Admin-only attachment: suspicious-status summary.
+    #
+    # Computed AFTER the cache write so the cached canonical payload
+    # stays viewer-agnostic (one cached blob serves admins and non-
+    # admins alike). Adding it here only mutates the per-request
+    # user_resp copy, which is exactly the privacy posture we want:
+    # the "is suspicious" flag and reasons are visible only to admins
+    # browsing the profile, never to the public or to the user
+    # themselves.
+    if current_user is not None and getattr(current_user, "is_admin", False):
+        from app.service.suspicious_summary import summarize_user
+        summary = await summarize_user(session, searched_user.id)
+        # Always attach -- even when not suspicious -- so the admin
+        # client can render a "trust 100" green pill consistently
+        # rather than treating absence of the field as ambiguous.
+        user_resp["is_suspicious"] = summary.is_suspicious
+        user_resp["trust_score"] = summary.trust_score
+        user_resp["suspicious_reasons"] = summary.reasons
+        user_resp["open_suspicious_alert_count"] = summary.open_alert_count
+
     return user_resp
 
 
