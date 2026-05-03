@@ -274,6 +274,22 @@ async def submit_score(
             detail="You are restricted from logging in or submitting scores on Torii.",
         )
 
+    # Maintenance-mode gate. Admins are exempt so an admin can verify
+    # the server is healthy mid-maintenance without flipping the toggle
+    # off; everyone else gets a 503 with the operator-supplied message
+    # so the client UI can show *why* their submit was rejected. We
+    # check the flag against Redis here (single HGET, sub-millisecond)
+    # rather than storing it in a column anyone has to refresh.
+    if not getattr(current_user, "is_admin", False):
+        from app.service.maintenance_mode import get_state
+        m_state = await get_state(redis)
+        if m_state.enabled:
+            raise HTTPException(
+                status_code=503,
+                detail=m_state.message
+                or "Score submission is temporarily disabled for maintenance.",
+            )
+
     if not info.passed:
         info.rank = Rank.F
 

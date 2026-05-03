@@ -6,7 +6,7 @@ from app.config import settings
 from app.const import BANCHOBOT_ID
 from app.database import Team, TeamMember, User
 from app.database.user import UserModel
-from app.dependencies.database import Database
+from app.dependencies.database import Database, Redis
 from app.dependencies.user import get_optional_user
 
 from .router import router
@@ -184,3 +184,34 @@ async def navbar_search(
         ]
 
     return NavbarSearchResp(query=keyword, users=users, teams=teams)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Server status — minimal public endpoint that the frontend polls (or
+# calls at boot) to show a maintenance banner. Returns just enough for
+# a banner: a boolean and an optional message. We deliberately do NOT
+# expose the actor identity or timestamp here — those are admin-tier
+# audit info and live behind the /api/private/admin/maintenance route.
+# Cheap (single Redis HGET inside is_active() / get_state()) so it's
+# safe to hit from the splash page on every navigation.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class ServerStatusResp(BaseModel):
+    """Public server-status payload. Stable contract for clients
+    rendering banners — fields will be added but never renamed."""
+
+    maintenance: bool
+    message: str | None = None
+
+
+@router.get(
+    "/server/status",
+    name="服务器状态",
+    description="Lightweight public status endpoint used by clients to surface maintenance banners.",
+    response_model=ServerStatusResp,
+)
+async def get_server_status(redis: Redis):
+    from app.service.maintenance_mode import get_state, to_public_dict
+    state = await get_state(redis)
+    return ServerStatusResp(**to_public_dict(state))

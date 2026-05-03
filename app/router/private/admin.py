@@ -2523,3 +2523,88 @@ async def delete_daily_challenge(
 
     await session.delete(challenge)
     await session.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Maintenance mode (server-wide score-submission gate)
+#
+# Three endpoints:
+#   GET    /admin/maintenance  -> current state (admin viewer)
+#   POST   /admin/maintenance  -> enable, with optional message body
+#   DELETE /admin/maintenance  -> disable
+#
+# Score submission gating happens in app/router/v2/score.py — we only
+# expose the *toggle* here. The state itself lives in Redis (see
+# app/service/maintenance_mode.py) so the flag is shared across every
+# uvicorn worker without DB round-trips.
+#
+# Self-lockout posture: maintenance does NOT block authentication or
+# admin endpoints, so an admin who just enabled maintenance can always
+# log back in and disable it. We deliberately did NOT implement the
+# upstream "cannot self-disable" rule — see the module docstring on
+# maintenance_mode.py for the rationale.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _MaintenanceEnableBody(BaseModel):
+    message: str | None = None
+
+
+@router.get(
+    "/admin/maintenance",
+    name="维护模式状态",
+    tags=["管理", "g0v0 API"],
+)
+async def get_maintenance_state_endpoint(
+    session: Database,
+    redis: Redis,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    await require_admin(session, user_and_token)
+    from app.service.maintenance_mode import get_state, to_admin_dict
+    state = await get_state(redis)
+    return to_admin_dict(state)
+
+
+@router.post(
+    "/admin/maintenance",
+    name="启用维护模式",
+    tags=["管理", "g0v0 API"],
+)
+async def enable_maintenance_endpoint(
+    session: Database,
+    redis: Redis,
+    body: _MaintenanceEnableBody,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    actor = await require_admin(session, user_and_token)
+    # Snapshot the actor's username here, before any commit / refresh
+    # could expire the loaded attribute (same lazy-load pattern that
+    # bit us in update_user). The maintenance toggle itself doesn't
+    # write to the SQL session, but capture defensively anyway.
+    actor_username = actor.username
+    actor_id = actor.id
+    from app.service.maintenance_mode import enable, to_admin_dict
+    state = await enable(
+        redis,
+        message=body.message,
+        actor_user_id=actor_id,
+        actor_username=actor_username,
+    )
+    return to_admin_dict(state)
+
+
+@router.delete(
+    "/admin/maintenance",
+    name="关闭维护模式",
+    tags=["管理", "g0v0 API"],
+)
+async def disable_maintenance_endpoint(
+    session: Database,
+    redis: Redis,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    await require_admin(session, user_and_token)
+    from app.service.maintenance_mode import disable, to_admin_dict
+    state = await disable(redis)
+    return to_admin_dict(state)
