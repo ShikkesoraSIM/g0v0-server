@@ -998,11 +998,27 @@ async def send_global_announcement(
 async def get_all_users(
     session: Database,
     user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    search: Annotated[str, Query(description="Optional username substring filter (case-insensitive)")] = "",
+    limit: Annotated[int, Query(description="Cap on rows returned (0 = no cap, full table)", ge=0, le=500)] = 0,
 ):
-    """Get all users (admin only)"""
+    """Get users (admin only).
+
+    Backwards compatible default: no params returns the full users table
+    (the original behaviour). Pass ``search`` to filter by username
+    substring and ``limit`` to cap the result set — useful for
+    autocomplete pickers (recalc dropdown, etc.) so we don't ship
+    hundreds of MB to the browser.
+    """
     await require_admin(session, user_and_token)
 
-    users = (await session.exec(select(User).order_by(col(User.id)))).all()
+    stmt = select(User)
+    if search.strip():
+        stmt = stmt.where(col(User.username).ilike(f"%{search.strip()}%"))
+    stmt = stmt.order_by(col(User.id))
+    if limit > 0:
+        stmt = stmt.limit(limit)
+
+    users = (await session.exec(stmt)).all()
     return [await user_to_dict(user, session) for user in users]
 
 
@@ -2766,6 +2782,61 @@ async def pick_random_daily_challenge_beatmap(
         "date": challenge_date.isoformat(),
         "beatmap": preview,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Recalculation queue (admin-triggered per-user PP recalcs)
+#
+# The actual queue + subprocess management lives in
+# app/service/recalculation_service.py — these endpoints are thin
+# wrappers that gate on is_admin and hand off to the service.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/admin/recalculate/user/{user_id}",
+    name="排队用户重新计算",
+    tags=["管理", "g0v0 API"],
+)
+async def enqueue_user_pp_recalc(
+    session: Database,
+    user_id: int,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    """Queue a single-user PP recalc. Returns immediately with the task
+    record (status=pending) — the subprocess runs async. Poll
+    /admin/recalculate/status to see when it's done."""
+    actor = await require_admin(session, user_and_token)
+    actor_username = actor.username
+
+    target = await session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"User id {user_id} not found")
+    target_username = target.username
+
+    from app.service.recalculation_service import enqueue_user_recalc
+    task = await enqueue_user_recalc(
+        target_user_id=user_id,
+        target_username=target_username,
+        actor_username=actor_username,
+    )
+    return task.to_dict()
+
+
+@router.get(
+    "/admin/recalculate/status",
+    name="重新计算队列状态",
+    tags=["管理", "g0v0 API"],
+)
+async def get_recalculation_status(
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    """Snapshot of the recalc queue: currently-running job (if any),
+    pending queue, recent completed history (last 25)."""
+    await require_admin(session, user_and_token)
+    from app.service.recalculation_service import get_status
+    return await get_status()
 
 
 # ──────────────────────────────────────────────────────────────────────────
