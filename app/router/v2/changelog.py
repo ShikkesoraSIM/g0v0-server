@@ -23,6 +23,30 @@ _STREAM_DISPLAY_NAME = "Torii"
 
 _RAW_BUILDS: list[dict[str, Any]] = [
     # --------------------------------------------------------------------------
+    # May 4, 2026 — Operations release (admin tooling + score reliability + supporter QoL)
+    # --------------------------------------------------------------------------
+    {
+        "id": 20260504,
+        "version": "2026.504.0",
+        "display_version": "2026.504.0-torii",
+        "created_at": _ts(2026, 5, 4, 12, 0),
+        "users": 0,
+        "entries": [
+            ("fix", "server", "Score-feedback self-heal: after every passed submission we now verify the leaderboard row landed; if it didn't, we retry inline once and queue a background retry. Fixes the recurring 'play submitted but Overall Ranking shows empty' bug."),
+            ("add", "gameplay", "Optional double-confirm for Retry / Quit on long pause and fail screens. After 60s of active play, the dangerous buttons need a second click within 5s with a draining countdown bar. Toggle in Settings → Torii → Gameplay."),
+            ("add", "client", "Settings sidecar (torii.ini) — every Torii-only setting (custom hue, donator accent hue, alpha-feature unlocks, the new gameplay confirm) now persists in its own file alongside osu.cfg. Sharing the data folder with the official lazer client no longer wipes them when lazer rewrites osu.cfg without those keys."),
+            ("add", "admin", "Maintenance Mode — Redis-backed toggle that blocks score submission server-wide for non-admins, with a configurable banner message and a site-wide amber stripe polled every 30 seconds. Auth and admin endpoints stay open so it can never lock the operator out."),
+            ("add", "admin", "Changelog Editor — DB-backed admin page for managing builds and entries, including a one-click 'Import from GitHub commit' modal. The public /changelog page now reads from the DB and falls back to the hardcoded list when the table is empty."),
+            ("add", "admin", "Per-user PP recalc queue with a searchable user dropdown, single-worker concurrency, and a status panel that polls every 5s while a job is running. Per-task stdout tail surfaces failures without leaving the page."),
+            ("add", "admin", "Beatmap Blacklist redesign supporting single-difficulty bans next to whole-set bans, with stats tiles and a scope filter. Daily Challenges get a 🎲 random-pick modal. Global Announcements gain a 'Show as popup' toggle that piggy-backs on the medal-unlock overlay so the message actually interrupts gameplay."),
+            ("add", "web", "Top Plays page at /rankings/top-plays — server-wide PP scoreboard, paginated, mode-aware. Profiles now show join date + last-seen, a Daily Challenge stats card when relevant, and a playtime-hours hover on the Play Time stat. Admin viewers also get a Suspicious Activity banner on flagged users."),
+            ("add", "web", "Discord feed integration — title grants and new-account registrations both post embeds to the operator's configured channel for live operations visibility."),
+            ("fix", "ui", "'Show more' on top plays no longer clobbers loaded scores back to the first six. Navbar quick-search reliably closes on a result click, the Close button, and any URL change. Locked supporter accent rows let actual supporters interact with the controls instead of swallowing every click."),
+            ("misc", "client", "Removed the unsupported osu! Space ruleset (dragging dead build weight). Removed the misleading 'This is not an official build' notification. The 'Current server' notification now fires exactly once per session."),
+            ("misc", "server", "Newtonsoft.Json bumped to 13.0.4 to clear an alembic startup error, plus the usual round of small bugfixes and refactors across the stack."),
+        ],
+    },
+    # --------------------------------------------------------------------------
     # April 29, 2026 — Aura visual quality overhaul (final release)
     # --------------------------------------------------------------------------
     {
