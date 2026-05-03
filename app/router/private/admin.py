@@ -2613,6 +2613,162 @@ async def delete_daily_challenge(
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Daily Challenge — random map picker
+#
+# Convenience endpoint for admins to roll a candidate beatmap when
+# building tomorrow's DC. The caller can constrain by mode and star
+# range; we filter to ranked/approved/loved only (the only statuses
+# eligible for daily challenge), then pick one at random server-side.
+#
+# We use SQL ORDER BY RAND() LIMIT 1 -- O(N) but the local beatmaps
+# table is small enough (tens of thousands max) that a full scan once
+# per admin click is fine. If this ever gets called from anything but
+# a button press, swap to OFFSET + COUNT for a constant-cost picker.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class RandomDailyChallengeReq(BaseModel):
+    """Body for the random-pick endpoint. All filters optional; defaults
+    pick any ranked osu! beatmap of any difficulty. ``create_challenge``
+    flips the endpoint between "preview" (just return the rolled beatmap
+    metadata) and "create" (persist a DailyChallenge row for ``date``).
+    """
+    date: str | None = None
+    ruleset_id: int = 0
+    min_difficulty: float | None = None
+    max_difficulty: float | None = None
+    required_mods: str = "[]"
+    allowed_mods: str = "[]"
+    create_challenge: bool = False
+
+
+@router.post(
+    "/admin/daily-challenge/random",
+    name="随机抽取每日挑战谱面",
+    tags=["管理", "g0v0 API"],
+)
+async def pick_random_daily_challenge_beatmap(
+    session: Database,
+    req: RandomDailyChallengeReq,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    """Roll one ranked/approved/loved beatmap matching the filters.
+
+    The same endpoint serves two modes via ``create_challenge``:
+      false (default) -> preview: just return the rolled beatmap.
+      true            -> persist: create a DailyChallenge row for
+                         ``date`` (or today's date in UTC if omitted).
+
+    Two-stage flow lets the admin UI show a preview first ("here's
+    what I'd pick — accept?") before committing, instead of dropping
+    a fait-accompli on the playerbase if the random roll lands on
+    something unsuitable.
+    """
+    await require_admin(session, user_and_token)
+
+    from sqlalchemy import func as sa_func
+    from app.models.beatmap import BeatmapRankStatus
+
+    # Eligible statuses match the rest of our DC code path. We include
+    # QUALIFIED too because qualified maps still have leaderboards; they
+    # might be the wrong choice for a multi-day DC but they're fine for
+    # a one-shot pick if the admin really wants them.
+    eligible_statuses = [
+        BeatmapRankStatus.RANKED,
+        BeatmapRankStatus.APPROVED,
+        BeatmapRankStatus.QUALIFIED,
+        BeatmapRankStatus.LOVED,
+    ]
+
+    # Map ruleset_id (0..3) -> GameMode. Out-of-range -> osu! so a
+    # mistyped admin payload never returns "no maps found".
+    try:
+        mode = [GameMode.OSU, GameMode.TAIKO, GameMode.FRUITS, GameMode.MANIA][req.ruleset_id]
+    except IndexError:
+        mode = GameMode.OSU
+
+    wheres = [
+        col(Beatmap.beatmap_status).in_(eligible_statuses),
+        Beatmap.mode == mode,
+    ]
+    if req.min_difficulty is not None:
+        wheres.append(Beatmap.difficulty_rating >= req.min_difficulty)
+    if req.max_difficulty is not None:
+        wheres.append(Beatmap.difficulty_rating <= req.max_difficulty)
+
+    beatmap = (
+        await session.exec(
+            select(Beatmap).where(*wheres).order_by(sa_func.rand()).limit(1)
+        )
+    ).first()
+
+    if beatmap is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No eligible beatmaps matched the requested filters. "
+                "Loosen the star range or pick a different ruleset."
+            ),
+        )
+
+    beatmapset = await session.get(Beatmapset, beatmap.beatmapset_id)
+    preview = {
+        "beatmap_id": beatmap.id,
+        "beatmapset_id": beatmap.beatmapset_id,
+        "version": beatmap.version,
+        "difficulty_rating": beatmap.difficulty_rating,
+        "mode": beatmap.mode,
+        "total_length": beatmap.total_length,
+        "bpm": beatmap.bpm,
+        "title": beatmapset.title if beatmapset else None,
+        "artist": beatmapset.artist if beatmapset else None,
+        "creator": beatmapset.creator if beatmapset else None,
+    }
+
+    if not req.create_challenge:
+        return {"created": False, "beatmap": preview}
+
+    # ── Create branch ───────────────────────────────────────────────
+    # Resolve date: explicit YYYY-MM-DD wins, otherwise default to
+    # today (UTC, matching the cron scheduler at 00:00 UTC).
+    if req.date:
+        try:
+            challenge_date = datetime.strptime(req.date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    else:
+        challenge_date = utcnow().date()
+
+    # Bail early on duplicates so we don't accidentally clobber a row
+    # the cron job already inserted for the same day.
+    existing = (
+        await session.exec(select(DailyChallenge).where(col(DailyChallenge.date) == challenge_date))
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A daily challenge already exists for {challenge_date.isoformat()}.",
+        )
+
+    challenge = DailyChallenge(
+        beatmap_id=beatmap.id,
+        ruleset_id=req.ruleset_id,
+        required_mods=req.required_mods,
+        allowed_mods=req.allowed_mods,
+        date=challenge_date,
+    )
+    session.add(challenge)
+    await session.commit()
+    await session.refresh(challenge)
+
+    return {
+        "created": True,
+        "date": challenge_date.isoformat(),
+        "beatmap": preview,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Maintenance mode (server-wide score-submission gate)
 #
 # Three endpoints:
