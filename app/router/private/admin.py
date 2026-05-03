@@ -317,6 +317,13 @@ class GlobalAnnouncementReq(BaseModel):
     online_only: bool = True
     sender_username: str | None = None
     sender_user_id: int | None = None
+    # Pop the announcement on top of every recipient's lazer client by
+    # piggy-backing on the medal-unlock overlay. The regular global
+    # announcement notification ends up in the notifications drawer
+    # but doesn't visually interrupt the player; the medal popup does.
+    # Implementation publishes a synthetic UserAchievementUnlock on
+    # the chat:notification Redis channel per recipient.
+    show_popup: bool = True
 
 
 class GlobalAnnouncementResp(BaseModel):
@@ -927,6 +934,50 @@ async def send_global_announcement(
             await server.new_private_notification(pm_detail)
 
         await session.commit()
+
+    # ─── Popup hijack ───────────────────────────────────────────────────
+    # Emit a synthetic UserAchievementUnlock per recipient on the same
+    # chat:notification Redis channel that real medals use. The lazer
+    # client renders these via its MedalOverlay -- a big slide-in popup
+    # that interrupts whatever screen the player is on -- whereas the
+    # GlobalAnnouncement above only lands in the notifications drawer.
+    # Combining both: the announcement is durable AND visually loud.
+    #
+    # The synthetic achievement_id sits in a HUGE namespace
+    # (10_000_000_000+) so it can never collide with a real medal even
+    # if upstream osu! grows its catalogue tenfold. Each recipient gets
+    # a slightly different timestamp-based id so the client treats them
+    # as distinct events (it dedupes by id in some places).
+    if req.show_popup and receivers:
+        try:
+            from app.models.achievement import Achievement
+            from app.models.notification import UserAchievementUnlock
+
+            popup_redis = get_redis()
+            now_ms = int(utcnow().timestamp() * 1000)
+            for idx, recipient_id in enumerate(receivers):
+                synthetic = Achievement(
+                    id=10_000_000_000 + now_ms + idx,
+                    name=announcement.title,
+                    desc=message,
+                    assets_id="all-secret-bone",  # generic medal art that ships with osu!
+                )
+                detail = UserAchievementUnlock.init(
+                    synthetic,
+                    recipient_id,
+                    GameMode.OSU,
+                )
+                await popup_redis.publish(
+                    "chat:notification",
+                    detail.model_dump_json(),
+                )
+        except Exception as popup_err:
+            # Popup is the cherry on top -- never let it kill the
+            # main announcement that's already been delivered.
+            logger.warning(
+                "Failed to emit announcement popup to {} recipients: {}",
+                len(receivers), popup_err,
+            )
 
     return GlobalAnnouncementResp(
         sent_to=len(receivers),
