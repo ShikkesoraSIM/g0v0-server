@@ -13,8 +13,15 @@ Seeds the canonical "lazer" stream so admins can immediately create
 builds against it without having to POST to /streams first.
 
 Revision ID: c1d2e3f4a5b6
-Revises: f8a9b0c1d2e3
+Revises: b9c0d1e2f3a4
 Create Date: 2026-05-03 04:00:00.000000
+
+NOTE: parent is `b9c0d1e2f3a4` (rooms_type_ranked_play) rather than the
+older merge head `f8a9b0c1d2e3`. Both b9c0d1e2f3a4 and an earlier draft
+of this changelog migration originally pointed at the same merge head,
+which gave alembic two parallel heads and broke startup ("Multiple head
+revisions are present"). Re-parenting onto b9c0d1e2f3a4 puts the
+migrations in a linear chain so prod can upgrade cleanly.
 """
 
 from collections.abc import Sequence
@@ -25,7 +32,7 @@ from alembic import op
 
 
 revision: str = "c1d2e3f4a5b6"
-down_revision: str | Sequence[str] | None = "f8a9b0c1d2e3"
+down_revision: str | Sequence[str] | None = "b9c0d1e2f3a4"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
