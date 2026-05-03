@@ -14,6 +14,7 @@ from app.database import (
     ScoreTokenResp,
     User,
 )
+from app.database.total_score_best_scores import TotalScoreBestScore
 from app.database.user import UserModel
 from app.database.achievement import process_achievements
 from app.database.counts import ReplayWatchedCount
@@ -397,8 +398,10 @@ async def submit_score(
             if score.passed:
                 t_user = time.time()
                 logger.info("[submit_score] BEFORE _process_user score_id={} user_id={}", score_id, user_id)
+                _process_user_succeeded = False
                 try:
                     await _process_user(score_id, user_id, redis, fetcher)
+                    _process_user_succeeded = True
                     logger.info(
                         "[submit_score] AFTER _process_user in {:.3f}s score_id={} user_id={}",
                         time.time() - t_user,
@@ -413,6 +416,88 @@ async def submit_score(
                         user_id,
                         e,
                     )
+
+                # ─── Self-heal: verify the leaderboard row landed ───
+                #
+                # _process_user is supposed to write a TotalScoreBestScore
+                # for this (user, beatmap) so the leaderboard query sees
+                # the just-submitted score. Several failure modes have
+                # historically been swallowed silently inside that path
+                # (greenlet errors mid-commit, transient DB hiccups,
+                # subscriber publishes that raise after the row had
+                # already been queued for insert but before the commit
+                # landed, ...) and the next leaderboard fetch from the
+                # client returns an empty "Overall Ranking" panel.
+                #
+                # We refuse to ship that experience anymore. If the row
+                # is missing AFTER _process_user returned (whether it
+                # raised OR claimed success), we explicitly re-run the
+                # processing inline once. If it still fails, we schedule
+                # a background retry so the row eventually lands without
+                # delaying the client response further.
+                try:
+                    leaderboard_row = (
+                        await db.exec(
+                            select(TotalScoreBestScore.id).where(
+                                TotalScoreBestScore.score_id == score_id,
+                            )
+                        )
+                    ).first()
+                except Exception as verify_err:
+                    leaderboard_row = None
+                    logger.warning(
+                        "[submit_score] verify-leaderboard query failed score_id={} err={}",
+                        score_id,
+                        verify_err,
+                    )
+
+                if leaderboard_row is None:
+                    logger.warning(
+                        "[submit_score] leaderboard row missing after _process_user "
+                        "(succeeded={}) score_id={} user_id={} — retrying inline",
+                        _process_user_succeeded,
+                        score_id,
+                        user_id,
+                    )
+                    try:
+                        await _process_user(score_id, user_id, redis, fetcher)
+                        # Re-check; if it landed, great. If not, fall through
+                        # to the background-task safety net.
+                        retry_row = (
+                            await db.exec(
+                                select(TotalScoreBestScore.id).where(
+                                    TotalScoreBestScore.score_id == score_id,
+                                )
+                            )
+                        ).first()
+                        if retry_row is None:
+                            logger.error(
+                                "[submit_score] inline retry STILL no leaderboard row "
+                                "score_id={} user_id={} — scheduling background retry",
+                                score_id,
+                                user_id,
+                            )
+                            background_task.add_task(
+                                _process_user_background, score_id, user_id, redis, fetcher
+                            )
+                        else:
+                            logger.info(
+                                "[submit_score] inline retry recovered leaderboard row "
+                                "score_id={} user_id={}",
+                                score_id,
+                                user_id,
+                            )
+                    except Exception as retry_err:
+                        logger.error(
+                            "[submit_score] inline retry crashed score_id={} user_id={} err={} — "
+                            "scheduling background retry",
+                            score_id,
+                            user_id,
+                            retry_err,
+                        )
+                        background_task.add_task(
+                            _process_user_background, score_id, user_id, redis, fetcher
+                        )
             else:
                 logger.info(
                     "[submit_score] scheduling background _process_user for failed score_id={} user_id={}",
