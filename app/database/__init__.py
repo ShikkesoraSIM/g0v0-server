@@ -20,6 +20,20 @@ from .beatmapset import (
 from .beatmapset_ratings import BeatmapRating
 from .best_scores import BestScore
 from .briefing_radar import ToriiBriefingRadarSnapshot
+from .changelog import (
+    ChangelogBuild,
+    ChangelogBuildCreate,
+    ChangelogBuildResponse,
+    ChangelogBuildUpdate,
+    ChangelogEntry,
+    ChangelogEntryCreate,
+    ChangelogEntryResponse,
+    ChangelogEntryUpdate,
+    ChangelogStream,
+    ChangelogStreamCreate,
+    ChangelogStreamResponse,
+    ChangelogStreamUpdate,
+)
 from .donation import Donation
 from .chat import (
     ChannelType,

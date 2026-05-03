@@ -5,6 +5,9 @@ from html import escape
 from typing import Any
 
 from fastapi import Query
+from sqlmodel import col, select
+
+from app.dependencies.database import Database
 
 from .router import router
 
@@ -323,13 +326,28 @@ def _stream_stub() -> dict[str, Any]:
 
 
 def _build_ref(raw: dict[str, Any]) -> dict[str, Any]:
+    # When the raw dict came from the DB it carries _stream_*_override
+    # keys so the rendered build references its actual stream rather
+    # than always echoing the hardcoded "lazer / Torii". Hardcoded
+    # builds don't have these keys, so the helper still returns the
+    # legacy stub for them.
+    if "_stream_name_override" in raw:
+        update_stream = {
+            "id": _STREAM_ID,
+            "name": raw["_stream_name_override"],
+            "display_name": raw["_stream_display_override"],
+            "is_featured": True,
+            "user_count": 0,
+        }
+    else:
+        update_stream = _stream_stub()
     return {
         "id": raw["id"],
         "version": raw["version"],
         "display_version": raw["display_version"],
         "users": raw["users"],
         "created_at": raw["created_at"],
-        "update_stream": _stream_stub(),
+        "update_stream": update_stream,
     }
 
 
@@ -376,14 +394,121 @@ def _full_build_payload(
     return payload
 
 
+# ─── DB-backed read paths ────────────────────────────────────────────────
+#
+# When the admin Changelog Editor (app/router/private/changelog.py) has
+# any builds in the `changelog_builds` table, the read endpoints below
+# serve from DB. When the table is empty (first deploy of the editor,
+# fresh dev DB, etc.), they fall back to the historical hardcoded
+# `_RAW_BUILDS` list above so the changelog page never appears blank.
+#
+# Both code paths return the same JSON contract — same key set, same
+# nested shapes — so the frontend can't tell them apart. That keeps the
+# cutover from "all hardcoded" to "all editor-managed" boring.
+
+
+def _db_build_to_raw_dict(
+    build: Any, entries: list[Any], stream_name: str, stream_display: str
+) -> dict[str, Any]:
+    """Adapt a (ChangelogBuild + entries + stream) ORM trio into the same
+    dict shape that the existing _full_build_payload helpers consume.
+    Avoids duplicating the rendering logic per code path."""
+    return {
+        "id": build.id,
+        "version": build.version,
+        "display_version": build.display_version,
+        "created_at": build.created_at,
+        "users": build.users,
+        "github_url": build.github_url,
+        "_stream_name_override": stream_name,
+        "_stream_display_override": stream_display,
+        "entries": [(e.type, e.category, e.title) for e in entries],
+    }
+
+
 @router.get("/changelog", tags=["Misc"], name="Changelog index")
 async def changelog_index(
+    session: Database,
     stream: str | None = Query(default=None),
     from_: str | None = Query(default=None, alias="from"),
     to: str | None = Query(default=None),
 ):
     del from_, to
 
+    # ── DB path ──────────────────────────────────────────────────────
+    # Avoids importing app.database at module top because that drags in
+    # the full SQLModel registry; lazy import keeps changelog.py cheap
+    # to import for tests / scripts.
+    from app.database import ChangelogBuild, ChangelogEntry, ChangelogStream
+
+    db_streams = (await session.exec(select(ChangelogStream))).all()
+    if db_streams:
+        # Pick the stream the request asked for, defaulting to the
+        # featured one (or the first row if none flagged).
+        target_stream = next((s for s in db_streams if s.name == stream), None)
+        if target_stream is None and stream is None:
+            target_stream = next((s for s in db_streams if s.is_featured), db_streams[0])
+        if target_stream is None:
+            return {
+                "streams": [],
+                "builds": [],
+                "search": {"stream": stream, "from": None, "to": None, "limit": 21},
+                "cursor_string": None,
+            }
+
+        builds = (
+            await session.exec(
+                select(ChangelogBuild)
+                .where(ChangelogBuild.stream_id == target_stream.id)
+                .order_by(col(ChangelogBuild.created_at).desc())
+            )
+        ).all()
+
+        if builds:
+            # Eager-fetch entries in one query keyed by build_id.
+            build_ids = [b.id for b in builds]
+            entry_rows = (
+                await session.exec(
+                    select(ChangelogEntry)
+                    .where(col(ChangelogEntry.build_id).in_(build_ids))
+                    .order_by(col(ChangelogEntry.id))
+                )
+            ).all()
+            entries_by_build: dict[int, list[Any]] = {}
+            for e in entry_rows:
+                entries_by_build.setdefault(e.build_id, []).append(e)
+
+            raw_builds = [
+                _db_build_to_raw_dict(
+                    b, entries_by_build.get(b.id, []), target_stream.name, target_stream.display_name
+                )
+                for b in builds
+            ]
+
+            stream_payload = {
+                "id": target_stream.id,
+                "name": target_stream.name,
+                "display_name": target_stream.display_name,
+                "is_featured": target_stream.is_featured,
+                "user_count": target_stream.user_count,
+                "latest_build": _build_ref(raw_builds[0]),
+            }
+
+            full_builds: list[dict[str, Any]] = []
+            for i, build in enumerate(raw_builds):
+                previous_raw = raw_builds[i + 1] if i + 1 < len(raw_builds) else None
+                next_raw = raw_builds[i - 1] if i - 1 >= 0 else None
+                full_builds.append(_full_build_payload(build, previous_raw, next_raw))
+
+            return {
+                "streams": [stream_payload],
+                "builds": full_builds,
+                "search": {"stream": stream or target_stream.name, "from": None, "to": None, "limit": 21},
+                "cursor_string": None,
+            }
+        # Fall through to the hardcoded path when there are no builds yet.
+
+    # ── Hardcoded fallback ───────────────────────────────────────────
     if stream and stream != _STREAM_NAME:
         return {
             "streams": [],
@@ -411,7 +536,50 @@ async def changelog_index(
 
 
 @router.get("/changelog/{stream}/{version}", tags=["Misc"], name="Changelog build")
-async def changelog_build(stream: str, version: str):
+async def changelog_build(session: Database, stream: str, version: str):
+    # ── DB path ──────────────────────────────────────────────────────
+    from app.database import ChangelogBuild, ChangelogEntry, ChangelogStream
+
+    db_stream = (await session.exec(select(ChangelogStream).where(ChangelogStream.name == stream))).first()
+    if db_stream is not None:
+        all_builds = (
+            await session.exec(
+                select(ChangelogBuild)
+                .where(ChangelogBuild.stream_id == db_stream.id)
+                .order_by(col(ChangelogBuild.created_at).desc())
+            )
+        ).all()
+        if all_builds:
+            for i, b in enumerate(all_builds):
+                if b.version != version:
+                    continue
+                entries = (
+                    await session.exec(
+                        select(ChangelogEntry)
+                        .where(ChangelogEntry.build_id == b.id)
+                        .order_by(col(ChangelogEntry.id))
+                    )
+                ).all()
+                # Build the dict pseudo-version of the prev/next neighbours
+                # too so _full_build_payload can navigate.
+                def _to_raw(bb, ee):
+                    return _db_build_to_raw_dict(bb, ee, db_stream.name, db_stream.display_name)
+
+                prev_b = all_builds[i + 1] if i + 1 < len(all_builds) else None
+                next_b = all_builds[i - 1] if i - 1 >= 0 else None
+                # We only need the prev/next ref shape (no entries) — keep
+                # the second arg to _to_raw as an empty list.
+                this_raw = _to_raw(b, entries)
+                prev_raw = _to_raw(prev_b, []) if prev_b else None
+                next_raw = _to_raw(next_b, []) if next_b else None
+                return _full_build_payload(this_raw, prev_raw, next_raw)
+            # Stream exists in DB but version not found — fall through
+            # to hardcoded only if the stream name matches the legacy one,
+            # otherwise it's a real 404.
+            if stream != _STREAM_NAME:
+                return {"detail": "build not found"}
+
+    # ── Hardcoded fallback ───────────────────────────────────────────
     if stream != _STREAM_NAME:
         return {"detail": "build not found"}
 
