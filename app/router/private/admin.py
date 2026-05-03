@@ -285,6 +285,12 @@ class BeatmapBlacklistItem(BaseModel):
     source: str = "manual"
     reason: str | None = None
     beatmapset: dict | None = None
+    # New in the single-map redesign: each row carries the difficulty's
+    # own metadata so the admin UI can show "[Insane] · 5.4★ · osu! · 2:34"
+    # per row instead of just a beatmapset title. Optional because some
+    # historic blacklist rows may reference a beatmap_id whose Beatmap
+    # row is no longer present locally.
+    beatmap: dict | None = None
 
 
 class BadgeCreateRequest(BaseModel):
@@ -1247,31 +1253,52 @@ async def get_blacklisted_beatmaps(
     session: Database,
     user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
 ):
-    """Get all blacklisted beatmaps (admin only)"""
+    """Get all blacklisted beatmaps (admin only).
+
+    Returns ONE row per blacklisted beatmap (not deduped by beatmapset
+    anymore). A "ban set" action inserts one BannedBeatmaps row per
+    difficulty in the set, so a 5-difficulty set ban surfaces here as
+    5 rows with the same beatmapset_id but different beatmap_id +
+    version. The frontend groups them visually as needed.
+
+    The dedup behaviour was removed so that single-map bans (where
+    only one difficulty is banned out of the set) are actually
+    surfaced -- previously the first-seen-set check meant they would
+    be hidden behind another ban for the same set, OR they wouldn't
+    show at all if no other difficulty in the set was banned.
+    """
     await require_admin(session, user_and_token)
 
-    # Get all banned beatmaps
-    banned_beatmaps = (
-        await session.exec(select(BannedBeatmaps))
+    # Pull all banned rows in one shot, then batch-fetch beatmaps and
+    # beatmapsets to avoid an N+1 round trip when the blacklist grows.
+    banned_beatmaps = (await session.exec(select(BannedBeatmaps))).all()
+    if not banned_beatmaps:
+        return []
+
+    beatmap_ids = [b.beatmap_id for b in banned_beatmaps]
+    beatmaps = (
+        await session.exec(select(Beatmap).where(col(Beatmap.id).in_(beatmap_ids)))
     ).all()
+    beatmap_by_id = {b.id: b for b in beatmaps}
 
-    result = []
-    seen_beatmapsets = set()
+    beatmapset_ids = list({b.beatmapset_id for b in beatmaps})
+    beatmapsets = (
+        await session.exec(select(Beatmapset).where(col(Beatmapset.id).in_(beatmapset_ids)))
+    ).all() if beatmapset_ids else []
+    beatmapset_by_id = {bs.id: bs for bs in beatmapsets}
 
+    result: list[BeatmapBlacklistItem] = []
     for banned_item in banned_beatmaps:
-        # Get the beatmap to find its beatmapset
-        beatmap = await session.get(Beatmap, banned_item.beatmap_id)
+        beatmap = beatmap_by_id.get(banned_item.beatmap_id)
         if not beatmap:
+            # Skip rows whose beatmap isn't local -- the admin UI can't
+            # render anything useful for them and they'd just look like
+            # broken entries. They remain in the DB and still gate
+            # submissions; only the listing hides them.
             continue
-
         beatmapset_id = beatmap.beatmapset_id
+        beatmapset = beatmapset_by_id.get(beatmapset_id)
 
-        # Only add each beatmapset once
-        if beatmapset_id in seen_beatmapsets:
-            continue
-        seen_beatmapsets.add(beatmapset_id)
-
-        beatmapset = await session.get(Beatmapset, beatmapset_id)
         beatmapset_dict = None
         if beatmapset:
             beatmapset_dict = {
@@ -1279,6 +1306,14 @@ async def get_blacklisted_beatmaps(
                 "title": beatmapset.title,
                 "artist": beatmapset.artist,
             }
+        beatmap_dict = {
+            "id": beatmap.id,
+            "version": beatmap.version,
+            "difficulty_rating": beatmap.difficulty_rating,
+            "mode": beatmap.mode,
+            "total_length": beatmap.total_length,
+            "bpm": beatmap.bpm,
+        }
         result.append(
             BeatmapBlacklistItem(
                 id=banned_item.id or 0,
@@ -1287,6 +1322,7 @@ async def get_blacklisted_beatmaps(
                 source=banned_item.source,
                 reason=banned_item.reason,
                 beatmapset=beatmapset_dict,
+                beatmap=beatmap_dict,
             )
         )
 
