@@ -79,12 +79,11 @@ from .router import router
 # recent_plays — older clients that pulled a v1 cache during the upgrade
 # would have deserialised the unfamiliar fields cleanly (their DTO has
 # defensive defaults), but bumping the cache key is the cleaner cut.
-# v3: in-flight semantics changed from "raw token count" to
-# "distinct-user count" (after dedup), and the cutoff tightened from
-# 10 → 5 minutes. Bumping the key invalidates v2 blobs so older
-# clients hitting a v2 cache during the rollout don't get the old,
-# now-misleading numbers.
-_PULSE_CACHE_KEY = "torii:server_pulse:v3"
+# v4: recent_plays now includes recently-submitted scores too (with
+# pp / accuracy / rank metadata), so the Live Plays feed stays
+# populated even on quiet servers. Mixed feed sorted by event time
+# desc, deduped by user_id (most-recent event wins).
+_PULSE_CACHE_KEY = "torii:server_pulse:v4"
 _PULSE_CACHE_TTL_SECONDS = 10
 
 # Carousel page sizes. Picked together with the 380px popover width:
@@ -93,6 +92,12 @@ _PULSE_CACHE_TTL_SECONDS = 10
 # is just up to 4 modes (osu/taiko/catch/mania) so the cap is implicit.
 _TOP_MAPS_LIMIT = 5
 _RECENT_PLAYS_LIMIT = 8
+
+# How long a SUBMITTED score stays in the recent_plays feed after it
+# ends. Bigger than the in-flight cutoff (5 min) so that on quiet
+# servers the live feed doesn't go empty seconds after the last play
+# completes — there's still recent context to look at.
+_SUBMITTED_VISIBILITY_MIN = 15
 
 # In-flight cap. score_tokens with no score_id may legitimately stick
 # around for the duration of the longest possible map. Most maps are
@@ -219,7 +224,7 @@ async def _compute_pulse_snapshot(session, redis) -> dict[str, Any]:
     sparkline = await _compute_sparkline_buckets(session, now)
     top_maps = await _compute_top_maps(session, five_min_ago)
     mode_breakdown = _compute_mode_breakdown_from_tokens(deduped_tokens)
-    recent_plays = await _compute_recent_plays_from_tokens(session, deduped_tokens, now)
+    recent_plays = await _compute_mixed_recent_plays(session, deduped_tokens, now)
     online = await _count_online_users(redis)
 
     # ``top_map`` (singular) preserved for backward compatibility with
@@ -405,29 +410,104 @@ def _compute_mode_breakdown_from_tokens(deduped_tokens: list[ScoreToken]) -> dic
     return out
 
 
-async def _compute_recent_plays_from_tokens(
+async def _compute_mixed_recent_plays(
     session,
     deduped_tokens: list[ScoreToken],
     now: datetime,
 ) -> list[dict[str, Any]]:
-    """Up to ``_RECENT_PLAYS_LIMIT`` most-recently-started in-flight plays
-    with player + beatmap context. Powers the carousel's "Live Plays" page.
+    """Mixed feed of in-flight plays + recently-submitted scores, deduped
+    by user (most-recent event per user wins). Powers the carousel's
+    "Live Plays" page.
 
-    Receives the already-deduped (one-token-per-user, newest first) token
-    list and slices to the carousel limit, then batches user / beatmap /
-    beatmapset lookups in three queries.
+    Why mix
+    -------
+    On a quiet server (one or two players), the in-flight-only feed
+    goes empty seconds after each play ends, leaving the page looking
+    dead between maps. Including SUBMITTED scores from the last
+    ``_SUBMITTED_VISIBILITY_MIN`` minutes keeps the feed populated with
+    recent context — and adds the more interesting data (pp gained,
+    accuracy, grade) that an in-flight token can't carry yet.
 
-    Each entry includes ``started_seconds_ago`` so the client doesn't
-    have to think about clock drift — we compute the delta against the
-    snapshot's ``now`` and ship a relative integer.
+    Dedup rule
+    ----------
+    Per user, keep the most-recent EVENT (whether that's an in-flight
+    token or a submitted score). Two reasons:
+      1. A user who's started a new attempt is the active context —
+         their old finished score from 8 minutes ago shouldn't crowd
+         out the "they're playing right now" event.
+      2. Avoids the previous "lovinflowin appears 4 times in a row
+         from retry-spam tokens" failure mode.
+
+    Output schema
+    -------------
+    Each entry has a ``status`` field:
+      * "playing"   — in-flight token; carries ``started_seconds_ago``.
+      * "submitted" — landed score; carries ``score_id``, ``pp``,
+                       ``accuracy``, ``rank``, ``max_combo``,
+                       ``submitted_seconds_ago``.
+
+    Common fields (user / beatmap context) are shared.
     """
-    tokens = deduped_tokens[:_RECENT_PLAYS_LIMIT]
+    submitted_cutoff = now - timedelta(minutes=_SUBMITTED_VISIBILITY_MIN)
 
-    if not tokens:
+    # Pull recent submitted scores. Limit defensively to 4× the carousel
+    # limit so we have headroom to dedup against in-flight tokens
+    # without losing coverage. ORDER BY ended_at desc.
+    submitted_scores = (
+        await session.exec(
+            select(Score)
+            .where(Score.ended_at >= submitted_cutoff)
+            .order_by(sa_desc(Score.ended_at))
+            .limit(_RECENT_PLAYS_LIMIT * 4)
+        )
+    ).all()
+
+    # Build a unified event list: (user_id, sort_time, kind, payload)
+    # kind = "token" or "score". sort_time is the more-recent of
+    # ScoreToken.created_at / Score.ended_at — that's what determines
+    # which event wins in the per-user dedup.
+    events: list[tuple[int, datetime, str, Any]] = []
+
+    for token in deduped_tokens:  # already user-deduped, newest first
+        if token.user_id is None or token.created_at is None:
+            continue
+        ts = token.created_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        events.append((int(token.user_id), ts, "token", token))
+
+    for score in submitted_scores:
+        if score.user_id is None or score.ended_at is None:
+            continue
+        ts = score.ended_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        events.append((int(score.user_id), ts, "score", score))
+
+    if not events:
         return []
 
-    user_ids = list({t.user_id for t in tokens if t.user_id is not None})
-    beatmap_ids = list({t.beatmap_id for t in tokens if t.beatmap_id is not None})
+    # Newest first, then dedup by user_id.
+    events.sort(key=lambda e: e[1], reverse=True)
+
+    seen_users: set[int] = set()
+    deduped_events: list[tuple[int, datetime, str, Any]] = []
+    for ev in events:
+        if ev[0] in seen_users:
+            continue
+        seen_users.add(ev[0])
+        deduped_events.append(ev)
+
+    # Take the carousel limit
+    deduped_events = deduped_events[:_RECENT_PLAYS_LIMIT]
+
+    # Batch-fetch users + beatmaps + beatmapsets for all referenced IDs.
+    user_ids = list({e[0] for e in deduped_events})
+
+    beatmap_ids = list({
+        getattr(e[3], "beatmap_id", None)
+        for e in deduped_events
+    } - {None})
 
     users_list = (
         await session.exec(select(User).where(col(User.id).in_(user_ids)))
@@ -446,47 +526,78 @@ async def _compute_recent_plays_from_tokens(
     beatmapsets_by_id = {bs.id: bs for bs in beatmapsets_list}
 
     out: list[dict[str, Any]] = []
-    for token in tokens:
-        user = users_by_id.get(token.user_id) if token.user_id is not None else None
-        beatmap = beatmaps_by_id.get(token.beatmap_id) if token.beatmap_id is not None else None
+    for user_id, ts, kind, payload in deduped_events:
+        user = users_by_id.get(user_id)
+
+        beatmap_id = getattr(payload, "beatmap_id", None)
+        beatmap = beatmaps_by_id.get(beatmap_id) if beatmap_id is not None else None
         beatmapset = beatmapsets_by_id.get(beatmap.beatmapset_id) if beatmap is not None else None
 
-        # Be tolerant of missing relations — surface what we know and
-        # let the client render a partial card. A play with a deleted
-        # user account or a beatmap that vanished mid-play is rare but
-        # not impossible; better than dropping the row from the feed.
-        token_created_at = token.created_at
-        if token_created_at is not None and token_created_at.tzinfo is None:
-            token_created_at = token_created_at.replace(tzinfo=timezone.utc)
+        ruleset_int = _ruleset_to_int(getattr(payload, "ruleset_id", None) if kind == "token" else getattr(payload, "gamemode", None))
 
-        started_seconds_ago = 0
-        if token_created_at is not None:
-            started_seconds_ago = max(0, int((now - token_created_at).total_seconds()))
-
-        ruleset_int = 0
-        try:
-            ruleset_int = int(token.ruleset_id.value)  # type: ignore[union-attr]
-        except (AttributeError, ValueError):
-            try:
-                ruleset_int = int(token.ruleset_id) if token.ruleset_id is not None else 0
-            except (TypeError, ValueError):
-                ruleset_int = 0
-
-        out.append({
-            "user_id": int(token.user_id or 0),
+        # Common skeleton; status-specific fields filled below.
+        entry: dict[str, Any] = {
+            "user_id": int(user_id),
             "username": user.username if user is not None else "",
             "avatar_url": getattr(user, "avatar_url", "") if user is not None else "",
-            "beatmap_id": int(token.beatmap_id or 0),
+            "beatmap_id": int(beatmap_id or 0),
             "beatmapset_id": int(beatmap.beatmapset_id) if beatmap is not None else 0,
             "title": beatmapset.title if beatmapset is not None else "",
             "title_unicode": (beatmapset.title_unicode or beatmapset.title) if beatmapset is not None else "",
             "artist": beatmapset.artist if beatmapset is not None else "",
             "version": beatmap.version if beatmap is not None else "",
             "ruleset_id": ruleset_int,
-            "started_seconds_ago": started_seconds_ago,
-        })
+        }
+
+        if kind == "token":
+            entry["status"] = "playing"
+            entry["started_seconds_ago"] = max(0, int((now - ts).total_seconds()))
+            # Keep submitted-only fields absent rather than zeroing them
+            # — distinguishes "playing now" from "just submitted with 0
+            # pp" cleanly client-side.
+        else:  # kind == "score"
+            entry["status"] = "submitted"
+            entry["submitted_seconds_ago"] = max(0, int((now - ts).total_seconds()))
+            entry["score_id"] = int(getattr(payload, "id", 0) or 0)
+            entry["pp"] = float(getattr(payload, "pp", 0.0) or 0.0)
+            entry["accuracy"] = float(getattr(payload, "accuracy", 0.0) or 0.0)
+            entry["max_combo"] = int(getattr(payload, "max_combo", 0) or 0)
+
+            rank_value = getattr(payload, "rank", None)
+            entry["rank"] = _stringify_rank(rank_value)
+
+        out.append(entry)
 
     return out
+
+
+def _ruleset_to_int(value: Any) -> int:
+    """Coerce a ruleset/gamemode value (enum or int or None) to its int
+    representation. 0 = osu, 1 = taiko, 2 = catch, 3 = mania.
+    """
+    if value is None:
+        return 0
+    try:
+        return int(value.value)  # type: ignore[union-attr]
+    except (AttributeError, ValueError):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+
+def _stringify_rank(value: Any) -> str:
+    """Coerce a Rank enum (or string, or None) to its display string —
+    "SS", "S", "A", "B", "C", "D", or "F". Empty string for None.
+    """
+    if value is None:
+        return ""
+    try:
+        # Rank enum has .value as the string display
+        v = value.value if hasattr(value, "value") else value
+        return str(v).upper()
+    except Exception:
+        return ""
 
 
 # --- Online presence ----------------------------------------------------------
