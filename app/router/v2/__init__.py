@@ -12,6 +12,7 @@ from . import (  # noqa: F401
     score,
     session_verify,
     tags,
+    torii_server_pulse,
     user,
 )
 from .router import router as api_v2_router
