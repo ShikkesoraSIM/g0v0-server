@@ -23,6 +23,25 @@ _STREAM_DISPLAY_NAME = "Torii"
 
 _RAW_BUILDS: list[dict[str, Any]] = [
     # --------------------------------------------------------------------------
+    # May 4, 2026 (late) — Cursor system overhaul (Torii Exclusive)
+    # --------------------------------------------------------------------------
+    {
+        # 504 day, build #1. Intentionally distinct from the 504.0 ops build's id (20260504).
+        "id": 202605041,
+        "version": "2026.504.1",
+        "display_version": "2026.504.1-torii",
+        "created_at": _ts(2026, 5, 4, 22, 0),
+        "users": 0,
+        "entries": [
+            ("add", "client", "Cursor size hotkey — Ctrl+Shift+Mouse Wheel adjusts the gameplay cursor size live without opening Settings. A new OSD-style preview pill pops in showing your skin's actual cursor at the current size, with a small TORII EXCLUSIVE header so you can see this is a Torii feature at a glance."),
+            ("add", "client", "Three-way menu cursor style picker — Lazer Default (the textured arrow + pink flash), Use Skin's Gameplay Cursor (your skin's cursor.png + cursormiddle.png with the same Expand / Contract click feel the playfield uses), or Use Torii Cursor (a translucent pink ring with a white centre dot that overrides whatever the active skin ships). Lives at Settings → User Interface → General and is mirrored into Settings → Torii → Interface."),
+            ("add", "client", "Both gameplay-shaped menu cursor modes get the full skin trail — direct port of the osu! ruleset's CursorTrail pipeline. Skins with cursor.png + cursormiddle.png get the smooth additive trail; skins with cursor.png but no cursormiddle.png get the classic disjoint long-tail dotted look that trail-heavy skins lean on, decision keyed off the same provider that supplied the cursor texture so head and trail can never disagree."),
+            ("add", "client", "Menu cursor + trail live-rebuild whenever you change skins — texture, trail, rotation, disjoint mode all swap on the fly. No restart, no reopening any container, the new skin's cursor is on screen the moment the active skin changes."),
+            ("fix", "client", "Menu cursor now honours the skin's CursorRotate value from skin.ini instead of always spinning. Asymmetric or directional cursors stay upright as the skin author intended — read through a name-equivalent local enum that resolves to the same skin.ini entry the playfield cursor reads."),
+            ("fix", "client", "Menu cursor trail no longer corrupts the gameplay cursor in actual play. The port replicated upstream's `Texture.ScaleAdjust *= 1.6f` line, but LegacySkin hands out the same Texture wrapper across calls — every menu trail rebuild was clobbering the texture's ScaleAdjust while the playfield trail still held the same reference. Plus the trail kept rendering during gameplay because PopOut only faded the cursor head, not the trail. Both fixed; gameplay cursor is back to byte-identical with vanilla."),
+        ],
+    },
+    # --------------------------------------------------------------------------
     # May 4, 2026 — Operations release (admin tooling + score reliability + supporter QoL)
     # --------------------------------------------------------------------------
     {
