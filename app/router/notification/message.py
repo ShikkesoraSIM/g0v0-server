@@ -17,6 +17,7 @@ from app.dependencies.user import get_current_user
 from app.log import log
 from app.models.notification import ChannelMessage, ChannelMessageTeam
 from app.router.v2 import api_v2_router as router
+from app.service.chat_url_normalizer import normalize_chat_urls
 from app.service.redis_message_system import redis_message_system
 from app.utils import api_doc
 
@@ -108,6 +109,18 @@ async def send_message(
 
     if db_channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
+
+    # Rewrite known-broken host references in the message body before
+    # it reaches Redis / broadcast. Specifically: the Torii client's
+    # /np action used to (and may still, on older releases) post
+    # links pointing to the API subdomain (lazer-api.shikkesora.com)
+    # which serves no HTML — clicking such a link externally hits
+    # 404, and the in-client chat parser doesn't recognise it as a
+    # beatmap link either (see app/service/chat_url_normalizer.py
+    # for the full backstory). Doing this server-side catches old
+    # clients + any third-party chat client too, so a single
+    # release of the server fixes /np everywhere immediately.
+    req.message = normalize_chat_urls(req.message) or ""
 
     channel_id = db_channel.channel_id
     channel_type = db_channel.type
