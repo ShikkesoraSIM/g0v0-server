@@ -63,6 +63,7 @@ from app.database.beatmap import Beatmap
 from app.database.beatmapset import Beatmapset
 from app.database.score import Score
 from app.database.score_token import ScoreToken
+from app.database.user import User
 from app.dependencies.database import Database, get_redis
 
 from .router import router
@@ -74,8 +75,19 @@ from .router import router
 # invalidates all clients' cached snapshots in one move when the
 # response shape changes — older clients then see a fresh recompute
 # instead of trying to deserialise an incompatible cached blob.
-_PULSE_CACHE_KEY = "torii:server_pulse:v1"
+# Bumped to v2 when the response schema gained top_maps / mode_breakdown /
+# recent_plays — older clients that pulled a v1 cache during the upgrade
+# would have deserialised the unfamiliar fields cleanly (their DTO has
+# defensive defaults), but bumping the cache key is the cleaner cut.
+_PULSE_CACHE_KEY = "torii:server_pulse:v2"
 _PULSE_CACHE_TTL_SECONDS = 10
+
+# Carousel page sizes. Picked together with the 380px popover width:
+# 5 top maps fit as a vertical list with covers (~52px each); 8 recent
+# plays fit as a denser two-line-per-row list (~38px each); breakdown
+# is just up to 4 modes (osu/taiko/catch/mania) so the cap is implicit.
+_TOP_MAPS_LIMIT = 5
+_RECENT_PLAYS_LIMIT = 8
 
 # In-flight cap. score_tokens with no score_id may legitimately stick
 # around for the duration of the longest possible map (~10 min for
@@ -167,8 +179,15 @@ async def _compute_pulse_snapshot(session, redis) -> dict[str, Any]:
     ).one()
 
     sparkline = await _compute_sparkline_buckets(session, now)
-    top_map = await _compute_top_map(session, five_min_ago)
+    top_maps = await _compute_top_maps(session, five_min_ago)
+    mode_breakdown = await _compute_mode_breakdown(session, in_flight_cutoff)
+    recent_plays = await _compute_recent_plays(session, in_flight_cutoff, now)
     online = await _count_online_users(redis)
+
+    # ``top_map`` (singular) preserved for backward compatibility with
+    # the v1 client DTO; new clients use ``top_maps`` (plural) for the
+    # Hot Maps page.
+    top_map_singular = top_maps[0] if top_maps else None
 
     return {
         "captured_at": now.isoformat(),
@@ -176,7 +195,10 @@ async def _compute_pulse_snapshot(session, redis) -> dict[str, Any]:
         "plays_last_minute": int(plays_1m or 0),
         "plays_last_5min": int(plays_5m or 0),
         "online_users": int(online or 0),
-        "top_map": top_map,
+        "top_map": top_map_singular,
+        "top_maps": top_maps,
+        "mode_breakdown": mode_breakdown,
+        "recent_plays": recent_plays,
         "sparkline": {
             "bucket_seconds": _SPARKLINE_BUCKET_SECONDS,
             "bucket_count": _SPARKLINE_BUCKETS,
@@ -232,79 +254,209 @@ async def _compute_sparkline_buckets(session, now: datetime) -> list[int]:
     return buckets
 
 
-async def _compute_top_map(session, since: datetime) -> dict[str, Any] | None:
-    """Most-played beatmap since ``since``, with full beatmapset metadata.
+async def _compute_top_maps(session, since: datetime) -> list[dict[str, Any]]:
+    """Top ``_TOP_MAPS_LIMIT`` most-played beatmaps since ``since``, with full
+    beatmapset metadata each.
 
-    Two queries:
-      1. GROUP BY beatmap_id, ORDER BY count DESC, LIMIT 1.
-      2. Fetch the matching Beatmap + Beatmapset rows for metadata.
+    Two-stage query:
+      1. GROUP BY beatmap_id, ORDER BY count DESC, LIMIT N.
+      2. Single batched fetch of the matching Beatmap + Beatmapset rows
+         (one query per table, IN-list match on the IDs from stage 1).
 
-    Returns ``None`` when no plays at all have landed in the window —
-    the client treats that as "the gates are quiet" and shows a calm
-    empty state rather than fabricating a placeholder.
+    Empty list when no plays have landed in the window — the client
+    treats it as a calm "gates are quiet" empty state rather than
+    fabricating placeholders.
     """
     play_count_label = "play_count"
-    row = (
+    rows = (
         await session.exec(
             select(Score.beatmap_id, func.count(Score.id).label(play_count_label))
             .where(Score.ended_at >= since)
             .where(col(Score.beatmap_id).is_not(None))
             .group_by(Score.beatmap_id)
             .order_by(sa_desc(play_count_label))
-            .limit(1)
+            .limit(_TOP_MAPS_LIMIT)
         )
-    ).first()
+    ).all()
 
-    if not row:
-        return None
+    if not rows:
+        return []
 
-    beatmap_id, play_count = row
-    if beatmap_id is None:
-        return None
+    beatmap_ids = [int(r[0]) for r in rows if r[0] is not None]
+    if not beatmap_ids:
+        return []
 
-    beatmap = (
-        await session.exec(select(Beatmap).where(Beatmap.id == beatmap_id))
-    ).first()
-    if beatmap is None:
-        # Beatmap row missing — possible if the beatmap was wiped after
-        # a score landed. Skip it rather than surfacing a half-shaped
-        # card the client can't render meaningfully.
-        return None
+    play_counts: dict[int, int] = {int(r[0]): int(r[1] or 0) for r in rows if r[0] is not None}
 
-    beatmapset = (
+    beatmaps_list = (
+        await session.exec(select(Beatmap).where(col(Beatmap.id).in_(beatmap_ids)))
+    ).all()
+    beatmaps_by_id = {bm.id: bm for bm in beatmaps_list}
+
+    beatmapset_ids = [bm.beatmapset_id for bm in beatmaps_list if bm.beatmapset_id is not None]
+    beatmapsets_list = (
+        await session.exec(select(Beatmapset).where(col(Beatmapset.id).in_(beatmapset_ids)))
+    ).all() if beatmapset_ids else []
+    beatmapsets_by_id = {bs.id: bs for bs in beatmapsets_list}
+
+    out: list[dict[str, Any]] = []
+    for beatmap_id in beatmap_ids:  # preserve order from rank
+        beatmap = beatmaps_by_id.get(beatmap_id)
+        if beatmap is None:
+            continue
+
+        beatmapset = beatmapsets_by_id.get(beatmap.beatmapset_id)
+        if beatmapset is None:
+            continue
+
+        covers_payload: dict[str, Any] | None = None
+        if beatmapset.covers is not None:
+            try:
+                covers_payload = beatmapset.covers.model_dump()
+            except AttributeError:
+                covers_payload = dict(beatmapset.covers) if beatmapset.covers else None
+
+        out.append({
+            "beatmap_id": int(beatmap_id),
+            "beatmapset_id": int(beatmap.beatmapset_id),
+            "title": beatmapset.title or "",
+            "title_unicode": beatmapset.title_unicode or beatmapset.title or "",
+            "artist": beatmapset.artist or "",
+            "artist_unicode": beatmapset.artist_unicode or beatmapset.artist or "",
+            "version": beatmap.version or "",
+            "creator": beatmapset.creator or "",
+            "covers": covers_payload,
+            "play_count_5min": play_counts.get(beatmap_id, 0),
+            "ruleset_id": int(getattr(beatmap, "mode", 0) or 0),
+            "star_rating": float(getattr(beatmap, "difficulty_rating", 0.0) or 0.0),
+        })
+
+    return out
+
+
+async def _compute_mode_breakdown(session, in_flight_cutoff: datetime) -> dict[str, int]:
+    """Per-ruleset count of currently in-flight plays.
+
+    Returned as a string-keyed dict (``"0"`` osu / ``"1"`` taiko / ``"2"``
+    catch / ``"3"`` mania) because JSON object keys are always strings —
+    the client casts back to int when rendering. Modes with zero in-flight
+    plays are simply absent from the dict (cleaner than an explicit zero;
+    the client treats missing as zero implicitly).
+    """
+    rows = (
         await session.exec(
-            select(Beatmapset).where(Beatmapset.id == beatmap.beatmapset_id)
+            select(ScoreToken.ruleset_id, func.count(ScoreToken.id).label("c"))
+            .where(col(ScoreToken.score_id).is_(None))
+            .where(ScoreToken.created_at >= in_flight_cutoff)
+            .group_by(ScoreToken.ruleset_id)
         )
-    ).first()
-    if beatmapset is None:
-        return None
+    ).all()
 
-    # Covers come back as a Pydantic model on the DB row; downstream
-    # JSON serialisation only handles dict-shaped values, so unpack
-    # explicitly here. Fall back to None when the column is null —
-    # the client renders a placeholder card in that case.
-    covers_payload: dict[str, Any] | None = None
-    if beatmapset.covers is not None:
+    out: dict[str, int] = {}
+    for row in rows:
+        ruleset_value, count = row
+        if ruleset_value is None:
+            continue
+        # ruleset_id is a GameMode enum on the model. Cast to its int via
+        # .value when available; else int() coerces an int directly.
         try:
-            covers_payload = beatmapset.covers.model_dump()
-        except AttributeError:
-            # Already a dict (some code paths assign raw dict)
-            covers_payload = dict(beatmapset.covers) if beatmapset.covers else None
+            mode_int = int(ruleset_value.value)  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            try:
+                mode_int = int(ruleset_value)
+            except (TypeError, ValueError):
+                continue
+        out[str(mode_int)] = int(count or 0)
 
-    return {
-        "beatmap_id": int(beatmap_id),
-        "beatmapset_id": int(beatmap.beatmapset_id),
-        "title": beatmapset.title or "",
-        "title_unicode": beatmapset.title_unicode or beatmapset.title or "",
-        "artist": beatmapset.artist or "",
-        "artist_unicode": beatmapset.artist_unicode or beatmapset.artist or "",
-        "version": beatmap.version or "",
-        "creator": beatmapset.creator or "",
-        "covers": covers_payload,
-        "play_count_5min": int(play_count or 0),
-        "ruleset_id": int(getattr(beatmap, "mode", 0) or 0),
-        "star_rating": float(getattr(beatmap, "difficulty_rating", 0.0) or 0.0),
-    }
+    return out
+
+
+async def _compute_recent_plays(session, in_flight_cutoff: datetime, now: datetime) -> list[dict[str, Any]]:
+    """Up to ``_RECENT_PLAYS_LIMIT`` most-recently-started in-flight plays
+    with player + beatmap context. Powers the carousel's "Live Plays" page.
+
+    Three batched queries (tokens / users / beatmaps + sets) rather than a
+    single SQL join because the ScoreToken relationship loaders aren't
+    always populated and we want to dodge an N+1 lazy-load anyway.
+
+    Each entry includes ``started_seconds_ago`` so the client doesn't
+    have to think about clock drift — we compute the delta against the
+    snapshot's ``now`` and ship a relative integer.
+    """
+    tokens = (
+        await session.exec(
+            select(ScoreToken)
+            .where(col(ScoreToken.score_id).is_(None))
+            .where(ScoreToken.created_at >= in_flight_cutoff)
+            .order_by(sa_desc(ScoreToken.created_at))
+            .limit(_RECENT_PLAYS_LIMIT)
+        )
+    ).all()
+
+    if not tokens:
+        return []
+
+    user_ids = list({t.user_id for t in tokens if t.user_id is not None})
+    beatmap_ids = list({t.beatmap_id for t in tokens if t.beatmap_id is not None})
+
+    users_list = (
+        await session.exec(select(User).where(col(User.id).in_(user_ids)))
+    ).all() if user_ids else []
+    users_by_id = {u.id: u for u in users_list}
+
+    beatmaps_list = (
+        await session.exec(select(Beatmap).where(col(Beatmap.id).in_(beatmap_ids)))
+    ).all() if beatmap_ids else []
+    beatmaps_by_id = {bm.id: bm for bm in beatmaps_list}
+
+    beatmapset_ids = list({bm.beatmapset_id for bm in beatmaps_list if bm.beatmapset_id is not None})
+    beatmapsets_list = (
+        await session.exec(select(Beatmapset).where(col(Beatmapset.id).in_(beatmapset_ids)))
+    ).all() if beatmapset_ids else []
+    beatmapsets_by_id = {bs.id: bs for bs in beatmapsets_list}
+
+    out: list[dict[str, Any]] = []
+    for token in tokens:
+        user = users_by_id.get(token.user_id) if token.user_id is not None else None
+        beatmap = beatmaps_by_id.get(token.beatmap_id) if token.beatmap_id is not None else None
+        beatmapset = beatmapsets_by_id.get(beatmap.beatmapset_id) if beatmap is not None else None
+
+        # Be tolerant of missing relations — surface what we know and
+        # let the client render a partial card. A play with a deleted
+        # user account or a beatmap that vanished mid-play is rare but
+        # not impossible; better than dropping the row from the feed.
+        token_created_at = token.created_at
+        if token_created_at is not None and token_created_at.tzinfo is None:
+            token_created_at = token_created_at.replace(tzinfo=timezone.utc)
+
+        started_seconds_ago = 0
+        if token_created_at is not None:
+            started_seconds_ago = max(0, int((now - token_created_at).total_seconds()))
+
+        ruleset_int = 0
+        try:
+            ruleset_int = int(token.ruleset_id.value)  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            try:
+                ruleset_int = int(token.ruleset_id) if token.ruleset_id is not None else 0
+            except (TypeError, ValueError):
+                ruleset_int = 0
+
+        out.append({
+            "user_id": int(token.user_id or 0),
+            "username": user.username if user is not None else "",
+            "avatar_url": getattr(user, "avatar_url", "") if user is not None else "",
+            "beatmap_id": int(token.beatmap_id or 0),
+            "beatmapset_id": int(beatmap.beatmapset_id) if beatmap is not None else 0,
+            "title": beatmapset.title if beatmapset is not None else "",
+            "title_unicode": (beatmapset.title_unicode or beatmapset.title) if beatmapset is not None else "",
+            "artist": beatmapset.artist if beatmapset is not None else "",
+            "version": beatmap.version if beatmap is not None else "",
+            "ruleset_id": ruleset_int,
+            "started_seconds_ago": started_seconds_ago,
+        })
+
+    return out
 
 
 # --- Online presence ----------------------------------------------------------
