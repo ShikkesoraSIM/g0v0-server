@@ -79,7 +79,12 @@ from .router import router
 # recent_plays — older clients that pulled a v1 cache during the upgrade
 # would have deserialised the unfamiliar fields cleanly (their DTO has
 # defensive defaults), but bumping the cache key is the cleaner cut.
-_PULSE_CACHE_KEY = "torii:server_pulse:v2"
+# v3: in-flight semantics changed from "raw token count" to
+# "distinct-user count" (after dedup), and the cutoff tightened from
+# 10 → 5 minutes. Bumping the key invalidates v2 blobs so older
+# clients hitting a v2 cache during the rollout don't get the old,
+# now-misleading numbers.
+_PULSE_CACHE_KEY = "torii:server_pulse:v3"
 _PULSE_CACHE_TTL_SECONDS = 10
 
 # Carousel page sizes. Picked together with the 380px popover width:
@@ -90,11 +95,18 @@ _TOP_MAPS_LIMIT = 5
 _RECENT_PLAYS_LIMIT = 8
 
 # In-flight cap. score_tokens with no score_id may legitimately stick
-# around for the duration of the longest possible map (~10 min for
-# extreme marathons). Beyond that it's almost certainly a crashed /
-# disconnected client whose token will never be reconciled, and
-# counting it inflates "currently playing" indefinitely.
-_IN_FLIGHT_MAX_AGE_MIN = 10
+# around for the duration of the longest possible map. Most maps are
+# 1.5–4 min, with extreme marathons rarely above ~7 min — anything
+# older is almost certainly a crashed / disconnected / page-closed
+# client whose token will never be reconciled, and counting it
+# inflates "currently playing" indefinitely.
+#
+# Tightened from 10 → 5 min after upstream feedback that the snapshot
+# was reporting ~12 in-flight when only ~3 distinct users were really
+# playing — a couple of retries per user and a few stale tokens from
+# earlier in the day were both in the count. 5 min is short enough to
+# discard those, long enough to comfortably cover any normal play.
+_IN_FLIGHT_MAX_AGE_MIN = 5
 
 # Sparkline shape. 12 minute-buckets balances "enough history to see a
 # trend" against "fits in a small popover" against "small enough query
@@ -147,20 +159,46 @@ async def get_server_pulse(session: Database) -> dict[str, Any]:
 
 
 async def _compute_pulse_snapshot(session, redis) -> dict[str, Any]:
-    """Pull the live numbers from DB + Redis. ~5 lightweight queries."""
+    """Pull the live numbers from DB + Redis.
+
+    Single shared in-flight token fetch
+    -----------------------------------
+    `currently_playing`, `mode_breakdown`, and `recent_plays` are all
+    derived from the same set of in-flight score tokens — and they
+    all need the SAME deduplication rule (one row per user, keeping
+    the most recent token) so the three numbers tell a consistent
+    story. Doing it once here and threading the deduped list through
+    each helper avoids the alternative of three separate dedup passes
+    that could drift apart.
+    """
     now = datetime.now(timezone.utc)
     one_min_ago = now - timedelta(minutes=1)
     five_min_ago = now - timedelta(minutes=5)
     in_flight_cutoff = now - timedelta(minutes=_IN_FLIGHT_MAX_AGE_MIN)
 
-    in_flight = (
+    # Pull all in-flight tokens within the cutoff in one query, ordered
+    # newest first so dedup picks up the latest token per user.
+    in_flight_tokens = (
         await session.exec(
-            select(func.count())
-            .select_from(ScoreToken)
+            select(ScoreToken)
             .where(col(ScoreToken.score_id).is_(None))
             .where(ScoreToken.created_at >= in_flight_cutoff)
+            .order_by(sa_desc(ScoreToken.created_at))
         )
-    ).one()
+    ).all()
+
+    # Dedup by user_id keeping the most-recent token (the iteration
+    # is in created_at desc order, so the first time we see a user_id
+    # is the one we keep). Skips tokens with null user_id defensively.
+    seen_users: set[int] = set()
+    deduped_tokens: list[ScoreToken] = []
+    for tok in in_flight_tokens:
+        if tok.user_id is None:
+            continue
+        if tok.user_id in seen_users:
+            continue
+        seen_users.add(tok.user_id)
+        deduped_tokens.append(tok)
 
     plays_1m = (
         await session.exec(
@@ -180,8 +218,8 @@ async def _compute_pulse_snapshot(session, redis) -> dict[str, Any]:
 
     sparkline = await _compute_sparkline_buckets(session, now)
     top_maps = await _compute_top_maps(session, five_min_ago)
-    mode_breakdown = await _compute_mode_breakdown(session, in_flight_cutoff)
-    recent_plays = await _compute_recent_plays(session, in_flight_cutoff, now)
+    mode_breakdown = _compute_mode_breakdown_from_tokens(deduped_tokens)
+    recent_plays = await _compute_recent_plays_from_tokens(session, deduped_tokens, now)
     online = await _count_online_users(redis)
 
     # ``top_map`` (singular) preserved for backward compatibility with
@@ -191,7 +229,12 @@ async def _compute_pulse_snapshot(session, redis) -> dict[str, Any]:
 
     return {
         "captured_at": now.isoformat(),
-        "currently_playing": int(in_flight or 0),
+        # Distinct-user count, not raw token count. This matches what
+        # users intuit by "currently playing" — one human is one play
+        # in progress, regardless of how many retry-tokens they've
+        # opened. See _IN_FLIGHT_MAX_AGE_MIN cutoff for the upper
+        # bound on staleness.
+        "currently_playing": len(deduped_tokens),
         "plays_last_minute": int(plays_1m or 0),
         "plays_last_5min": int(plays_5m or 0),
         "online_users": int(online or 0),
@@ -334,27 +377,18 @@ async def _compute_top_maps(session, since: datetime) -> list[dict[str, Any]]:
     return out
 
 
-async def _compute_mode_breakdown(session, in_flight_cutoff: datetime) -> dict[str, int]:
-    """Per-ruleset count of currently in-flight plays.
+def _compute_mode_breakdown_from_tokens(deduped_tokens: list[ScoreToken]) -> dict[str, int]:
+    """Per-ruleset count of currently-playing distinct users, derived from
+    the already-deduped (one-token-per-user) list.
 
     Returned as a string-keyed dict (``"0"`` osu / ``"1"`` taiko / ``"2"``
     catch / ``"3"`` mania) because JSON object keys are always strings —
-    the client casts back to int when rendering. Modes with zero in-flight
-    plays are simply absent from the dict (cleaner than an explicit zero;
-    the client treats missing as zero implicitly).
+    the client casts back to int when rendering. Modes with zero are
+    absent from the dict; the client treats missing as zero.
     """
-    rows = (
-        await session.exec(
-            select(ScoreToken.ruleset_id, func.count(ScoreToken.id).label("c"))
-            .where(col(ScoreToken.score_id).is_(None))
-            .where(ScoreToken.created_at >= in_flight_cutoff)
-            .group_by(ScoreToken.ruleset_id)
-        )
-    ).all()
-
     out: dict[str, int] = {}
-    for row in rows:
-        ruleset_value, count = row
+    for tok in deduped_tokens:
+        ruleset_value = tok.ruleset_id
         if ruleset_value is None:
             continue
         # ruleset_id is a GameMode enum on the model. Cast to its int via
@@ -366,32 +400,28 @@ async def _compute_mode_breakdown(session, in_flight_cutoff: datetime) -> dict[s
                 mode_int = int(ruleset_value)
             except (TypeError, ValueError):
                 continue
-        out[str(mode_int)] = int(count or 0)
-
+        key = str(mode_int)
+        out[key] = out.get(key, 0) + 1
     return out
 
 
-async def _compute_recent_plays(session, in_flight_cutoff: datetime, now: datetime) -> list[dict[str, Any]]:
+async def _compute_recent_plays_from_tokens(
+    session,
+    deduped_tokens: list[ScoreToken],
+    now: datetime,
+) -> list[dict[str, Any]]:
     """Up to ``_RECENT_PLAYS_LIMIT`` most-recently-started in-flight plays
     with player + beatmap context. Powers the carousel's "Live Plays" page.
 
-    Three batched queries (tokens / users / beatmaps + sets) rather than a
-    single SQL join because the ScoreToken relationship loaders aren't
-    always populated and we want to dodge an N+1 lazy-load anyway.
+    Receives the already-deduped (one-token-per-user, newest first) token
+    list and slices to the carousel limit, then batches user / beatmap /
+    beatmapset lookups in three queries.
 
     Each entry includes ``started_seconds_ago`` so the client doesn't
     have to think about clock drift — we compute the delta against the
     snapshot's ``now`` and ship a relative integer.
     """
-    tokens = (
-        await session.exec(
-            select(ScoreToken)
-            .where(col(ScoreToken.score_id).is_(None))
-            .where(ScoreToken.created_at >= in_flight_cutoff)
-            .order_by(sa_desc(ScoreToken.created_at))
-            .limit(_RECENT_PLAYS_LIMIT)
-        )
-    ).all()
+    tokens = deduped_tokens[:_RECENT_PLAYS_LIMIT]
 
     if not tokens:
         return []
