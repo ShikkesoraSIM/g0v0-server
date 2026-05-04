@@ -1060,6 +1060,16 @@ async def get_user_best_pp(
 # https://github.com/ppy/osu-queue-score-statistics/blob/master/osu.Server.Queues.ScoreStatisticsProcessor/Helpers/PlayValidityHelper.cs
 def get_play_length(score: "Score", beatmap_length: int):
     speed_rate = get_speed_rate(score.mods)
+    # Guard: a maliciously-crafted (or just buggy) DT/HT/custom-rate
+    # mod payload can land here with speed_change == 0, producing a
+    # ZeroDivisionError that aborts the entire process_score path
+    # mid-flight. The downstream effect is the spectator never gets
+    # a Redis publish for the score, the rank/PP popup never fires
+    # client-side, and the user thinks their play vanished. Clamp
+    # to a tiny positive rate so the math still works; the play is
+    # almost certainly going to fail the >8s validity check anyway.
+    if speed_rate <= 0:
+        speed_rate = 0.01
     length = beatmap_length / speed_rate
     return int(min(length, (score.ended_at - score.started_at).total_seconds()))
 
