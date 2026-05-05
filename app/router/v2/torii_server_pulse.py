@@ -79,25 +79,31 @@ from .router import router
 # recent_plays — older clients that pulled a v1 cache during the upgrade
 # would have deserialised the unfamiliar fields cleanly (their DTO has
 # defensive defaults), but bumping the cache key is the cleaner cut.
-# v4: recent_plays now includes recently-submitted scores too (with
-# pp / accuracy / rank metadata), so the Live Plays feed stays
-# populated even on quiet servers. Mixed feed sorted by event time
-# desc, deduped by user_id (most-recent event wins).
-_PULSE_CACHE_KEY = "torii:server_pulse:v4"
+# v5: recent_plays dedup widened from user_id to (user_id, beatmap_id)
+# so a user with multiple distinct maps shows multiple rows, while
+# retry-spam on the same map still collapses. Carousel limit bumped
+# to 12 + submitted-visibility window to 60 min for richer Live Plays
+# feed on quiet servers.
+_PULSE_CACHE_KEY = "torii:server_pulse:v5"
 _PULSE_CACHE_TTL_SECONDS = 10
 
 # Carousel page sizes. Picked together with the 380px popover width:
-# 5 top maps fit as a vertical list with covers (~52px each); 8 recent
+# 5 top maps fit as a vertical list with covers (~52px each); 12 recent
 # plays fit as a denser two-line-per-row list (~38px each); breakdown
 # is just up to 4 modes (osu/taiko/catch/mania) so the cap is implicit.
 _TOP_MAPS_LIMIT = 5
-_RECENT_PLAYS_LIMIT = 8
+_RECENT_PLAYS_LIMIT = 12  # bumped 8→12 — quieter servers were going empty too fast
 
 # How long a SUBMITTED score stays in the recent_plays feed after it
 # ends. Bigger than the in-flight cutoff (5 min) so that on quiet
 # servers the live feed doesn't go empty seconds after the last play
 # completes — there's still recent context to look at.
-_SUBMITTED_VISIBILITY_MIN = 15
+#
+# Bumped 15→60 min after upstream feedback that the page felt empty
+# too soon on a quiet day. An hour is enough that even on a sleepy
+# weekend morning a casual checker sees real activity without us
+# bloating the snapshot with stale week-old plays.
+_SUBMITTED_VISIBILITY_MIN = 60
 
 # In-flight cap. score_tokens with no score_id may legitimately stick
 # around for the duration of the longest possible map. Most maps are
@@ -430,13 +436,19 @@ async def _compute_mixed_recent_plays(
 
     Dedup rule
     ----------
-    Per user, keep the most-recent EVENT (whether that's an in-flight
-    token or a submitted score). Two reasons:
-      1. A user who's started a new attempt is the active context —
-         their old finished score from 8 minutes ago shouldn't crowd
-         out the "they're playing right now" event.
-      2. Avoids the previous "lovinflowin appears 4 times in a row
-         from retry-spam tokens" failure mode.
+    Keyed by ``(user_id, beatmap_id)`` — the most-recent event per
+    user-and-map pair wins. So a user who played three different maps
+    in the last hour shows up three times (one row per map), but a
+    user who retried the SAME map four times only contributes one
+    row (the latest attempt). Two reasons:
+      1. A richer feed on quiet servers — same-user-different-map
+         legitimately is "more activity to look at".
+      2. Same retry-spam suppression as before: lovinflowin's four
+         OCTOBER STARLIGHT tokens collapse to one row.
+
+    In-flight token vs submitted score for the same (user, map):
+    in-flight wins — playing now is the more current context than
+    a finished score from 12 minutes ago.
 
     Output schema
     -------------
@@ -462,44 +474,47 @@ async def _compute_mixed_recent_plays(
         )
     ).all()
 
-    # Build a unified event list: (user_id, sort_time, kind, payload)
-    # kind = "token" or "score". sort_time is the more-recent of
-    # ScoreToken.created_at / Score.ended_at — that's what determines
-    # which event wins in the per-user dedup.
-    events: list[tuple[int, datetime, str, Any]] = []
+    # Build a (user_id, beatmap_id) → event dict, keeping the most
+    # recent event per pair. Process newest events first (in-flight
+    # tokens before submitted scores at the same pair) so the in-flight
+    # status wins when both apply.
+    #
+    # Each entry: (user_id, sort_time, kind, payload). kind = "token"
+    # or "score". sort_time is the more-recent of ScoreToken.created_at
+    # / Score.ended_at.
+    events_by_pair: dict[tuple[int, int], tuple[int, datetime, str, Any]] = {}
 
-    for token in deduped_tokens:  # already user-deduped, newest first
-        if token.user_id is None or token.created_at is None:
+    def _record_event(user_id: int, beatmap_id: int, ts: datetime, kind: str, payload: Any) -> None:
+        key = (user_id, beatmap_id)
+        existing = events_by_pair.get(key)
+        if existing is None or ts > existing[1]:
+            events_by_pair[key] = (user_id, ts, kind, payload)
+
+    for token in deduped_tokens:
+        if token.user_id is None or token.beatmap_id is None or token.created_at is None:
             continue
         ts = token.created_at
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        events.append((int(token.user_id), ts, "token", token))
+        _record_event(int(token.user_id), int(token.beatmap_id), ts, "token", token)
 
     for score in submitted_scores:
-        if score.user_id is None or score.ended_at is None:
+        if score.user_id is None or score.beatmap_id is None or score.ended_at is None:
             continue
         ts = score.ended_at
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        events.append((int(score.user_id), ts, "score", score))
+        _record_event(int(score.user_id), int(score.beatmap_id), ts, "score", score)
 
-    if not events:
+    if not events_by_pair:
         return []
 
-    # Newest first, then dedup by user_id.
-    events.sort(key=lambda e: e[1], reverse=True)
-
-    seen_users: set[int] = set()
-    deduped_events: list[tuple[int, datetime, str, Any]] = []
-    for ev in events:
-        if ev[0] in seen_users:
-            continue
-        seen_users.add(ev[0])
-        deduped_events.append(ev)
-
-    # Take the carousel limit
-    deduped_events = deduped_events[:_RECENT_PLAYS_LIMIT]
+    # Sort by event time desc and take the carousel limit.
+    deduped_events = sorted(
+        events_by_pair.values(),
+        key=lambda e: e[1],
+        reverse=True,
+    )[:_RECENT_PLAYS_LIMIT]
 
     # Batch-fetch users + beatmaps + beatmapsets for all referenced IDs.
     user_ids = list({e[0] for e in deduped_events})
