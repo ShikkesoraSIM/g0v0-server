@@ -427,18 +427,30 @@ async def submit_score(
                 # subscriber publishes that raise after the row had
                 # already been queued for insert but before the commit
                 # landed, ...) and the next leaderboard fetch from the
-                # client returns an empty "Overall Ranking" panel.
+                # client returned an empty "Overall Ranking" panel.
                 #
-                # We refuse to ship that experience anymore. If the row
-                # is missing AFTER _process_user returned (whether it
-                # raised OR claimed success), we explicitly re-run the
-                # processing inline once. If it still fails, we schedule
-                # a background retry so the row eventually lands without
-                # delaying the client response further.
+                # The verify is a sanity check — if it misses, we schedule
+                # a background retry. We DO NOT re-run _process_user inline
+                # here: the previous version did and it was doubling the
+                # response latency for every single submission (the verify
+                # query referenced a non-existent column, AttributeError
+                # was swallowed into "row missing", retry path triggered
+                # unconditionally, scoring screen "Overall Ranking" hung
+                # while we ran process_user a second time). Background
+                # task is the right safety net — it doesn't block the
+                # client's score-result UI.
+                #
+                # Subtlety: _process_user runs in a DEDICATED session and
+                # commits there. The outer `db` session has a stale MVCC
+                # snapshot under MySQL REPEATABLE READ — a fresh SELECT
+                # won't see the row even though it's committed. We commit
+                # `db` first to refresh the snapshot, then verify.
+                await db.commit()
+
                 try:
                     leaderboard_row = (
                         await db.exec(
-                            select(TotalScoreBestScore.id).where(
+                            select(TotalScoreBestScore.score_id).where(
                                 TotalScoreBestScore.score_id == score_id,
                             )
                         )
@@ -451,53 +463,38 @@ async def submit_score(
                         verify_err,
                     )
 
-                if leaderboard_row is None:
-                    logger.warning(
-                        "[submit_score] leaderboard row missing after _process_user "
-                        "(succeeded={}) score_id={} user_id={} — retrying inline",
-                        _process_user_succeeded,
+                if not _process_user_succeeded:
+                    # The inline call raised — schedule a background pass
+                    # so the score eventually finishes processing without
+                    # delaying the response.
+                    logger.info(
+                        "[submit_score] _process_user did not succeed for score_id={} "
+                        "— scheduling background retry",
                         score_id,
-                        user_id,
                     )
-                    try:
-                        await _process_user(score_id, user_id, redis, fetcher)
-                        # Re-check; if it landed, great. If not, fall through
-                        # to the background-task safety net.
-                        retry_row = (
-                            await db.exec(
-                                select(TotalScoreBestScore.id).where(
-                                    TotalScoreBestScore.score_id == score_id,
-                                )
-                            )
-                        ).first()
-                        if retry_row is None:
-                            logger.error(
-                                "[submit_score] inline retry STILL no leaderboard row "
-                                "score_id={} user_id={} — scheduling background retry",
-                                score_id,
-                                user_id,
-                            )
-                            background_task.add_task(
-                                _process_user_background, score_id, user_id, redis, fetcher
-                            )
-                        else:
-                            logger.info(
-                                "[submit_score] inline retry recovered leaderboard row "
-                                "score_id={} user_id={}",
-                                score_id,
-                                user_id,
-                            )
-                    except Exception as retry_err:
-                        logger.error(
-                            "[submit_score] inline retry crashed score_id={} user_id={} err={} — "
-                            "scheduling background retry",
-                            score_id,
-                            user_id,
-                            retry_err,
-                        )
-                        background_task.add_task(
-                            _process_user_background, score_id, user_id, redis, fetcher
-                        )
+                    background_task.add_task(
+                        _process_user_background, score_id, user_id, redis, fetcher
+                    )
+                elif leaderboard_row is None:
+                    # process_user claimed success and committed, but the
+                    # row isn't visible. Either MVCC is still holding a
+                    # stale snapshot (rare after the commit above, but
+                    # possible across replication boundaries) or the row
+                    # legitimately wasn't written (e.g. the score didn't
+                    # improve the user's previous best on this beatmap,
+                    # so no TotalScoreBestScore was created for this
+                    # score_id). The latter is normal — DON'T block on
+                    # a retry. Schedule a background pass as a cheap
+                    # safety net for the rare bug case.
+                    logger.info(
+                        "[submit_score] no leaderboard row for score_id={} after "
+                        "successful _process_user — likely a non-improving score; "
+                        "scheduling background pass as safety net",
+                        score_id,
+                    )
+                    background_task.add_task(
+                        _process_user_background, score_id, user_id, redis, fetcher
+                    )
             else:
                 logger.info(
                     "[submit_score] scheduling background _process_user for failed score_id={} user_id={}",
