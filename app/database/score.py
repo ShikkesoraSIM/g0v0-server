@@ -162,6 +162,12 @@ class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
     max_combo: int
     passed: bool = Field(sa_column=Column(Boolean))
     pp: float = Field(default=0.0)
+    # Snapshot of how this score moved the user's UserStatistics.pp at
+    # submission time (pp_after - pp_before, clamped to >= 0). Read at
+    # O(1) by the server-pulse endpoint instead of recomputing the
+    # weighted contribution on every poll. Captured in
+    # _process_statistics right after calculate_user_pp runs.
+    account_pp_delta: float = Field(default=0.0)
     started_at: datetime = Field(sa_column=Column(DateTime))
     total_score: int = Field(default=0, sa_column=Column(BigInteger))
     maximum_statistics: ScoreStatistics = Field(sa_column=Column(JSON), default_factory=dict)
@@ -1672,7 +1678,14 @@ async def _process_statistics(
         statistics.count_100 += nlarge_tick_hit
 
     if score.passed and has_pp:
+        # Snapshot the user's pre-submission account pp so we can store
+        # the delta this score introduced. Negative deltas (which can
+        # only happen if calculate_user_pp shifts due to a concurrent
+        # mutation, never from this score being added) are clamped to 0
+        # so the column remains a "gain" semantically.
+        pp_before = float(statistics.pp or 0.0)
         statistics.pp, statistics.hit_accuracy = await calculate_user_pp(session, statistics.user_id, score.gamemode)
+        score.account_pp_delta = max(0.0, float(statistics.pp) - pp_before)
 
     if add_to_db:
         session.add(mouthly_playcount)

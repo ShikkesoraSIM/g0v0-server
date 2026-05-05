@@ -84,7 +84,7 @@ from .router import router
 # retry-spam on the same map still collapses. Carousel limit bumped
 # to 12 + submitted-visibility window to 60 min for richer Live Plays
 # feed on quiet servers.
-_PULSE_CACHE_KEY = "torii:server_pulse:v5"
+_PULSE_CACHE_KEY = "torii:server_pulse:v6"
 _PULSE_CACHE_TTL_SECONDS = 10
 
 # Carousel page sizes. Picked together with the 380px popover width:
@@ -575,6 +575,11 @@ async def _compute_mixed_recent_plays(
             entry["submitted_seconds_ago"] = max(0, int((now - ts).total_seconds()))
             entry["score_id"] = int(getattr(payload, "id", 0) or 0)
             entry["pp"] = float(getattr(payload, "pp", 0.0) or 0.0)
+            # Account-level pp delta this score earned the user (vs the
+            # weighted top-100 they had before submission). Captured at
+            # submission time on the Score row, defaults to 0.0 for
+            # legacy rows submitted before the column existed.
+            entry["account_pp_delta"] = float(getattr(payload, "account_pp_delta", 0.0) or 0.0)
             entry["accuracy"] = float(getattr(payload, "accuracy", 0.0) or 0.0)
             entry["max_combo"] = int(getattr(payload, "max_combo", 0) or 0)
 
