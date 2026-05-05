@@ -505,7 +505,14 @@ async def submit_score(
 
     # _process_user runs in a dedicated session.
     # Commit before re-reading to avoid stale snapshots (e.g. MySQL REPEATABLE READ).
-    response_score_id = score.id
+    # Use the cached score_id local instead of `score.id`: the verify-leaderboard
+    # block above issues its own db.commit() to refresh the MVCC snapshot, and
+    # the default expire_on_commit=True on this session expires every loaded
+    # attribute on managed entities. Reading `score.id` here would then trigger
+    # a sync lazy-load — which crashes with `greenlet_spawn has not been called`
+    # in this async context and bubbles up as a 500. score_id was captured
+    # earlier as a plain int, so it sidesteps the expired state entirely.
+    response_score_id = score_id
     t_commit2 = time.time()
     await db.commit()
     logger.info(
