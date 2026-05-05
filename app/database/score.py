@@ -1685,7 +1685,15 @@ async def _process_statistics(
         # so the column remains a "gain" semantically.
         pp_before = float(statistics.pp or 0.0)
         statistics.pp, statistics.hit_accuracy = await calculate_user_pp(session, statistics.user_id, score.gamemode)
-        score.account_pp_delta = max(0.0, float(statistics.pp) - pp_before)
+        # The submission pipeline can re-run _process_statistics for the
+        # same score (verify-leaderboard inline retry, background retry).
+        # On those reruns pp_before is already the post-first-run value,
+        # so the recomputed delta is 0 and would clobber the real gain
+        # we captured the first time. Take max(existing, new) so the
+        # column is monotone — once we've seen the genuine account
+        # impact, subsequent idempotent reruns can't unset it.
+        new_delta = max(0.0, float(statistics.pp) - pp_before)
+        score.account_pp_delta = max(float(score.account_pp_delta or 0.0), new_delta)
 
     if add_to_db:
         session.add(mouthly_playcount)
