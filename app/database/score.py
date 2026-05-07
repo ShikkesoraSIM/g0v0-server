@@ -1417,6 +1417,11 @@ async def _process_score_events(score: "Score", session: AsyncSession):
                     f"{score.beatmap.beatmapset.artist} - {score.beatmap.beatmapset.title} [{score.beatmap.version}]"
                 ),
                 "url": beatmap_url,
+                # Surface explicit-content flag so the lazer client's
+                # DrawableRecentActivity row can replace the link with the
+                # "Explicit content hidden" placeholder when the user has
+                # the explicit-content preference disabled.
+                "nsfw": bool(getattr(score.beatmap.beatmapset, "nsfw", False)),
             },
             "user": {
                 "username": score.user.username,
@@ -1459,6 +1464,11 @@ async def _process_score_events(score: "Score", session: AsyncSession):
                         f"[{score.beatmap.version}]"
                     ),
                     "url": beatmap_url,
+                    # Same purpose as the rank-event branch above. The
+                    # displaced user sees the activity row, and we still
+                    # need to redact the title for them when their own
+                    # explicit-content preference is off.
+                    "nsfw": bool(getattr(score.beatmap.beatmapset, "nsfw", False)),
                 },
                 "user": {
                     "username": username,

@@ -91,11 +91,26 @@ async def process_beatmap_playcount(session: AsyncSession, user_id: int, beatmap
                 user_id=user_id,
             )
             await existing_playcount.awaitable_attrs.beatmap
+            # Beatmapset isn't preloaded by the playcount path above.
+            # Walk the relationship lazily — same pattern the rank-event
+            # branch uses. Worst case is a single extra row read; we
+            # already gated this whole block on the per-100 milestone so
+            # it doesn't hot-loop.
+            await existing_playcount.beatmap.awaitable_attrs.beatmapset
             playcount_event.event_payload = {
                 "count": existing_playcount.playcount,
                 "beatmap": {
                     "title": existing_playcount.beatmap.version,
                     "url": existing_playcount.beatmap.url.replace("https://osu.ppy.sh/", settings.web_url),
+                    # The "title" above is just the difficulty name and
+                    # not strictly NSFW on its own — but clicking through
+                    # the rendered link would pop the BeatmapSetOverlay
+                    # which renders the full explicit cover + title, so
+                    # we still gate the row when the user has the
+                    # explicit-content preference disabled.
+                    "nsfw": bool(
+                        getattr(getattr(existing_playcount.beatmap, "beatmapset", None), "nsfw", False)
+                    ),
                 },
             }
             session.add(playcount_event)
