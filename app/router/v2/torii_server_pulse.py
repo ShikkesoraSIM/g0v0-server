@@ -373,11 +373,6 @@ async def _compute_top_maps(session, since: datetime) -> list[dict[str, Any]]:
         out.append({
             "beatmap_id": int(beatmap_id),
             "beatmapset_id": int(beatmap.beatmapset_id),
-            # Surface explicit-content state to the client so the pulse
-            # popover can redact title / artist / cover for users with the
-            # explicit-content preference disabled. Mirrors the same field
-            # already exposed on every other beatmapset DTO.
-            "nsfw": bool(getattr(beatmapset, "nsfw", False)),
             "title": beatmapset.title or "",
             "title_unicode": beatmapset.title_unicode or beatmapset.title or "",
             "artist": beatmapset.artist or "",
@@ -562,11 +557,6 @@ async def _compute_mixed_recent_plays(
             "avatar_url": getattr(user, "avatar_url", "") if user is not None else "",
             "beatmap_id": int(beatmap_id or 0),
             "beatmapset_id": int(beatmap.beatmapset_id) if beatmap is not None else 0,
-            # Same purpose as on top_maps[]: lets the lazer client redact
-            # the row's title for users with the explicit-content
-            # preference disabled. Defaults to false when we don't have
-            # the beatmapset row (offline-only beatmap, etc.).
-            "nsfw": bool(getattr(beatmapset, "nsfw", False)) if beatmapset is not None else False,
             "title": beatmapset.title if beatmapset is not None else "",
             "title_unicode": (beatmapset.title_unicode or beatmapset.title) if beatmapset is not None else "",
             "artist": beatmapset.artist if beatmapset is not None else "",
