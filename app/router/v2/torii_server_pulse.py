@@ -63,7 +63,7 @@ from app.database.beatmap import Beatmap
 from app.database.beatmapset import Beatmapset
 from app.database.score import Score
 from app.database.score_token import ScoreToken
-from app.database.user import User
+from app.database.user import User, UserModel
 from app.dependencies.database import Database, get_redis
 
 from .router import router
@@ -84,7 +84,10 @@ from .router import router
 # retry-spam on the same map still collapses. Carousel limit bumped
 # to 12 + submitted-visibility window to 60 min for richer Live Plays
 # feed on quiet servers.
-_PULSE_CACHE_KEY = "torii:server_pulse:v6"
+# v7: avatar URLs in recent_plays now masked to UserModel.DEFAULT_AVATAR_URL
+# when the user has avatar_nsfw=true. Cache key bump invalidates any
+# v6 snapshot that was already serialized with raw NSFW avatar URLs.
+_PULSE_CACHE_KEY = "torii:server_pulse:v7"
 _PULSE_CACHE_TTL_SECONDS = 10
 
 # Carousel page sizes. Picked together with the 380px popover width:
@@ -550,11 +553,23 @@ async def _compute_mixed_recent_plays(
 
         ruleset_int = _ruleset_to_int(getattr(payload, "ruleset_id", None) if kind == "token" else getattr(payload, "gamemode", None))
 
+        # NSFW avatar gate (option A — always mask if uploader flagged
+        # their avatar as NSFW). The pulse endpoint is unauthenticated
+        # and serves a Redis-cached snapshot shared across all viewers,
+        # so we can't read a per-viewer preference here. We conservatively
+        # substitute the default avatar URL when avatar_nsfw is true. The
+        # username stays visible — it's not the photo, the photo is what
+        # the uploader chose to flag.
+        if user is not None and getattr(user, "avatar_nsfw", False):
+            avatar_url_resolved = UserModel.DEFAULT_AVATAR_URL
+        else:
+            avatar_url_resolved = getattr(user, "avatar_url", "") if user is not None else ""
+
         # Common skeleton; status-specific fields filled below.
         entry: dict[str, Any] = {
             "user_id": int(user_id),
             "username": user.username if user is not None else "",
-            "avatar_url": getattr(user, "avatar_url", "") if user is not None else "",
+            "avatar_url": avatar_url_resolved,
             "beatmap_id": int(beatmap_id or 0),
             "beatmapset_id": int(beatmap.beatmapset_id) if beatmap is not None else 0,
             "title": beatmapset.title if beatmapset is not None else "",

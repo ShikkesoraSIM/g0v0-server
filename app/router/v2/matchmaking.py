@@ -104,21 +104,32 @@ async def _hydrate_users_minimal(session: Database, user_ids: set[int]) -> dict[
     Kept minimal because matchmaking leaderboards are paginated to ~50
     rows per request and we don't want to drag the full user-profile
     transformer pipeline (which loads stats, badges, rank history, …).
+
+    NSFW avatar gating: option A — always mask the avatar URL when the
+    user has avatar_nsfw=true. Matchmaking leaderboards are surfaced on
+    public-ish endpoints (pool ranking pages, etc.) without a tied
+    viewer preference here, so we conservatively substitute the default
+    avatar URL when the uploader has flagged it. Username + ELO etc.
+    stay visible — only the photo URL is what the uploader chose to mark.
     """
     if not user_ids:
         return {}
     rows = (
         await session.exec(
-            select(User.id, User.username, User.avatar_url).where(col(User.id).in_(user_ids))
+            select(User.id, User.username, User.avatar_url, User.avatar_nsfw).where(col(User.id).in_(user_ids))
         )
     ).all()
     return {
         uid: {
             "id": uid,
             "username": uname or "",
-            "avatar_url": avatar_url or UserModel.DEFAULT_AVATAR_URL,
+            "avatar_url": (
+                UserModel.DEFAULT_AVATAR_URL
+                if avatar_nsfw
+                else (avatar_url or UserModel.DEFAULT_AVATAR_URL)
+            ),
         }
-        for uid, uname, avatar_url in rows
+        for uid, uname, avatar_url, avatar_nsfw in rows
     }
 
 
