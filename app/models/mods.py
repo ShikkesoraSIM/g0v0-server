@@ -166,9 +166,15 @@ DEFAULT_RANKED_MODS = {
         # Pitch Adjust — Torii fun mod that shifts the song's pitch up/down
         # while preserving playback speed (Frequency=N + Tempo=1/N). Pitch
         # shift in isolation doesn't change hit-object timing or judgement
-        # windows, so any value within the client-side [0.5, 2.0] clamp is
-        # equally fair — we don't lock `pitch_shift` to a specific value.
-        "PA": {"pitch_shift": {"check": False, "type": "number"}},
+        # windows, so any value within the client-side clamp is equally
+        # fair — we don't lock `pitch_shift` to a specific value.
+        # `extended_limits` widens the clamp from [0.5, 2.0] to [0.1, 3.0]
+        # for novelty / hush-hush territory; outside the safe band BASS_FX
+        # produces heavy artifacts but it's still ranked because the
+        # mechanics of the play don't change. Both values are accepted
+        # without further constraint (check=False) so the ranked-mods
+        # validator's extra="forbid" stays satisfied.
+        "PA": {"pitch_shift": {"check": False, "type": "number"}, "extended_limits": {"check": False, "type": "boolean"}},
         "TD": {},
         "BL": {},   # Blinds
         "NS": {"hidden_combo_count": {"check": False, "type": "number"}},
@@ -228,7 +234,7 @@ DEFAULT_RANKED_MODS = {
             "affects_hit_sounds": {"check": False, "type": "boolean"},
         },
         # Pitch Adjust — see ruleset 0 above for rationale.
-        "PA": {"pitch_shift": {"check": False, "type": "number"}},
+        "PA": {"pitch_shift": {"check": False, "type": "number"}, "extended_limits": {"check": False, "type": "boolean"}},
         "SG": {},
         "SW": {},
     },
@@ -281,7 +287,7 @@ DEFAULT_RANKED_MODS = {
             "affects_hit_sounds": {"check": False, "type": "boolean"},
         },
         # Pitch Adjust — see ruleset 0 above for rationale.
-        "PA": {"pitch_shift": {"check": False, "type": "number"}},
+        "PA": {"pitch_shift": {"check": False, "type": "number"}, "extended_limits": {"check": False, "type": "boolean"}},
         "NS": {"hidden_combo_count": {"check": False, "type": "number"}},
     },
     3: {
@@ -342,7 +348,7 @@ DEFAULT_RANKED_MODS = {
             "affects_hit_sounds": {"check": False, "type": "boolean"},
         },
         # Pitch Adjust — see ruleset 0 above for rationale.
-        "PA": {"pitch_shift": {"check": False, "type": "number"}},
+        "PA": {"pitch_shift": {"check": False, "type": "number"}, "extended_limits": {"check": False, "type": "boolean"}},
         "MR": {},
         "4K": {},
         "5K": {},

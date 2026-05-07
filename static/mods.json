@@ -1339,6 +1339,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [
@@ -2081,6 +2087,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [
@@ -2762,6 +2774,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [
@@ -3797,6 +3815,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [
@@ -4507,6 +4531,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [
@@ -5294,6 +5324,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [
@@ -5668,6 +5704,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [
@@ -6006,6 +6048,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [
@@ -6512,6 +6560,12 @@
             "Type": "number",
             "Label": "Pitch shift",
             "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          },
+          {
+            "Name": "extended_limits",
+            "Type": "boolean",
+            "Label": "Extended limits",
+            "Description": "Allow extreme pitch shifts (0.1× to 3.0× instead of the safe 0.5× to 2.0× range)."
           }
         ],
         "IncompatibleMods": [

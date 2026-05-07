@@ -434,11 +434,76 @@ async def meticulous_mayhem(
     return len(score.mods) >= 15
 
 
-# Pitch shift value above which we consider the audio "borderline unhearable
-# garble" — i.e. the user pushed PA close to its max client-side bound (2.0).
-# Anything in [1.8, 2.0] qualifies; 1.8 corresponds to roughly +10 semitones
-# which already turns most music into chipmunk noise.
-_PITCH_MAX_THRESHOLD = 1.8
+# ── Pitch Adjust hush-hush thresholds ────────────────────────────────────────
+#
+# Both the chipmunk and the abyss medals share the same generic gate
+# (FC + 99%+ accuracy on a 1000-combo map with PA + extended_limits) and
+# only differ on the pitch-shift extreme. Extracted here so the two
+# triggers stay aligned and we don't need to remember to change two
+# numbers when we tune.
+#
+# Pitch is read from APIMod.Settings["pitch_shift"]; when it equals the
+# bindable's default (1.0) lazer omits the key from the serialized
+# settings dict, so absence is treated as "didn't shift" — neither
+# extreme qualifies.
+#
+# `_PITCH_HIGH_THRESHOLD = 2.7` — within ~10% of the extended cap (3.0).
+# Anywhere in [2.7, 3.0] = "fully cranked up", chipmunk territory.
+#
+# `_PITCH_LOW_THRESHOLD = 0.3` — within ~0.2 of the extended floor (0.1).
+# Anywhere in [0.1, 0.3] = "fully cranked down", eldritch warble territory.
+_PITCH_HIGH_THRESHOLD = 2.7
+_PITCH_LOW_THRESHOLD = 0.3
+
+# Combo gate: the medal fires only on maps with EXACTLY 1000 max_combo
+# (not >=, not <=). Picked because it's a recognisable round number and
+# narrows the medal to a specific subset of beatmaps without making it
+# unreachable. `beatmap.max_combo or 0` defends against the rare case
+# where the column is null (uncomputed or partial import).
+_COMBO_TARGET = 1000
+
+
+def _pitch_adjust_extreme_state(score: Score) -> tuple[bool, float | None]:
+    """Inspect the score's mods and return (extended_limits_on, pitch_shift).
+
+    Returns (False, None) when PA isn't present on the score, or when PA
+    is present but extended_limits wasn't explicitly enabled. The caller
+    decides whether the pitch_shift value sits at the high or low extreme.
+
+    Lazer's APIMod serializer omits any setting whose Bindable.IsDefault
+    is true, so:
+      - `pitch_shift` absent → user activated PA but never moved the slider
+        (effectively a no-op mod — disqualifies)
+      - `extended_limits` absent → the toggle is at its default (false) —
+        disqualifies, since the medal is meant for extreme pitches that
+        only the extended range can reach
+    """
+    for mod in score.mods:
+        if mod.get("acronym") != "PA":
+            continue
+        settings = mod.get("settings") or {}
+        if not bool(settings.get("extended_limits")):
+            return False, None
+        pitch_raw = settings.get("pitch_shift")
+        if not isinstance(pitch_raw, (int, float)):
+            return False, None
+        return True, float(pitch_raw)
+    return False, None
+
+
+def _pitch_extreme_medal_base_check(score: Score, beatmap: Beatmap) -> bool:
+    """Common gate for both pitch-adjust hush-hushes. Returns True iff
+    the score satisfies everything except the pitch-direction split.
+    """
+    if not score.passed:
+        return False
+    if score.nmiss != 0:
+        return False
+    if score.accuracy < 0.99:
+        return False
+    if (beatmap.max_combo or 0) != _COMBO_TARGET:
+        return False
+    return True
 
 
 async def can_he_even_hear_anything(
@@ -446,33 +511,33 @@ async def can_he_even_hear_anything(
     score: Score,
     beatmap: Beatmap,
 ) -> bool:
-    # FC any map with >=98% accuracy while running Pitch Adjust at near-max
-    # (pitch_shift >= 1.8). Combo: must equal beatmap.max_combo (full-combo,
-    # not necessarily SS — slightly missed acc still counts).
-    if not score.passed:
+    # Chipmunk variant. FC + ≥99% accuracy on an exactly-1000-combo map
+    # while running PA in extended-limits mode at the upper extreme
+    # (pitch_shift >= 2.7).
+    if not _pitch_extreme_medal_base_check(score, beatmap):
         return False
-    # `nmiss == 0` covers the "full combo" intent broadly: even if the
-    # client-side max_combo metric is off (custom rulesets, mid-map breaks),
-    # zero misses + 98%+ accuracy is the spirit of the achievement.
-    if score.nmiss != 0:
+    extended, pitch = _pitch_adjust_extreme_state(score)
+    if not extended or pitch is None:
         return False
-    if score.accuracy < 0.98:
+    return pitch >= _PITCH_HIGH_THRESHOLD
+
+
+async def from_the_abyss(
+    session: AsyncSession,
+    score: Score,
+    beatmap: Beatmap,
+) -> bool:
+    # Eldritch / cthulhu variant. Same shape as can_he_even_hear_anything
+    # but with the pitch_shift cranked DOWN to the extended floor (≤ 0.3).
+    # Below 0.5× the BASS_FX time-stretcher gives up and the audio turns
+    # into a low warble — the player is FCing on what sounds like a
+    # demon's whisper.
+    if not _pitch_extreme_medal_base_check(score, beatmap):
         return False
-    # Look up the PA mod settings on the score to confirm the pitch was
-    # actually pushed near the cap. Spec from the lazer client:
-    #   acronym="PA", settings={"pitch_shift": <float>} (omitted when at default)
-    for mod in score.mods:
-        if mod.get("acronym") != "PA":
-            continue
-        settings = mod.get("settings") or {}
-        pitch = settings.get("pitch_shift")
-        if not isinstance(pitch, (int, float)):
-            # Default value (1.0 = no shift) — would be omitted from the
-            # serialized settings dict, so absence = "user activated PA but
-            # didn't actually shift anything". Doesn't qualify.
-            return False
-        return float(pitch) >= _PITCH_MAX_THRESHOLD
-    return False
+    extended, pitch = _pitch_adjust_extreme_state(score)
+    if not extended or pitch is None:
+        return False
+    return pitch <= _PITCH_LOW_THRESHOLD
 
 
 # TODO: Quick Draw, Obsessed, Jack of All Trades, Ten To One, Persistence Is Key
@@ -660,17 +725,34 @@ MEDALS: Medals = {
         desc="How did we get here?",
         assets_id="all-secret-meticulousmayhem",
     ): meticulous_mayhem,
-    # Torii-original hush-hush. assets_id reuses the existing "to the core"
-    # asset URL (we don't host a custom medal image yet — see TODO below);
-    # the lazer client will display the same chipmunky-music silhouette,
-    # which thematically isn't far off. Swap to a dedicated assets_id once
-    # the asset is uploaded.
-    # TODO: ship a dedicated medal PNG and switch assets_id to
-    # "all-secret-canheevenhearanything" or similar.
+    # ── Torii-original hush-hush pair ─────────────────────────────────────
+    #
+    # Two medals that share a trigger shape (FC + ≥99% acc on a 1000-combo
+    # map with PA + extended_limits) and split on the pitch-shift extreme:
+    #
+    #   135 "Can He Even Hear Anything?" — pitch_shift >= 2.7  (chipmunks)
+    #   136 "From The Abyss"             — pitch_shift <= 0.3  (cthulhu)
+    #
+    # Both currently reuse upstream assets_ids as placeholder art:
+    #   135 → "all-secret-tothecore"  (vaguely on-theme: nightcore-y)
+    #   136 → "all-secret-aeon"       (vaguely on-theme: deep-time mire)
+    #
+    # When the bespoke art ships, swap the assets_id strings (or set
+    # `medal_url` / `medal_url2x` on the Achievement so we can serve the
+    # PNGs from our own CDN without coining a new ppy slug).
+    #
+    # TODO: bespoke art for both 135 (chipmunk silhouette) and 136
+    # (cthulhu silhouette).
     Achievement(
         id=135,
         name="Can He Even Hear Anything?",
         desc="Tuned to the heavens — for better or for much, much worse.",
         assets_id="all-secret-tothecore",
     ): can_he_even_hear_anything,
+    Achievement(
+        id=136,
+        name="From The Abyss",
+        desc="Tuned to depths the surface was never meant to hear.",
+        assets_id="all-secret-aeon",
+    ): from_the_abyss,
 }
