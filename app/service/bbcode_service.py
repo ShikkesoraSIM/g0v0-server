@@ -850,8 +850,28 @@ class BBCodeService:
             raise ContentTooLongError(content_length, max_length)
 
         content_lower = raw_content.lower()
+        # Token-boundary match for forbidden tags. The previous version did
+        # a naive substring check (`f"[{tag}" in content`), which produced
+        # false positives whenever a legitimate longer tag started with the
+        # same letters as a forbidden one — e.g. the perfectly valid
+        # osu-web `[heading]…[/heading]` BBCode was being flagged as a
+        # smuggled HTML `<head>` because `[head` is a substring of
+        # `[heading]`. Tracked down from a real userpage that wouldn't
+        # save (cf. https://osu.ppy.sh/wiki/BBCode for the [heading] tag).
+        #
+        # The regex anchors the tag name with a single character class
+        # that covers every realistic post-tag-name byte:
+        #   - `]` / `>` close the tag (`[head]`, `<head>`)
+        #   - `=` introduces an attribute / value (`[color=red]`,
+        #     `<head xmlns=…>` — though `<head xmlns=` would still match
+        #     because of the space below; either path is correct)
+        #   - whitespace introduces an attribute (`<head class=…>`)
+        #   - `/` self-closes (`<head/>`, `[head/]`)
+        # Any other byte after the tag name (a letter, a digit) means we
+        # were inside a longer identifier and should not flag.
         for forbidden_tag in cls.FORBIDDEN_TAGS:
-            if f"[{forbidden_tag}" in content_lower or f"<{forbidden_tag}" in content_lower:
+            tag_pattern = re.compile(rf"[\[<]{re.escape(forbidden_tag)}(?=[\s\]>=/])")
+            if tag_pattern.search(content_lower):
                 raise ForbiddenTagError(forbidden_tag)
 
         html_content = cls.parse_bbcode(raw_content)
