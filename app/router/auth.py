@@ -341,8 +341,19 @@ async def register_user(
             country_code=country_code,
             join_date=utcnow(),
             last_visit=utcnow(),
-            is_supporter=settings.enable_supporter_for_all_users,
-            support_level=int(settings.enable_supporter_for_all_users),
+            # Hard-default the supporter flags to off on registration.
+            # The legacy ENABLE_SUPPORTER_FOR_ALL_USERS toggle used to seed
+            # these to True for every signup, which (combined with the
+            # is_supporter resolver previously not running on the /me path)
+            # caused fresh non-donor accounts to read as full supporters
+            # client-side and bypass the donor-gated UI. The single source
+            # of truth for "currently supporting" is now the @included
+            # resolver on the User model — it derives from donor_end_at,
+            # so these stored fields are mostly cosmetic, but we still keep
+            # them honest to avoid downstream code paths (anything reading
+            # the column directly via SQL/SQLAlchemy) from being misled.
+            is_supporter=False,
+            support_level=0,
         )
         db.add(new_user)
         await db.commit()

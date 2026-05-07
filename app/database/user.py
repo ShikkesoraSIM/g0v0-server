@@ -407,7 +407,7 @@ class UserModel(DatabaseModel[UserDict]):
             return None
         return resolved
 
-    @ondemand
+    @included
     @staticmethod
     async def is_supporter(_session: AsyncSession, obj: "User") -> bool:
         # Live "is currently supporting" — overrides the stored DB flag
@@ -416,7 +416,32 @@ class UserModel(DatabaseModel[UserDict]):
         # column. Stored field stays True until the next donation flow
         # touches the user; that's fine — we always go through this
         # resolver for public reads.
+        #
+        # MUST be @included (not @ondemand): the lazer client + the web
+        # all read `is_supporter` from /me, /users/{id}, /friends/...
+        # without ever passing it as an explicit include. With @ondemand
+        # the resolver only fires when the field name is in the request's
+        # includes list, so the stored DB value bleeds through and a
+        # never-donated account whose stored flag was wrongly set to True
+        # (e.g. via the legacy ENABLE_SUPPORTER_FOR_ALL_USERS toggle, or
+        # any future flag-juggling regression) reads as supporter on
+        # every endpoint. @included guarantees this resolver runs in
+        # every transform regardless of includes, so the live computation
+        # is the single source of truth on the wire.
         return is_currently_supporting(obj)
+
+    @included
+    @staticmethod
+    async def support_level(_session: AsyncSession, obj: "User") -> int:
+        # Live "supporter hex count" — the lazer client renders the
+        # little hexagon icon next to the username whenever this is
+        # non-zero, so it has to track is_supporter exactly. Same
+        # reasoning as the resolver above: must be @included (not the
+        # OnDemand[int] stored field on its own) so a stale stored 1 on
+        # an account that never actually donated stops bleeding through
+        # the wire. We deliberately don't run a tier system, so the
+        # value collapses to a binary 1/0 mirror of is_currently_supporting.
+        return 1 if is_currently_supporting(obj) else 0
 
     @ondemand
     @staticmethod
