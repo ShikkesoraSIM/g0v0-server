@@ -163,6 +163,12 @@ DEFAULT_RANKED_MODS = {
             "mute_combo_count": {"check": False, "type": "number"},
             "affects_hit_sounds": {"check": False, "type": "boolean"},
         },
+        # Pitch Adjust — Torii fun mod that shifts the song's pitch up/down
+        # while preserving playback speed (Frequency=N + Tempo=1/N). Pitch
+        # shift in isolation doesn't change hit-object timing or judgement
+        # windows, so any value within the client-side [0.5, 2.0] clamp is
+        # equally fair — we don't lock `pitch_shift` to a specific value.
+        "PA": {"pitch_shift": {"check": False, "type": "number"}},
         "TD": {},
         "BL": {},   # Blinds
         "NS": {"hidden_combo_count": {"check": False, "type": "number"}},
@@ -221,6 +227,8 @@ DEFAULT_RANKED_MODS = {
             "mute_combo_count": {"check": False, "type": "number"},
             "affects_hit_sounds": {"check": False, "type": "boolean"},
         },
+        # Pitch Adjust — see ruleset 0 above for rationale.
+        "PA": {"pitch_shift": {"check": False, "type": "number"}},
         "SG": {},
         "SW": {},
     },
@@ -272,6 +280,8 @@ DEFAULT_RANKED_MODS = {
             "mute_combo_count": {"check": False, "type": "number"},
             "affects_hit_sounds": {"check": False, "type": "boolean"},
         },
+        # Pitch Adjust — see ruleset 0 above for rationale.
+        "PA": {"pitch_shift": {"check": False, "type": "number"}},
         "NS": {"hidden_combo_count": {"check": False, "type": "number"}},
     },
     3: {
@@ -331,6 +341,8 @@ DEFAULT_RANKED_MODS = {
             "mute_combo_count": {"check": False, "type": "number"},
             "affects_hit_sounds": {"check": False, "type": "boolean"},
         },
+        # Pitch Adjust — see ruleset 0 above for rationale.
+        "PA": {"pitch_shift": {"check": False, "type": "number"}},
         "MR": {},
         "4K": {},
         "5K": {},

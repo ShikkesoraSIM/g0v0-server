@@ -73,7 +73,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -102,7 +103,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -213,7 +215,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -242,7 +245,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -875,7 +879,8 @@
           "DT",
           "NC",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -915,7 +920,8 @@
           "DT",
           "NC",
           "WU",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1158,7 +1164,8 @@
           "AT",
           "CN",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1320,6 +1327,35 @@
         "ValidForFreestyleAsRequiredMod": false,
         "ValidForMultiplayerAsFreeMod": false,
         "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
+        "AlwaysValidForSubmission": false
       }
     ]
   },
@@ -1389,7 +1425,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1418,7 +1455,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1554,7 +1592,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1583,7 +1622,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1889,7 +1929,8 @@
           "DT",
           "NC",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1929,7 +1970,8 @@
           "DT",
           "NC",
           "WU",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2004,7 +2046,8 @@
           "AT",
           "CN",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2025,6 +2068,35 @@
         "ValidForMultiplayer": false,
         "ValidForFreestyleAsRequiredMod": false,
         "ValidForMultiplayerAsFreeMod": false,
+        "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
         "AlwaysValidForSubmission": false
       }
     ]
@@ -2102,7 +2174,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2130,7 +2203,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2232,7 +2306,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2260,7 +2335,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2519,7 +2595,8 @@
           "DC",
           "DT",
           "NC",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2558,7 +2635,8 @@
           "DC",
           "DT",
           "NC",
-          "WU"
+          "WU",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2672,6 +2750,35 @@
         "ValidForFreestyleAsRequiredMod": false,
         "ValidForMultiplayerAsFreeMod": false,
         "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
+        "AlwaysValidForSubmission": false
       }
     ]
   },
@@ -2749,7 +2856,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2778,7 +2886,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2903,7 +3012,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2932,7 +3042,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3534,7 +3645,8 @@
           "DT",
           "NC",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3574,7 +3686,8 @@
           "DT",
           "NC",
           "WU",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3649,7 +3762,8 @@
           "AT",
           "CN",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3670,6 +3784,35 @@
         "ValidForMultiplayer": false,
         "ValidForFreestyleAsRequiredMod": false,
         "ValidForMultiplayerAsFreeMod": false,
+        "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
         "AlwaysValidForSubmission": false
       }
     ]
@@ -3704,7 +3847,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3733,7 +3877,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3922,7 +4067,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3951,7 +4097,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4161,7 +4308,8 @@
           "DT",
           "NC",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4201,7 +4349,8 @@
           "DT",
           "NC",
           "WU",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4302,7 +4451,8 @@
           "NC",
           "AT",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4345,6 +4495,35 @@
         "ValidForFreestyleAsRequiredMod": false,
         "ValidForMultiplayerAsFreeMod": false,
         "AlwaysValidForSubmission": true
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
+        "AlwaysValidForSubmission": false
       }
     ]
   },
@@ -4420,7 +4599,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4449,7 +4629,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4569,7 +4750,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4598,7 +4780,8 @@
           "NC",
           "WU",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4901,7 +5084,8 @@
           "DT",
           "NC",
           "WD",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4941,7 +5125,8 @@
           "DT",
           "NC",
           "WU",
-          "AS"
+          "AS",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4978,7 +5163,8 @@
           "AT",
           "CN",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5096,6 +5282,35 @@
         "ValidForFreestyleAsRequiredMod": false,
         "ValidForMultiplayerAsFreeMod": true,
         "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
+        "AlwaysValidForSubmission": false
       }
     ]
   },
@@ -5146,7 +5361,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5174,7 +5390,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5258,7 +5475,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5286,7 +5504,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5388,7 +5607,8 @@
           "DC",
           "DT",
           "NC",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5427,13 +5647,43 @@
           "DC",
           "DT",
           "NC",
-          "WU"
+          "WU",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
         "ValidForMultiplayer": true,
         "ValidForFreestyleAsRequiredMod": true,
         "ValidForMultiplayerAsFreeMod": false,
+        "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
         "AlwaysValidForSubmission": false
       }
     ]
@@ -5467,7 +5717,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5495,7 +5746,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5582,7 +5834,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5610,7 +5863,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5691,7 +5945,8 @@
           "DC",
           "DT",
           "NC",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5730,13 +5985,43 @@
           "DC",
           "DT",
           "NC",
-          "WU"
+          "WU",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
         "ValidForMultiplayer": true,
         "ValidForFreestyleAsRequiredMod": true,
         "ValidForMultiplayerAsFreeMod": false,
+        "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
         "AlwaysValidForSubmission": false
       }
     ]
@@ -5812,7 +6097,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5840,7 +6126,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5955,7 +6242,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5983,7 +6271,8 @@
           "DT",
           "NC",
           "WU",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -6148,7 +6437,8 @@
           "DC",
           "DT",
           "NC",
-          "WD"
+          "WD",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -6187,7 +6477,8 @@
           "DC",
           "DT",
           "NC",
-          "WU"
+          "WU",
+          "PA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -6207,6 +6498,35 @@
         "UserPlayable": true,
         "ValidForMultiplayer": true,
         "ValidForFreestyleAsRequiredMod": false,
+        "ValidForMultiplayerAsFreeMod": true,
+        "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "PA",
+        "Name": "Pitch Adjust",
+        "Description": "Shift the song's pitch up or down without affecting playback speed.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "pitch_shift",
+            "Type": "number",
+            "Label": "Pitch shift",
+            "Description": "Multiplier applied to pitch (1.0 = no change). 0.7 ≈ 5 semitones down, 1.4 ≈ 5 semitones up."
+          }
+        ],
+        "IncompatibleMods": [
+          "HT",
+          "DC",
+          "DT",
+          "NC",
+          "WU",
+          "WD",
+          "AS"
+        ],
+        "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
         "ValidForMultiplayerAsFreeMod": true,
         "AlwaysValidForSubmission": false
       }

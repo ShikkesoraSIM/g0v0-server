@@ -434,6 +434,47 @@ async def meticulous_mayhem(
     return len(score.mods) >= 15
 
 
+# Pitch shift value above which we consider the audio "borderline unhearable
+# garble" — i.e. the user pushed PA close to its max client-side bound (2.0).
+# Anything in [1.8, 2.0] qualifies; 1.8 corresponds to roughly +10 semitones
+# which already turns most music into chipmunk noise.
+_PITCH_MAX_THRESHOLD = 1.8
+
+
+async def can_he_even_hear_anything(
+    session: AsyncSession,
+    score: Score,
+    beatmap: Beatmap,
+) -> bool:
+    # FC any map with >=98% accuracy while running Pitch Adjust at near-max
+    # (pitch_shift >= 1.8). Combo: must equal beatmap.max_combo (full-combo,
+    # not necessarily SS — slightly missed acc still counts).
+    if not score.passed:
+        return False
+    # `nmiss == 0` covers the "full combo" intent broadly: even if the
+    # client-side max_combo metric is off (custom rulesets, mid-map breaks),
+    # zero misses + 98%+ accuracy is the spirit of the achievement.
+    if score.nmiss != 0:
+        return False
+    if score.accuracy < 0.98:
+        return False
+    # Look up the PA mod settings on the score to confirm the pitch was
+    # actually pushed near the cap. Spec from the lazer client:
+    #   acronym="PA", settings={"pitch_shift": <float>} (omitted when at default)
+    for mod in score.mods:
+        if mod.get("acronym") != "PA":
+            continue
+        settings = mod.get("settings") or {}
+        pitch = settings.get("pitch_shift")
+        if not isinstance(pitch, (int, float)):
+            # Default value (1.0 = no shift) — would be omitted from the
+            # serialized settings dict, so absence = "user activated PA but
+            # didn't actually shift anything". Doesn't qualify.
+            return False
+        return float(pitch) >= _PITCH_MAX_THRESHOLD
+    return False
+
+
 # TODO: Quick Draw, Obsessed, Jack of All Trades, Ten To One, Persistence Is Key
 # Tribulation, Replica, All Good, Time Sink, You're Here Forever, Hospitality,
 # True North, Superfan, Resurgence, Festive Fever, Deciduous Arborist,
@@ -619,4 +660,17 @@ MEDALS: Medals = {
         desc="How did we get here?",
         assets_id="all-secret-meticulousmayhem",
     ): meticulous_mayhem,
+    # Torii-original hush-hush. assets_id reuses the existing "to the core"
+    # asset URL (we don't host a custom medal image yet — see TODO below);
+    # the lazer client will display the same chipmunky-music silhouette,
+    # which thematically isn't far off. Swap to a dedicated assets_id once
+    # the asset is uploaded.
+    # TODO: ship a dedicated medal PNG and switch assets_id to
+    # "all-secret-canheevenhearanything" or similar.
+    Achievement(
+        id=135,
+        name="Can He Even Hear Anything?",
+        desc="Tuned to the heavens — for better or for much, much worse.",
+        assets_id="all-secret-tothecore",
+    ): can_he_even_hear_anything,
 }
