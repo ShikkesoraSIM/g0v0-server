@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 import copy
-from typing import Annotated
+from typing import Annotated, Any
 
 from app.config import settings
 from app.const import BANCHOBOT_ID
@@ -11,7 +11,7 @@ from app.dependencies.user import get_optional_user
 
 from .router import router
 
-from fastapi import Query, Security
+from fastapi import HTTPException, Query, Security
 from pydantic import BaseModel
 from sqlmodel import case, col, func, or_, select
 
@@ -75,18 +75,99 @@ async def get_seasonal_backgrounds():
 
 @router.get(
     "/search",
-    response_model=NavbarSearchResp,
     tags=["Misc"],
-    name="Global Navbar Search",
-    description="Search users and teams for the navbar quick-search overlay.",
+    name="Global Search (navbar + lazer client)",
+    description=(
+        "Two callers share this endpoint:\n\n"
+        "  • Torii navbar quick-search overlay — passes `q` and gets back a "
+        "{query, users, teams} payload tuned for the dropdown.\n"
+        "  • osu! lazer client (Dashboard → User Search tab) — passes "
+        "`mode=user&query=...` and expects the official osu! API shape "
+        "{user: {data: [...], total: N}}. Anything other than `mode=user` "
+        "currently 400s.\n\n"
+        "The two callers are discriminated by the `mode` query parameter: "
+        "if it is set we serve the lazer-compatible payload, otherwise we "
+        "serve the navbar payload."
+    ),
 )
 async def navbar_search(
     session: Database,
-    q: Annotated[str, Query(min_length=1, max_length=64, description="Search query")],
-    users_limit: Annotated[int, Query(ge=0, le=20, description="Max users to return")] = 6,
-    teams_limit: Annotated[int, Query(ge=0, le=20, description="Max teams to return")] = 6,
+    q: Annotated[str | None, Query(min_length=1, max_length=64, description="Navbar search query")] = None,
+    mode: Annotated[str | None, Query(description="Lazer-client search mode (currently only 'user')")] = None,
+    query: Annotated[str | None, Query(min_length=1, max_length=64, description="Lazer-client search query")] = None,
+    users_limit: Annotated[int, Query(ge=0, le=20, description="Max users to return (navbar only)")] = 6,
+    teams_limit: Annotated[int, Query(ge=0, le=20, description="Max teams to return (navbar only)")] = 6,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
-):
+) -> Any:
+    # ── Lazer-client branch: return the official osu! API shape so the
+    # upstream `SearchUsersRequest` / `SearchUsersResponse` round-trip
+    # works without any client-side patching.
+    if mode is not None:
+        if mode != "user":
+            # Official osu! API also supports mode=wiki_page; we don't
+            # have a wiki, so reject loudly rather than silently returning
+            # an empty user list (which would look like "no matches").
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported search mode '{mode}'. Only 'user' is implemented.",
+            )
+        if not query:
+            raise HTTPException(
+                status_code=400,
+                detail="`query` parameter is required when `mode` is set.",
+            )
+        keyword = query.strip()
+        if not keyword:
+            return {"user": {"data": [], "total": 0}, "total": 0}
+
+        keyword_like = f"%{keyword}%"
+        keyword_lower = keyword.lower()
+        keyword_prefix = f"{keyword_lower}%"
+        show_nsfw_media = await _viewer_allows_nsfw_media(current_user)
+
+        users_stmt = (
+            select(User)
+            .where(
+                col(User.id) != BANCHOBOT_ID,
+                ~User.is_restricted_query(col(User.id)),
+                col(User.username).ilike(keyword_like),
+            )
+            .order_by(
+                case(
+                    (func.lower(col(User.username)) == keyword_lower, 0),
+                    (func.lower(col(User.username)).like(keyword_prefix), 1),
+                    else_=2,
+                ),
+                func.length(col(User.username)),
+                col(User.id).desc(),
+            )
+            .limit(50)  # match the official osu! API per-page limit
+        )
+        matched = (await session.exec(users_stmt)).all()
+        user_payloads: list[dict[str, Any]] = []
+        for user in matched:
+            canonical = await UserModel.transform(
+                user,
+                includes=User.CARD_INCLUDES,
+                show_nsfw_media=True,
+            )
+            safe = UserModel.apply_nsfw_media_policy(copy.deepcopy(canonical), show_nsfw_media)
+            user_payloads.append(safe)
+
+        return {
+            # The lazer SearchUsersResponse class reads top-level `total`
+            # (legacy / unused by UI) AND `user.data` (the actual list).
+            # We mirror both for forward compatibility.
+            "total": len(user_payloads),
+            "user": {"data": user_payloads, "total": len(user_payloads)},
+        }
+
+    # ── Navbar branch: original behaviour, requires `q`.
+    if q is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Either `q` (navbar) or `mode=user&query=...` (lazer client) must be provided.",
+        )
     keyword = q.strip()
     if not keyword:
         return NavbarSearchResp(query="", users=[], teams=[])
