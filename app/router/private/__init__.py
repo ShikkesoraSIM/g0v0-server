@@ -3,7 +3,6 @@ from app.config import settings
 from . import (  # noqa: F401
     admin,
     admin_donations,
-    admin_hiccups,
     audio_proxy,
     avatar,
     beatmapset,

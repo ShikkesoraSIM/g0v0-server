@@ -35,6 +35,7 @@ from app.router import (
     private_router,
     redirect_api_router,
 )
+from app.router.hiccups_dashboard import router as hiccups_dashboard_router
 from app.router.redirect import redirect_router
 from app.router.status import router as status_router
 from app.router.v1 import api_v1_public_router
@@ -209,6 +210,9 @@ app.include_router(api_v1_router)
 app.include_router(api_v1_public_router)
 app.include_router(chat_router)
 app.include_router(status_router)
+# Public Torii hiccup-report dashboard at /hiccups/* — read-only,
+# no auth, rate-limited via the shared LIMITERS dependency.
+app.include_router(hiccups_dashboard_router)
 app.include_router(redirect_api_router)
 # app.include_router(fetcher_router)
 app.include_router(file_router)

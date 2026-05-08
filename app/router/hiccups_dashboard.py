@@ -1,24 +1,28 @@
-"""Admin dashboard + APIs for the Torii hiccup-report archive.
+"""Public dashboard + JSON APIs for the Torii hiccup-report archive.
 
-All endpoints sit under ``/api/private/admin/hiccups`` and require an
-admin user (the same ``require_admin`` helper the rest of the admin
-router uses). Public client uploads land at
-``POST /api/v2/torii/hiccup-reports`` (see ``torii_hiccup_reports.py``);
-this file is purely the read side.
+All endpoints sit under ``/hiccups`` (top-level, no auth) so a user can
+just bookmark ``lazer-api.shikkesora.com/hiccups/`` and check the live
+state of perf reports across the userbase. The data is non-sensitive
+(user IDs, frame timings, GC stats, screen names — no IPs, no machine
+identifiers, no chat content), so the dashboard is fully public.
+
+Public client uploads land at ``POST /api/v2/torii/hiccup-reports``
+(see ``app/router/v2/torii_hiccup_reports.py``); this file is the read
+side only.
 
 Surfaces
 --------
-``GET  /admin/hiccups/``            HTML dashboard. Self-contained: filter bar
-                                    drives every other endpoint via HTMX,
-                                    Chart.js draws the charts, no SPA build.
+``GET  /hiccups/``            HTML dashboard. Self-contained: filter bar
+                              drives every other endpoint via fetch(),
+                              Chart.js draws the charts, no SPA build.
 
-``GET  /admin/hiccups/list``        Paginated JSON list of records, filterable.
-``GET  /admin/hiccups/causes``      Top likely_cause buckets.
-``GET  /admin/hiccups/histogram``   frame_ms distribution (5 buckets).
-``GET  /admin/hiccups/timeseries``  Hiccups per hour over the time range.
-``GET  /admin/hiccups/{id}``        One record's full payload (modal expansion).
-``GET  /admin/hiccups/export.csv``  CSV download of filtered set.
-``GET  /admin/hiccups/export.json`` JSON download of filtered set.
+``GET  /hiccups/list``        Paginated JSON list of records, filterable.
+``GET  /hiccups/causes``      Top likely_cause buckets.
+``GET  /hiccups/histogram``   frame_ms distribution (5 buckets).
+``GET  /hiccups/timeseries``  Hiccups per hour over the time range.
+``GET  /hiccups/{id}``        One record's full payload (modal expansion).
+``GET  /hiccups/export.csv``  CSV download of filtered set.
+``GET  /hiccups/export.json`` JSON download of filtered set.
 
 Filters
 -------
@@ -36,8 +40,9 @@ share a single filter dict across them:
 * ``screen`` — exact match on ``current_screen`` (default any).
 
 Pagination uses ``cursor`` (an ``id`` from the previous page; descending
-ID order) + ``limit`` (default 100, max 500). For large exports the CSV
-endpoint streams without pagination — it's gated to admins.
+ID order) + ``limit`` (default 100, max 500). Exports cap at 100K rows
+per call to keep an accidental "select everything" from blocking the
+server.
 """
 
 from __future__ import annotations
@@ -46,21 +51,25 @@ import csv
 import io
 import json
 from datetime import datetime, timedelta
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
-from sqlalchemy import and_, func
+from sqlalchemy import func
 from sqlmodel import col, select
 
 from app.database.torii_hiccup_report import ToriiHiccupReport
-from app.database.user import User
 from app.dependencies.database import Database
-from app.dependencies.user import UserAndToken, get_client_user_and_token
+from app.dependencies.rate_limit import LIMITERS
 from app.utils import utcnow
 
-from .admin import require_admin
-from .router import router
+
+# Top-level router — no /api prefix. The dashboard URL is a marketing-
+# style "lazer-api.shikkesora.com/hiccups/" rather than a deep path. The
+# shared LIMITERS dependency still applies (rate-limited like every other
+# public endpoint) so a curious user can't hammer the dashboard into the
+# DB.
+router = APIRouter(prefix="/hiccups", tags=["Torii"], dependencies=LIMITERS)
 
 
 # ── Filter parsing ──────────────────────────────────────────────────────────
@@ -145,14 +154,9 @@ def _apply_filters(stmt, f: dict[str, Any]):
 # ── JSON: paginated list ────────────────────────────────────────────────────
 
 
-@router.get(
-    "/admin/hiccups/list",
-    name="List Torii hiccup reports (admin)",
-    tags=["Torii", "Admin"],
-)
+@router.get("/list", name="List Torii hiccup reports")
 async def list_hiccups(
     session: Database,
-    user_and_token: Annotated[UserAndToken, Depends(get_client_user_and_token)],
     cursor: int | None = Query(default=None, description="Return rows with id < cursor (descending). Omit for first page."),
     limit: int = Query(default=100, ge=1, le=500),
     since: str | None = None,
@@ -165,7 +169,6 @@ async def list_hiccups(
     version: str | None = None,
     screen: str | None = None,
 ):
-    await require_admin(session, user_and_token)
     f = _parse_filters(since, until, min_frame_ms, cause, user_id, device_hash, platform, version, screen)
 
     stmt = select(ToriiHiccupReport)
@@ -189,7 +192,10 @@ def _row_to_dict(r: ToriiHiccupReport) -> dict[str, Any]:
     return {
         "id": r.id,
         "user_id": r.user_id,
-        "device_hash": r.device_hash[:12] if r.device_hash else None,  # tease only — full not needed in the table
+        # Tease only first 12 chars of the device hash in the table — the
+        # full value is in the modal expansion but we don't need to ship
+        # 64 hex chars per row in the list endpoint.
+        "device_hash": r.device_hash[:12] if r.device_hash else None,
         "device_hash_full": r.device_hash,
         "session_id": r.session_id,
         "captured_at": r.captured_at.isoformat() if r.captured_at else None,
@@ -218,14 +224,9 @@ def _row_to_dict(r: ToriiHiccupReport) -> dict[str, Any]:
 # ── JSON: aggregations ──────────────────────────────────────────────────────
 
 
-@router.get(
-    "/admin/hiccups/causes",
-    name="Top hiccup causes (admin)",
-    tags=["Torii", "Admin"],
-)
+@router.get("/causes", name="Top hiccup causes")
 async def causes_aggregation(
     session: Database,
-    user_and_token: Annotated[UserAndToken, Depends(get_client_user_and_token)],
     since: str | None = None,
     until: str | None = None,
     min_frame_ms: float = 33.0,
@@ -237,7 +238,6 @@ async def causes_aggregation(
     screen: str | None = None,
     top: int = Query(default=10, ge=1, le=50),
 ):
-    await require_admin(session, user_and_token)
     f = _parse_filters(since, until, min_frame_ms, cause, user_id, device_hash, platform, version, screen)
 
     stmt = select(
@@ -254,14 +254,9 @@ async def causes_aggregation(
     }
 
 
-@router.get(
-    "/admin/hiccups/histogram",
-    name="Hiccup frame_ms histogram (admin)",
-    tags=["Torii", "Admin"],
-)
+@router.get("/histogram", name="Hiccup frame_ms histogram")
 async def histogram(
     session: Database,
-    user_and_token: Annotated[UserAndToken, Depends(get_client_user_and_token)],
     since: str | None = None,
     until: str | None = None,
     min_frame_ms: float = 33.0,
@@ -279,10 +274,9 @@ async def histogram(
     "noticeable stutter", "user complains in chat", "user thinks the game
     crashed", "user starts task manager".
     """
-    await require_admin(session, user_and_token)
     f = _parse_filters(since, until, min_frame_ms, cause, user_id, device_hash, platform, version, screen)
 
-    bucket_edges = [33.0, 50.0, 100.0, 200.0, 500.0]  # < first edge is dropped (we filter min_frame_ms anyway)
+    bucket_edges = [33.0, 50.0, 100.0, 200.0, 500.0]
     bucket_labels = ["33–50 ms", "50–100 ms", "100–200 ms", "200–500 ms", "500 ms+"]
     counts = [0, 0, 0, 0, 0]
 
@@ -306,14 +300,9 @@ async def histogram(
     return {"labels": bucket_labels, "counts": counts}
 
 
-@router.get(
-    "/admin/hiccups/timeseries",
-    name="Hiccup time series (admin)",
-    tags=["Torii", "Admin"],
-)
+@router.get("/timeseries", name="Hiccup time series")
 async def timeseries(
     session: Database,
-    user_and_token: Annotated[UserAndToken, Depends(get_client_user_and_token)],
     since: str | None = None,
     until: str | None = None,
     min_frame_ms: float = 33.0,
@@ -325,20 +314,12 @@ async def timeseries(
     screen: str | None = None,
     bucket: str = Query(default="hour", pattern="^(hour|day)$"),
 ):
-    """Hiccup count over time, bucketed hourly or daily.
-
-    The bucket key drops to the start of the period for stable labels;
-    daily for week+ ranges, hourly otherwise (same defaults the dashboard
-    auto-picks).
-    """
-    await require_admin(session, user_and_token)
+    """Hiccup count over time, bucketed hourly or daily."""
     f = _parse_filters(since, until, min_frame_ms, cause, user_id, device_hash, platform, version, screen)
 
     if bucket == "day":
-        # Truncate to day boundary in UTC. MySQL's DATE() works here.
         bucket_expr = func.date(ToriiHiccupReport.captured_at)
     else:
-        # Hour bucket — DATE_FORMAT for portability.
         bucket_expr = func.date_format(ToriiHiccupReport.captured_at, "%Y-%m-%d %H:00:00")
 
     stmt = select(
@@ -353,37 +334,12 @@ async def timeseries(
     }
 
 
-# ── JSON: single record (for modal) ─────────────────────────────────────────
-
-
-@router.get(
-    "/admin/hiccups/{record_id}",
-    name="Get one hiccup record (admin)",
-    tags=["Torii", "Admin"],
-)
-async def get_one(
-    record_id: int,
-    session: Database,
-    user_and_token: Annotated[UserAndToken, Depends(get_client_user_and_token)],
-):
-    await require_admin(session, user_and_token)
-    row = await session.get(ToriiHiccupReport, record_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Hiccup record not found")
-    return _row_to_dict(row)
-
-
 # ── Exports (CSV / JSON) ────────────────────────────────────────────────────
 
 
-@router.get(
-    "/admin/hiccups/export.csv",
-    name="Export hiccups as CSV (admin)",
-    tags=["Torii", "Admin"],
-)
+@router.get("/export.csv", name="Export hiccups as CSV")
 async def export_csv(
     session: Database,
-    user_and_token: Annotated[UserAndToken, Depends(get_client_user_and_token)],
     since: str | None = None,
     until: str | None = None,
     min_frame_ms: float = 33.0,
@@ -395,7 +351,6 @@ async def export_csv(
     screen: str | None = None,
     limit: int = Query(default=10_000, ge=1, le=100_000),
 ):
-    await require_admin(session, user_and_token)
     f = _parse_filters(since, until, min_frame_ms, cause, user_id, device_hash, platform, version, screen)
 
     stmt = (
@@ -442,14 +397,9 @@ async def export_csv(
     )
 
 
-@router.get(
-    "/admin/hiccups/export.json",
-    name="Export hiccups as JSON (admin)",
-    tags=["Torii", "Admin"],
-)
+@router.get("/export.json", name="Export hiccups as JSON")
 async def export_json(
     session: Database,
-    user_and_token: Annotated[UserAndToken, Depends(get_client_user_and_token)],
     since: str | None = None,
     until: str | None = None,
     min_frame_ms: float = 33.0,
@@ -461,7 +411,6 @@ async def export_json(
     screen: str | None = None,
     limit: int = Query(default=10_000, ge=1, le=100_000),
 ):
-    await require_admin(session, user_and_token)
     f = _parse_filters(since, until, min_frame_ms, cause, user_id, device_hash, platform, version, screen)
 
     stmt = (
@@ -484,33 +433,38 @@ async def export_json(
     )
 
 
+# ── JSON: single record (for modal) ─────────────────────────────────────────
+#
+# Declared LAST so FastAPI's path-matching tries the literal-path routes
+# (/list, /causes, /histogram, /timeseries, /export.csv, /export.json)
+# before falling through to {record_id}. Otherwise GET /hiccups/list would
+# match this handler with record_id="list" and fail validation.
+
+
+@router.get("/{record_id}", name="Get one hiccup record")
+async def get_one(record_id: int, session: Database):
+    row = await session.get(ToriiHiccupReport, record_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Hiccup record not found")
+    return _row_to_dict(row)
+
+
 # ── HTML dashboard (single self-contained page) ─────────────────────────────
 
 
-@router.get(
-    "/admin/hiccups/",
-    response_class=HTMLResponse,
-    include_in_schema=False,
-    name="Torii hiccup admin dashboard",
-)
-async def hiccups_dashboard(
-    session: Database,
-    user_and_token: Annotated[UserAndToken, Depends(get_client_user_and_token)],
-):
-    await require_admin(session, user_and_token)
+@router.get("/", response_class=HTMLResponse, include_in_schema=False, name="Torii hiccup public dashboard")
+async def hiccups_dashboard():
     # Hardcoded HTML so we don't pull in a template engine just for this. The
-    # filter form fires HTMX requests against the JSON endpoints above; the
+    # filter form fires fetch() requests against the JSON endpoints above; the
     # client-side JS renders Chart.js charts from the responses. CDN-loaded
-    # HTMX + Chart.js + Inter font keeps the page completely self-contained
-    # as long as the admin browser has internet (it does — they just hit
-    # this URL through one).
+    # Chart.js + Inter font keeps the page completely self-contained.
     return HTMLResponse(_DASHBOARD_HTML)
 
 
 # Massive HTML literal — kept as a module-level constant so the route handler
 # stays scannable. CSS is intentionally inlined; the dashboard is not part of
-# the public site, and shipping a separate stylesheet would mean another
-# StaticFiles mount for a single page.
+# any larger site, and shipping a separate stylesheet would mean a StaticFiles
+# mount for a single page.
 _DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -519,7 +473,6 @@ _DASHBOARD_HTML = r"""<!doctype html>
 <title>Torii hiccup reports</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/htmx.org@1.9.10"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root {
@@ -544,6 +497,8 @@ _DASHBOARD_HTML = r"""<!doctype html>
 
   h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; letter-spacing: -.01em; }
   .subtitle { color: var(--ink-3); font-size: 13px; margin-bottom: 24px; }
+  .subtitle a { color: var(--cyan); text-decoration: none; }
+  .subtitle a:hover { text-decoration: underline; }
 
   /* Filter bar */
   .filter-card {
@@ -619,7 +574,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
 
 <div class="wrap">
   <h1>Torii hiccup reports</h1>
-  <p class="subtitle">Frame stalls reported by Torii clients with the hiccup logger enabled. Click a row for the full record.</p>
+  <p class="subtitle">Public dashboard of frame stalls reported by Torii clients with the hiccup logger enabled in <em>Settings → Debug → Torii hiccup logger</em>. Click a row for the full record.</p>
 
   <!-- Filter bar -->
   <form class="filter-card" id="filters" onsubmit="event.preventDefault(); refreshAll();">
@@ -691,12 +646,9 @@ _DASHBOARD_HTML = r"""<!doctype html>
 </div>
 
 <script>
-const BASE = '/api/private/admin/hiccups';
+const BASE = '/hiccups';
 
-// charts
 let causesChart, histogramChart, timeseriesChart;
-
-// pager state
 let nextCursor = null;
 
 function getFilters() {
@@ -717,7 +669,7 @@ function resetFilters() {
 }
 
 async function fetchJson(path, params={}) {
-  const r = await fetch(`${BASE}${path}?${qs(params)}`, {credentials: 'include'});
+  const r = await fetch(`${BASE}${path}?${qs(params)}`);
   if (!r.ok) throw new Error(`${path} ${r.status}`);
   return r.json();
 }
@@ -771,7 +723,6 @@ async function refreshHistogram() {
 }
 
 async function refreshTimeseries() {
-  // Auto-pick day vs hour based on range
   const f = getFilters();
   let bucket = 'hour';
   if (f.since && f.until) {
@@ -840,7 +791,7 @@ async function openModal(id) {
   document.getElementById('modal-body').textContent = 'Loading…';
   document.getElementById('modal-back').classList.add('shown');
   try {
-    const r = await fetch(`${BASE}/${id}`, {credentials: 'include'});
+    const r = await fetch(`${BASE}/${id}`);
     const data = await r.json();
     document.getElementById('modal-body').textContent = JSON.stringify(data, null, 2);
   } catch (e) {
