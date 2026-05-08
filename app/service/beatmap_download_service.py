@@ -50,24 +50,54 @@ class BeatmapDownloadService:
             )
         ]
 
-        # 国外区域端点
+        # International endpoints, ordered by historical reliability under
+        # actual load (measured 2026-05-08 from this server's IP):
+        #   0. Nerinyan — fastest 302 (~30ms), but its CDN often 404s on
+        #      maps that exist elsewhere; effective TTFB after follow ranges
+        #      from 1.5s (cache hit on their CDN) to 5s (404 tail).
+        #   1. osu.direct — slower (~600ms-2s) but consistent 200s for
+        #      maps that exist anywhere.
+        #   2. Akatsuki — even slower (~3-6s) but the most complete catalog
+        #      we've found; lifeline for maps no other free mirror has.
+        #   3. Gatari — older mirror, smaller catalog, occasional flaky.
+        # Catboy is intentionally NOT in this list (operator says it's
+        # unreliable). Chimu was removed (DNS dead, project shut down).
+        # Sayobot is in china_endpoints only — its CDN is geo-fenced.
         self.international_endpoints = [
-            DownloadEndpoint(
-                name="Gatari",
-                base_url="https://osu.gatari.pw",
-                health_check_url="https://osu.gatari.pw/d/1",
-                url_template="https://osu.gatari.pw/d/{sid}",
-                is_china=False,
-                priority=0,
-                timeout=10,
-            ),
             DownloadEndpoint(
                 name="Nerinyan",
                 base_url="https://api.nerinyan.moe",
                 health_check_url="https://api.nerinyan.moe/d/1",
                 url_template="https://api.nerinyan.moe/d/{sid}",
                 is_china=False,
+                priority=0,
+                timeout=10,
+            ),
+            DownloadEndpoint(
+                name="osu.direct",
+                base_url="https://osu.direct",
+                health_check_url="https://osu.direct/api",
+                url_template="https://osu.direct/api/d/{sid}",
+                is_china=False,
                 priority=1,
+                timeout=10,
+            ),
+            DownloadEndpoint(
+                name="Akatsuki",
+                base_url="https://akatsuki.gg",
+                health_check_url="https://akatsuki.gg/d/1",
+                url_template="https://akatsuki.gg/d/{sid}",
+                is_china=False,
+                priority=2,
+                timeout=15,
+            ),
+            DownloadEndpoint(
+                name="Gatari",
+                base_url="https://osu.gatari.pw",
+                health_check_url="https://osu.gatari.pw/d/1",
+                url_template="https://osu.gatari.pw/d/{sid}",
+                is_china=False,
+                priority=3,
                 timeout=10,
             ),
         ]

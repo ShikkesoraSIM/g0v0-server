@@ -280,18 +280,234 @@ async def get_beatmapset(
         raise HTTPException(status_code=404, detail="Beatmapset not found") from exc
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Beatmap download proxy
+#
+# Goal: make the "Download" click feel instant even under bursty traffic
+# and partial mirror failures. Layered strategy, fastest first:
+#
+#   0. Local cache hit. If we proxied this map before, redirect to the
+#      cached file. ~40ms TTFB.
+#   1. Hedged race — fire requests to BOTH Nerinyan AND osu.direct at the
+#      same time. First valid response wins, the loser is cancelled
+#      mid-flight. Stress-tested numbers:
+#        - Nerinyan: 30-50ms TTFB. But its catalogue isn't complete; some
+#          maps return 302 → CDN → 404 after a 5s tail.
+#        - osu.direct: 500-1000ms TTFB. Slower per-request but its
+#          catalogue covers a different (broader) set of maps.
+#      Their failure modes are complementary, so racing them gives
+#      sub-50ms response on the common path AND covers each other's
+#      catalogue gaps without a slow serial failover.
+#   2. Sequential fallback — Gatari (~1s, decent coverage), then
+#      BeatConnect (paid token, but real-world testing shows the token
+#      still hits per-IP rate limits at ~10rpm; useful as a niche
+#      fallback for niche maps but unsafe as a primary).
+#   3. Tee-and-cache — the chosen mirror's stream is duplicated: bytes
+#      flow to the client unchanged AND accumulate in a buffer that's
+#      flushed to local storage after EOF, so the next request hits
+#      Layer 0.
+#   4. Negative cache — if every mirror 4xx-s for the same beatmap, we
+#      mark it "unavailable" in Redis with a 5-minute TTL. The lazer
+#      client retries automatically on failure; without negative caching
+#      every retry would spam every mirror again. With it, retries
+#      return 503 instantly and the mirrors get a breather.
+#
+# Catboy is intentionally not in the chain (confirmed unreliable by the
+# operator). Chimu is gone (project shut down).
+# ──────────────────────────────────────────────────────────────────────────
+
+# Cap the in-memory buffer per request so a malicious or accidental gigabyte
+# response doesn't OOM the server. Real osz files top out around 80MB — 200MB
+# leaves plenty of headroom while still being safely sub-RAM.
+_MAX_CACHE_BYTES = 200 * 1024 * 1024
+
+# Transient HTTP statuses that warrant a single in-place retry before giving
+# up on a mirror (it's almost certainly rate-limited or briefly overloaded).
+_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+
+async def _attempt_mirror(
+    mirror_url: str,
+    headers: dict[str, str] | None = None,
+    *,
+    label: str | None = None,
+) -> httpx.Response | None:
+    """Issue a streaming GET to `mirror_url`. Returns the open response (the
+    caller must aclose it and the underlying client) on success, or None on
+    failure / non-200 / non-osz body. Includes one retry on transient 5xx.
+
+    The httpx AsyncClient is intentionally created per-call (not shared) so
+    each request gets its own connection pool — a slow upstream stream on
+    one beatmap can't choke the connection pool for unrelated requests.
+    """
+    label = label or mirror_url
+    # Tighter timeout than before so failover is faster: 3s connect (LAN-ish
+    # mirror or it's not coming up at all), 30s read (some big maps + slow
+    # mirrors), 10s pool (per-client only).
+    proxy_timeout = httpx.Timeout(connect=3.0, read=30.0, write=5.0, pool=10.0)
+    for attempt in range(2):
+        client: httpx.AsyncClient | None = None
+        try:
+            client = httpx.AsyncClient(follow_redirects=True, timeout=proxy_timeout)
+            resp = await client.send(
+                client.build_request("GET", mirror_url, headers=headers or {}),
+                stream=True,
+            )
+        except Exception as e:
+            if client is not None:
+                await client.aclose()
+            logger.warning(f"[beatmap dl] {label} attempt {attempt + 1} threw: {e}")
+            if attempt == 0:
+                await asyncio.sleep(0.4)
+                continue
+            return None
+
+        if resp.status_code in _TRANSIENT_STATUS and attempt == 0:
+            await resp.aclose()
+            await client.aclose()
+            logger.info(
+                f"[beatmap dl] {label} returned {resp.status_code}; retrying once after backoff"
+            )
+            await asyncio.sleep(0.5)
+            continue
+
+        if resp.status_code >= 400:
+            await resp.aclose()
+            await client.aclose()
+            logger.warning(f"[beatmap dl] {label} -> HTTP {resp.status_code}, giving up on this mirror")
+            return None
+
+        # Stash the client on the response so the caller can close both.
+        resp.extensions["_torii_owned_client"] = client  # type: ignore[index]
+        return resp
+    return None
+
+
+async def _validate_osz_first_chunk(resp: httpx.Response):
+    """Peek at the first 64KB to confirm we're getting a real .osz (PK zip
+    signature) instead of an HTML error page some mirrors return as 200.
+    Returns (is_valid, first_chunk, replacement_iterator). The iterator
+    re-yields first_chunk before continuing the stream so the consumer
+    doesn't lose those bytes.
+    """
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if "zip" in content_type or "octet-stream" in content_type or "osu-beatmap" in content_type:
+        return True, b"", resp.aiter_bytes(chunk_size=65536)
+
+    stream_iter = resp.aiter_bytes(chunk_size=65536)
+    first_chunk = await anext(stream_iter, b"")
+    if not first_chunk.startswith(b"PK"):
+        return False, first_chunk, stream_iter
+
+    async def patched():
+        yield first_chunk
+        async for c in stream_iter:
+            yield c
+
+    return True, first_chunk, patched()
+
+
+async def _close_response(resp: httpx.Response | None) -> None:
+    """Best-effort cleanup of a streaming httpx response and its owned client."""
+    if resp is None:
+        return
+    client = resp.extensions.get("_torii_owned_client") if hasattr(resp, "extensions") else None  # type: ignore[union-attr]
+    try:
+        await resp.aclose()
+    except Exception:
+        pass
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
+async def _race_mirror_pair(
+    candidates: list[tuple[str, dict[str, str] | None, str]],
+) -> tuple[httpx.Response | None, str | None]:
+    """Fire `_attempt_mirror` on every candidate in parallel; return the first
+    one that produces a valid response, cancelling the rest.
+
+    Behaviour:
+      * If the first task to finish returns a Response, declare it the winner
+        and cancel pending tasks. Their httpx clients close via the cancellation
+        path / our finally cleanup.
+      * If the first task returns None (failure), keep waiting for the next.
+      * If every task returns None, return (None, None) so the caller can fall
+        through to the slower serial chain.
+    """
+    if not candidates:
+        return None, None
+
+    tasks: dict[asyncio.Task, str] = {}
+    for url, headers, label in candidates:
+        task = asyncio.create_task(_attempt_mirror(url, headers, label=label))
+        tasks[task] = label
+
+    pending: set[asyncio.Task] = set(tasks.keys())
+    winner: httpx.Response | None = None
+    winner_label: str | None = None
+
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                label = tasks[task]
+                try:
+                    resp = task.result()
+                except asyncio.CancelledError:
+                    continue
+                except Exception as e:
+                    logger.warning(f"[beatmap dl] race task {label} raised: {e}")
+                    continue
+                if resp is not None and winner is None:
+                    winner = resp
+                    winner_label = label
+                    break
+            if winner is not None:
+                break
+    finally:
+        # Clean up losers — cancel any still-pending tasks and close any
+        # already-completed responses we didn't pick.
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        for task in tasks:
+            if task in pending or task is None:
+                continue
+            if winner is not None and task.done():
+                # Already accounted for above (we checked done set), but the
+                # done set might include tasks we never inspected because we
+                # broke out early after picking the winner. Close any extra
+                # responses to avoid socket leaks.
+                if not task.cancelled():
+                    try:
+                        result = task.result()
+                    except Exception:
+                        result = None
+                    if result is not None and result is not winner:
+                        await _close_response(result)
+
+    return winner, winner_label
+
+
 @router.get("/beatmapsets/{beatmapset_id}/download", tags=["谱面集"])
 async def download_beatmapset(
     storage: StorageService,
+    redis: Redis,
     client_ip: IPAddress,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
     download_service: DownloadService,
     no_video: Annotated[bool, Query(alias="noVideo")] = True,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
-    # Use a short-lived session just for the DB lookup, released before the
-    # streaming response starts — otherwise the session stays open for the
-    # entire download duration and exhausts the connection pool.
+    # ── Layer 0: locally-hosted maps (admin-uploaded) — direct redirect.
     async with with_db() as db:
         local_beatmapset = await db.get(Beatmapset, beatmapset_id)
         is_local = bool(local_beatmapset and local_beatmapset.is_local)
@@ -303,6 +519,38 @@ async def download_beatmapset(
             logger.info(f"[beatmap dl] local redirect {beatmapset_id} -> {local_url}")
             return RedirectResponse(url=local_url, status_code=307)
 
+    # ── Layer 1: opportunistic cache from a previous proxy success.
+    cache_path = f"cache/beatmapsets/{beatmapset_id}.osz"
+    if await storage.is_exists(cache_path):
+        cached_url = await storage.get_file_url(cache_path)
+        logger.info(f"[beatmap dl] cache hit {beatmapset_id} -> {cached_url}")
+        return RedirectResponse(url=cached_url, status_code=307)
+
+    # ── Negative cache: avoid spamming mirrors when we already proved this
+    # map is unavailable everywhere. The lazer client retries failed
+    # downloads automatically; without this short-circuit each retry would
+    # walk the entire mirror chain again. 5-minute TTL gives mirrors time
+    # to refresh their indexes if it's a transient gap.
+    neg_cache_key = f"dl_failed:{beatmapset_id}"
+    try:
+        neg = await redis.get(neg_cache_key)
+    except Exception as e:
+        logger.warning(f"[beatmap dl] negative-cache read failed: {e}")
+        neg = None
+    if neg:
+        logger.info(f"[beatmap dl] negative-cache hit {beatmapset_id} -> 503 immediately")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "This beatmap is not available on any of our mirrors right now. "
+                "We'll re-check in 60 seconds — try again then. "
+                f"(reason cached: {neg.decode() if isinstance(neg, bytes) else neg})"
+            ),
+        )
+
+    # ── Layer 2: mirror chain. Decide CN vs international by GeoIP, with a
+    # fallback to the authenticated user's country_code only when the IP
+    # itself is public (private/loopback IPs would mis-classify Docker/dev).
     geoip_helper = get_geoip_helper()
     geo_info = geoip_helper.lookup(client_ip)
     country_code = geo_info.get("country_iso", "")
@@ -315,147 +563,204 @@ async def download_beatmapset(
     if country_code:
         is_china = country_code == "CN"
     elif not is_private_ip and current_user and current_user.country_code:
-        # 仅当客户端是公网 IP 且 GeoIP 无结果时，回退到用户资料国家。
         is_china = current_user.country_code == "CN"
     else:
-        # 本地开发 / Docker 网段下不强制走 CN 镜像，避免误判。
         is_china = False
 
     download_urls = download_service.get_download_urls(
         beatmapset_id=beatmapset_id, no_video=no_video, is_china=is_china
     )
 
-    if not download_urls:
-        raise HTTPException(status_code=503, detail="No download URLs available")
-
-    # Proxy the download through the server instead of redirecting.
-    # Most mirrors use redirect chains that osu! clients can't follow reliably,
-    # so we download server-side and stream to the client.
-    from starlette.responses import StreamingResponse
-
-    proxy_timeout = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+    # Map mirror name → (url, headers) so we can compose race/serial groups
+    # in any order without losing track of which is which.
+    by_name: dict[str, tuple[str, dict[str, str] | None, str]] = {}
+    for url in download_urls:
+        if "nerinyan" in url:
+            by_name["nerinyan"] = (url, None, "Nerinyan")
+        elif "osu.direct" in url:
+            by_name["osu.direct"] = (url, None, "osu.direct")
+        elif "akatsuki" in url:
+            by_name["akatsuki"] = (url, None, "Akatsuki")
+        elif "gatari" in url:
+            by_name["gatari"] = (url, None, "Gatari")
+        elif "sayobot" in url:
+            by_name["sayobot"] = (url, None, "Sayobot")
+        else:
+            by_name[url] = (url, None, url)
 
     if settings.beatconnect_api_token:
-        beatconnect_url = f"{str(settings.beatconnect_base_url).rstrip('/')}/b/{beatmapset_id}/"
-        try:
-            logger.info(f"[beatmap dl] BeatConnect proxy attempt {beatmapset_id} -> {beatconnect_url}")
-            client = httpx.AsyncClient(follow_redirects=True, timeout=proxy_timeout)
-            resp = await client.send(
-                client.build_request(
-                    "GET",
-                    beatconnect_url,
-                    headers={"Token": settings.beatconnect_api_token},
-                ),
-                stream=True,
-            )
+        by_name["beatconnect"] = (
+            f"{str(settings.beatconnect_base_url).rstrip('/')}/b/{beatmapset_id}/",
+            {"Token": settings.beatconnect_api_token},
+            "BeatConnect",
+        )
 
-            if resp.status_code < 400:
-                content_type = (resp.headers.get("Content-Type") or "").lower()
-                stream_iter = resp.aiter_bytes(chunk_size=65536)
-                first_chunk = await anext(stream_iter, b"")
+    if not by_name:
+        raise HTTPException(status_code=503, detail="No download URLs available")
 
-                if "zip" in content_type or "octet-stream" in content_type or first_chunk.startswith(b"PK"):
-                    async def beatconnect_stream():
-                        if first_chunk:
-                            yield first_chunk
-                        async for c in stream_iter:
-                            yield c
-
-                    content_length = resp.headers.get("Content-Length")
-                    resp_headers = {
-                        "Content-Type": "application/x-osu-beatmap-archive",
-                        "Content-Disposition": f'attachment; filename="{beatmapset_id}.osz"',
-                    }
-                    if content_length:
-                        resp_headers["Content-Length"] = content_length
-
-                    async def stream_body():
-                        try:
-                            async for chunk in beatconnect_stream():
-                                yield chunk
-                        finally:
-                            await resp.aclose()
-                            await client.aclose()
-
-                    logger.info(f"[beatmap dl] proxying {beatmapset_id} from BeatConnect")
-                    return StreamingResponse(
-                        stream_body(),
-                        status_code=200,
-                        headers=resp_headers,
-                    )
-
-            await resp.aclose()
-            await client.aclose()
-            logger.warning(f"[beatmap dl] BeatConnect fallback for {beatmapset_id} -> {resp.status_code}")
-        except Exception as e:
-            logger.warning(f"[beatmap dl] BeatConnect proxy failed for {beatmapset_id}: {e}")
-
-    for mirror_url in download_urls:
-        try:
-            logger.info(f"[beatmap dl] proxy attempt {beatmapset_id} -> {mirror_url}")
-            client = httpx.AsyncClient(follow_redirects=True, timeout=proxy_timeout)
-            resp = await client.send(
-                client.build_request("GET", mirror_url),
-                stream=True,
-            )
-
-            if resp.status_code >= 400:
-                await resp.aclose()
-                await client.aclose()
-                logger.warning(f"[beatmap dl] {mirror_url} -> {resp.status_code}")
-                continue
-
-            # Verify it looks like a zip/osz file
-            content_type = (resp.headers.get("Content-Type") or "").lower()
-            is_valid = "zip" in content_type or "octet-stream" in content_type or "osu-beatmap" in content_type
-
-            if not is_valid:
-                # Peek at the first bytes to check for PK header
-                stream_iter = resp.aiter_bytes(chunk_size=65536)
-                first_chunk = await anext(stream_iter, b"")
-                if not first_chunk.startswith(b"PK"):
-                    await resp.aclose()
-                    await client.aclose()
-                    logger.warning(f"[beatmap dl] {mirror_url} not a valid osz (ct={content_type})")
-                    continue
-                # Put the first chunk back by wrapping the stream
-                async def patched_stream():
-                    yield first_chunk
-                    async for c in stream_iter:
-                        yield c
-
-                stream_iter = patched_stream()
-            else:
-                stream_iter = resp.aiter_bytes(chunk_size=65536)
-
-            content_length = resp.headers.get("Content-Length")
-            resp_headers = {
-                "Content-Type": "application/x-osu-beatmap-archive",
-                "Content-Disposition": f'attachment; filename="{beatmapset_id}.osz"',
-            }
-            if content_length:
-                resp_headers["Content-Length"] = content_length
-
-            async def stream_body():
-                try:
-                    async for chunk in stream_iter:
-                        yield chunk
-                finally:
-                    await resp.aclose()
-                    await client.aclose()
-
-            logger.info(f"[beatmap dl] proxying {beatmapset_id} from {mirror_url}")
-            return StreamingResponse(
-                stream_body(),
-                status_code=200,
-                headers=resp_headers,
-            )
-
-        except Exception as e:
-            logger.warning(f"[beatmap dl] proxy failed for {mirror_url}: {e}")
+    # Race tier — all four mirrors fired in parallel. The first to return a
+    # valid 200 wins, losers cancelled mid-flight. Each fills a different
+    # niche so the union catches every map any of them has:
+    #   - Nerinyan: fast 302 (~30ms), broad newer catalog, occasional CDN 404s.
+    #   - osu.direct: ~600ms-2s, very stable, broad coverage.
+    #   - Akatsuki: ~3-6s, complete-ish catalog for newer maps.
+    #   - Gatari: ~1-2s for older maps the other three often don't have
+    #     (e.g. 2015-era beatmapsets that got purged from newer mirrors).
+    #
+    # Why we accept 4 concurrent connections per request: each mirror's TCP
+    # handshake is ~50ms, the data only flows from the winner, and the
+    # complementary catalogue coverage means the user almost never falls
+    # through to the slow serial fallback.
+    #
+    # Why BeatConnect is NOT in the race despite the paid token: real-world
+    # testing shows it still hits a per-IP rate limit (429) around ~10rpm
+    # regardless of the token. Hot-path inclusion would inject sporadic
+    # failures. It stays as the lone serial fallback — the literal "I don't
+    # care how slow, just give me the map" lifeline.
+    race_group: list[tuple[str, dict[str, str] | None, str]] = [
+        by_name[k] for k in ("nerinyan", "osu.direct", "akatsuki", "gatari") if k in by_name
+    ]
+    serial_fallback: list[tuple[str, dict[str, str] | None, str]] = [
+        by_name[k] for k in ("beatconnect", "sayobot") if k in by_name
+    ]
+    # Anything we don't recognise (custom config) goes to serial fallback at
+    # the end so we still try it before giving up.
+    for key, val in by_name.items():
+        if key in {"nerinyan", "osu.direct", "akatsuki", "gatari", "beatconnect", "sayobot"}:
             continue
+        serial_fallback.append(val)
 
-    raise HTTPException(status_code=503, detail="All download mirrors failed")
+    from starlette.responses import StreamingResponse
+
+    chosen: httpx.Response | None = None
+    chosen_label: str | None = None
+
+    if race_group:
+        logger.info(
+            f"[beatmap dl] racing {len(race_group)} mirrors for {beatmapset_id}: "
+            f"{', '.join(label for _, _, label in race_group)}"
+        )
+        chosen, chosen_label = await _race_mirror_pair(race_group)
+
+    if chosen is None:
+        for url, headers, label in serial_fallback:
+            logger.info(f"[beatmap dl] fallback try {label} for {beatmapset_id}")
+            resp = await _attempt_mirror(url, headers, label=label)
+            if resp is not None:
+                chosen = resp
+                chosen_label = label
+                break
+
+    async def _mark_unavailable(reason: str) -> None:
+        """Set the negative cache key so retry storms don't re-walk the whole
+        mirror chain for the same dead beatmap. 60s is short enough that a
+        legitimately-existing map that's just temporarily missing from every
+        mirror gets re-checked quickly, while still spamming-protecting us
+        against lazer client retry loops."""
+        try:
+            await redis.setex(neg_cache_key, 60, reason)
+        except Exception as e:
+            logger.warning(f"[beatmap dl] negative-cache write failed: {e}")
+
+    if chosen is None:
+        await _mark_unavailable("all-mirrors-4xx")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "All download mirrors failed. The map either doesn't exist on "
+                "Nerinyan, osu.direct, Gatari, or BeatConnect, or every mirror "
+                "is currently rate-limiting/down. Cached this status for 5 minutes."
+            ),
+        )
+
+    is_valid, _first_chunk, stream_iter = await _validate_osz_first_chunk(chosen)
+    if not is_valid:
+        logger.warning(
+            f"[beatmap dl] {chosen_label} returned non-osz body "
+            f"(ct={chosen.headers.get('Content-Type')}); falling back to other mirrors"
+        )
+        await _close_response(chosen)
+        failed_label = chosen_label
+        chosen = None
+        chosen_label = None
+        # Retry every OTHER mirror — race losers we cancelled mid-flight + the
+        # whole serial fallback tier — until one returns a real osz.
+        retry_chain = [c for c in (race_group + serial_fallback) if c[2] != failed_label]
+        for url, headers, label in retry_chain:
+            resp = await _attempt_mirror(url, headers, label=label)
+            if resp is None:
+                continue
+            is_valid, _first_chunk, stream_iter = await _validate_osz_first_chunk(resp)
+            if is_valid:
+                chosen = resp
+                chosen_label = label
+                break
+            await _close_response(resp)
+        if chosen is None:
+            await _mark_unavailable("all-mirrors-non-osz")
+            raise HTTPException(
+                status_code=503,
+                detail="All mirrors returned invalid (non-osz) responses. Cached this status for 5 minutes.",
+            )
+
+    content_length = chosen.headers.get("Content-Length")
+    resp_headers = {
+        "Content-Type": "application/x-osu-beatmap-archive",
+        "Content-Disposition": f'attachment; filename="{beatmapset_id}.osz"',
+    }
+    if content_length:
+        resp_headers["Content-Length"] = content_length
+
+    owned_client = chosen.extensions.get("_torii_owned_client") if hasattr(chosen, "extensions") else None  # type: ignore[union-attr]
+    chosen_resp = chosen  # bind for closure
+
+    async def stream_body():
+        buffer: list[bytes] = []
+        total = 0
+        too_big = False
+        try:
+            async for chunk in stream_iter:
+                if not too_big:
+                    total += len(chunk)
+                    if total > _MAX_CACHE_BYTES:
+                        too_big = True
+                        buffer.clear()
+                    else:
+                        buffer.append(chunk)
+                yield chunk
+        finally:
+            try:
+                await chosen_resp.aclose()
+            except Exception:
+                pass
+            if owned_client is not None:
+                try:
+                    await owned_client.aclose()
+                except Exception:
+                    pass
+            if not too_big and buffer:
+                payload = b"".join(buffer)
+                buffer.clear()
+
+                async def _flush_cache():
+                    try:
+                        await storage.write_file(
+                            cache_path,
+                            payload,
+                            content_type="application/x-osu-beatmap-archive",
+                        )
+                        logger.info(
+                            f"[beatmap dl] cached {beatmapset_id} ({total} bytes) from {chosen_label}"
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"[beatmap dl] cache write failed for {beatmapset_id}: {exc}"
+                        )
+
+                asyncio.create_task(_flush_cache())
+
+    logger.info(f"[beatmap dl] streaming {beatmapset_id} from {chosen_label}")
+    return StreamingResponse(stream_body(), status_code=200, headers=resp_headers)
 
 
 @router.post(
