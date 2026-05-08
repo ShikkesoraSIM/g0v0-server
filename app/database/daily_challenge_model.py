@@ -30,6 +30,10 @@ class DailyChallengeCreate(DailyChallengeBase):
 
 
 class DailyChallengeUpdate(SQLModel):
+    # Date is read-only here — it lives in the URL path. We accept it in the
+    # body so we can detect and reject mismatches loudly (clients echoing the
+    # full record have been seen to drift from the URL silently).
+    date: str | None = None
     beatmap_id: int | None = None
     ruleset_id: int | None = None
     required_mods: str | None = None

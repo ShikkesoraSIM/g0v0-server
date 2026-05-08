@@ -24,7 +24,7 @@ from app.dependencies.geoip import GeoIPService
 from app.dependencies.storage import StorageService
 from app.dependencies.user import UserAndToken, get_client_user_and_token
 from app.log import log
-from app.models.mods import APIMod, get_available_mods
+from app.models.mods import API_MODS, APIMod, get_available_mods
 from app.models.score import GameMode
 from app.models.notification import ChannelMessage, GlobalAnnouncement
 from app.router.notification.server import server
@@ -45,26 +45,140 @@ from sqlmodel import col, func, select
 
 logger = log("AdminRouter")
 
-def _parse_mods_raw(raw: str | None) -> list[APIMod]:
+def _parse_mods_raw(
+    raw: str | None,
+    *,
+    ruleset_id: int | None = None,
+    field_name: str = "mods",
+    strict: bool = True,
+) -> list[APIMod]:
     """Parse mods from a JSON string into a list of APIMod dicts.
 
     The admin frontend stores mods as a JSON array of acronym strings
-    (e.g. ``["HD","NF"]``).  The rest of the server (cron jobs, room
-    creation) expects APIMod dicts (``[{"acronym": "HD"}, ...]``).
-    This helper normalises both formats and silently falls back to []
-    on parse errors so a bad payload never crashes an endpoint.
+    (legacy: ``["HD","NF"]``) OR APIMod dicts with optional settings
+    (current: ``[{"acronym":"HD"},{"acronym":"DT","settings":{"speed_change":1.6}}]``).
+    The rest of the server (cron jobs, room creation) expects APIMod dicts.
+
+    Behaviour:
+      * Top-level JSON parse errors raise 400 in ``strict`` mode (default
+        for create/update endpoints), or fall through to ``[]`` in
+        ``strict=False`` (used when reading rows back from the DB where
+        we want to keep displaying broken data instead of erroring out).
+      * Each entry must have a string ``acronym``. Malformed entries
+        raise 400 in strict mode rather than being silently dropped —
+        admins were ending up with quietly-different challenges than
+        what they configured.
+      * When ``ruleset_id`` is provided the acronym is checked against
+        ``API_MODS`` for that ruleset. Unknown mods raise 400.
+
+    Note: settings *values* are not range-checked here. The osu! game
+    client validates them at play time — we just guard the shape so
+    the row never has acronyms the runtime can't resolve.
     """
     try:
         parsed = json.loads(raw or "[]")
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as exc:
+        if strict:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid JSON in {field_name}: {exc}",
+            ) from exc
         return []
+    if not isinstance(parsed, list):
+        if strict:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name} must be a JSON array, got {type(parsed).__name__}",
+            )
+        return []
+
+    catalog: dict[str, Any] | None = None
+    if ruleset_id is not None:
+        # API_MODS is dict[ruleset_id, dict[acronym, Mod]]
+        catalog = API_MODS.get(ruleset_id)  # pyright: ignore[reportArgumentType]
+        if catalog is None and strict:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown ruleset_id {ruleset_id}",
+            )
+
     result: list[APIMod] = []
-    for item in parsed:
+    for idx, item in enumerate(parsed):
         if isinstance(item, str):
-            result.append(APIMod(acronym=item))
-        elif isinstance(item, dict) and "acronym" in item:
-            result.append(cast(APIMod, {k: v for k, v in item.items()}))
+            entry = cast(APIMod, {"acronym": item})
+        elif isinstance(item, dict) and isinstance(item.get("acronym"), str):
+            entry = cast(APIMod, {k: v for k, v in item.items()})
+        else:
+            if strict:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field_name}[{idx}] must be a string acronym or {{acronym, settings?}} object",
+                )
+            continue
+
+        if catalog is not None and entry["acronym"] not in catalog:
+            if strict:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown mod acronym '{entry['acronym']}' for ruleset {ruleset_id}",
+                )
+            continue
+
+        result.append(entry)
     return result
+
+
+_RULESET_TO_GAMEMODE: dict[int, GameMode] = {
+    0: GameMode.OSU,
+    1: GameMode.TAIKO,
+    2: GameMode.FRUITS,
+    3: GameMode.MANIA,
+}
+
+
+async def _validate_daily_challenge_inputs(
+    session: Database,
+    *,
+    beatmap_id: int,
+    ruleset_id: int,
+    required_mods_raw: str | None,
+    allowed_mods_raw: str | None,
+) -> tuple[Beatmap, list[APIMod], list[APIMod]]:
+    """Cross-validate the (beatmap, ruleset, mods) triple before persisting a challenge.
+
+    Returns the resolved beatmap and the parsed APIMod lists. Raises 400/404
+    HTTPExceptions on any mismatch — caller can store the parsed lists and
+    trust them.
+
+    Catches the audit's C2 (ruleset/beatmap-mode mismatch) and C3 (silent mod
+    drops) at one chokepoint so create / update / random-pick-create all share
+    the same guarantees.
+    """
+    if ruleset_id not in _RULESET_TO_GAMEMODE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid ruleset_id {ruleset_id} — must be one of 0 (osu!), 1 (taiko), 2 (catch), 3 (mania)",
+        )
+
+    beatmap = await session.get(Beatmap, beatmap_id)
+    if beatmap is None:
+        raise HTTPException(status_code=404, detail=f"Beatmap {beatmap_id} not found")
+
+    expected_mode = _RULESET_TO_GAMEMODE[ruleset_id]
+    if beatmap.mode != expected_mode:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Ruleset/beatmap mode mismatch: ruleset_id={ruleset_id} expects {expected_mode.name} "
+                f"but beatmap {beatmap_id} is {beatmap.mode.name if beatmap.mode else 'unknown'}. "
+                "Either pick a matching beatmap or change the game mode."
+            ),
+        )
+
+    required_mods = _parse_mods_raw(required_mods_raw, ruleset_id=ruleset_id, field_name="required_mods")
+    allowed_mods = _parse_mods_raw(allowed_mods_raw, ruleset_id=ruleset_id, field_name="allowed_mods")
+
+    return beatmap, required_mods, allowed_mods
 
 
 async def _evict_user_from_live_services(session: Database, redis: Redis, user: User) -> None:
@@ -2297,9 +2411,15 @@ async def list_daily_challenges(
             beatmapset = await beatmap.awaitable_attrs.beatmapset
             challenge_res.beatmap = {
                 "id": beatmap.id,
+                "beatmapset_id": beatmap.beatmapset_id,
                 "title": beatmapset.title if beatmapset else "Unknown",
                 "artist": beatmapset.artist if beatmapset else "Unknown",
+                "creator": beatmapset.creator if beatmapset else None,
+                "version": beatmap.version,
                 "difficulty_rating": beatmap.difficulty_rating,
+                "total_length": beatmap.total_length,
+                "bpm": beatmap.bpm,
+                "mode": beatmap.mode.name if beatmap.mode else None,
             }
         challenges_with_beatmap.append(challenge_res)
 
@@ -2392,10 +2512,16 @@ async def create_daily_challenge(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    # Check if beatmap exists
-    beatmap = await session.get(Beatmap, challenge_data.beatmap_id)
-    if not beatmap:
-        raise HTTPException(status_code=404, detail="Beatmap not found")
+    # Single chokepoint: confirms beatmap exists, beatmap.mode matches ruleset_id,
+    # and every acronym in the mod payloads is real for that ruleset. Returns the
+    # parsed APIMod lists so we don't re-parse below.
+    beatmap, required_mods_list, allowed_mods_list = await _validate_daily_challenge_inputs(
+        session,
+        beatmap_id=challenge_data.beatmap_id,
+        ruleset_id=challenge_data.ruleset_id,
+        required_mods_raw=challenge_data.required_mods,
+        allowed_mods_raw=challenge_data.allowed_mods,
+    )
 
     # Check if challenge already exists for this date
     existing_challenge = (
@@ -2403,7 +2529,10 @@ async def create_daily_challenge(
     ).first()
 
     if existing_challenge:
-        raise HTTPException(status_code=409, detail="Daily challenge already exists for this date")
+        raise HTTPException(
+            status_code=409,
+            detail=f"A daily challenge already exists for {challenge_date.isoformat()}.",
+        )
 
     # Check if room_id is already used (if provided)
     if hasattr(challenge_data, 'room_id') and challenge_data.room_id is not None:
@@ -2412,9 +2541,6 @@ async def create_daily_challenge(
         ).first()
         if existing_room_challenge:
             raise HTTPException(status_code=409, detail="Room ID already in use by another daily challenge")
-
-    required_mods_list = _parse_mods_raw(challenge_data.required_mods)
-    allowed_mods_list = _parse_mods_raw(challenge_data.allowed_mods)
 
     # Store mods in canonical APIMod format so that the cron job can consume
     # them directly without further conversion.
@@ -2516,21 +2642,43 @@ async def update_daily_challenge(
     if not challenge:
         raise HTTPException(status_code=404, detail="Daily challenge not found")
 
-    # Update fields if provided
-    if getattr(challenge_data, 'beatmap_id', None) is not None:
-        # Check if new beatmap exists
-        beatmap = await session.get(Beatmap, challenge_data.beatmap_id)
-        if not beatmap:
-            raise HTTPException(status_code=404, detail="Beatmap not found")
-        challenge.beatmap_id = challenge_data.beatmap_id
+    # A4 audit fix: if the body sneaks a `date` in (some clients do, e.g. echoing
+    # the full record), reject the mismatch loudly. Date is the PK; mutating it
+    # from this endpoint isn't supported.
+    body_date = getattr(challenge_data, 'date', None)
+    if body_date is not None and str(body_date) != date:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot change a daily challenge's date from {date} to {body_date}. "
+                "Delete and recreate it on the new date instead."
+            ),
+        )
 
-    if getattr(challenge_data, 'ruleset_id', None) is not None:
-        challenge.ruleset_id = challenge_data.ruleset_id
+    # Determine the *post-update* (beatmap_id, ruleset_id) so we can validate
+    # them as a coherent pair. The patch may touch either field, both, or
+    # neither; whatever the final state is, it has to satisfy the same C2/C3
+    # invariants the create endpoint enforces.
+    next_beatmap_id = challenge_data.beatmap_id if getattr(challenge_data, 'beatmap_id', None) is not None else challenge.beatmap_id
+    next_ruleset_id = challenge_data.ruleset_id if getattr(challenge_data, 'ruleset_id', None) is not None else challenge.ruleset_id
+    next_required_raw = challenge_data.required_mods if getattr(challenge_data, 'required_mods', None) is not None else challenge.required_mods
+    next_allowed_raw = challenge_data.allowed_mods if getattr(challenge_data, 'allowed_mods', None) is not None else challenge.allowed_mods
+
+    _, validated_required, validated_allowed = await _validate_daily_challenge_inputs(
+        session,
+        beatmap_id=next_beatmap_id,
+        ruleset_id=next_ruleset_id,
+        required_mods_raw=next_required_raw,
+        allowed_mods_raw=next_allowed_raw,
+    )
+
+    # Apply the validated state.
+    challenge.beatmap_id = next_beatmap_id
+    challenge.ruleset_id = next_ruleset_id
     if getattr(challenge_data, 'required_mods', None) is not None:
-        # Normalise to APIMod format (frontend sends acronym strings)
-        challenge.required_mods = json.dumps(_parse_mods_raw(challenge_data.required_mods))
+        challenge.required_mods = json.dumps(validated_required)
     if getattr(challenge_data, 'allowed_mods', None) is not None:
-        challenge.allowed_mods = json.dumps(_parse_mods_raw(challenge_data.allowed_mods))
+        challenge.allowed_mods = json.dumps(validated_allowed)
     if getattr(challenge_data, 'room_id', None) is not None:
         # Check if room_id is already used by another challenge
         existing_room_challenge = (
@@ -2635,6 +2783,35 @@ async def delete_daily_challenge(
     if not challenge:
         raise HTTPException(status_code=404, detail="Daily challenge not found")
 
+    # M1 audit fix: clean up the linked multiplayer Room (if any) and the
+    # Redis queue entry, otherwise the challenge row goes but its
+    # materialised state lingers — leaderboards keep referencing a "ghost"
+    # daily and the Redis key still flags the date as taken to the cron job.
+    from app.database.room import Room  # local import to avoid bumping module-level deps
+    if challenge.room_id is not None:
+        room = await session.get(Room, challenge.room_id)
+        if room is not None:
+            # Force-end the room so any in-flight scoring sees a closed window;
+            # delete after so playlist_items / scores cascade through SQLAlchemy.
+            try:
+                room.ends_at = utcnow()
+                session.add(room)
+                await session.flush()
+                await session.delete(room)
+            except Exception as e:
+                # If a related table doesn't cascade-delete cleanly, log and
+                # continue — leaving an orphan room is strictly better than
+                # leaving the challenge row alongside it.
+                logger.warning(
+                    f"Failed to delete daily challenge room {challenge.room_id} for {challenge_date}: {e}"
+                )
+
+    redis = get_redis()
+    try:
+        await redis.delete(f"daily_challenge:{challenge_date}")
+    except Exception as e:
+        logger.warning(f"Failed to clear Redis queue entry for {challenge_date}: {e}")
+
     await session.delete(challenge)
     await session.commit()
 
@@ -2693,7 +2870,9 @@ async def pick_random_daily_challenge_beatmap(
     """
     await require_admin(session, user_and_token)
 
+    import random
     from sqlalchemy import func as sa_func
+    from sqlalchemy.orm import noload, lazyload
     from app.models.beatmap import BeatmapRankStatus
 
     # Eligible statuses match the rest of our DC code path. We include
@@ -2707,8 +2886,15 @@ async def pick_random_daily_challenge_beatmap(
         BeatmapRankStatus.LOVED,
     ]
 
-    # Map ruleset_id (0..3) -> GameMode. Out-of-range -> osu! so a
-    # mistyped admin payload never returns "no maps found".
+    # Ruleset_id -> GameMode mapping. We only support the four canonical
+    # rulesets (0..3) here on purpose: the Torii alt-modes
+    # (osurx / osuap / taikorx / fruitsrx) are not separate beatmap
+    # categories — they're ways to *play* the same osu / taiko / catch
+    # beatmap with RX or AP mod attached, and the underlying
+    # `beatmaps.mode` column stores only the canonical ruleset. To set
+    # up a "relax daily challenge" the admin picks ruleset 0 and adds
+    # RX as a required mod via the new ModPicker. Anything outside 0..3
+    # -> osu! so a mistyped admin payload never returns "no maps found".
     try:
         mode = [GameMode.OSU, GameMode.TAIKO, GameMode.FRUITS, GameMode.MANIA][req.ruleset_id]
     except IndexError:
@@ -2723,13 +2909,51 @@ async def pick_random_daily_challenge_beatmap(
     if req.max_difficulty is not None:
         wheres.append(Beatmap.difficulty_rating <= req.max_difficulty)
 
+    # Replaces the previous `ORDER BY rand() LIMIT 1` over the eligible
+    # set, which on the prod database (~50k+ ranked beatmaps joined with
+    # beatmapsets + failtime via SQLModel's auto-eager-load) blew the
+    # MySQL sort buffer with `(1038, 'Out of sort memory, consider
+    # increasing server sort buffer size')`. Constant-cost replacement:
+    #   1) COUNT(*) over the same WHERE clause (index-friendly, single
+    #      row aggregate)
+    #   2) Pick a random offset in [0, count)
+    #   3) LIMIT 1 OFFSET <offset> (index-friendly with the WHERE index)
+    # Both queries also use noload/lazyload to suppress the auto-eager-
+    # load — we don't need beatmapset on the COUNT, and we'll fetch it
+    # by id below for the picked row only.
+    eligible_count = (
+        await session.exec(
+            select(sa_func.count(col(Beatmap.id)))
+            .where(*wheres)
+        )
+    ).one()
+    if not eligible_count:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No eligible beatmaps matched the requested filters. "
+                "Loosen the star range or pick a different ruleset."
+            ),
+        )
+
+    random_offset = random.randint(0, eligible_count - 1)
+
     beatmap = (
         await session.exec(
-            select(Beatmap).where(*wheres).order_by(sa_func.rand()).limit(1)
+            select(Beatmap)
+            .options(noload(Beatmap.beatmapset), lazyload(Beatmap.failtimes))
+            .where(*wheres)
+            .order_by(col(Beatmap.id))
+            .limit(1)
+            .offset(random_offset)
         )
     ).first()
 
     if beatmap is None:
+        # Race-condition guard: count > 0 but the offset row vanished
+        # between the two queries (someone deleted a beatmap mid-pick).
+        # Vanishingly rare; if it happens, returning 404 with the same
+        # body the empty-set case uses lets the admin click Roll again.
         raise HTTPException(
             status_code=404,
             detail=(
@@ -2777,11 +3001,22 @@ async def pick_random_daily_challenge_beatmap(
             detail=f"A daily challenge already exists for {challenge_date.isoformat()}.",
         )
 
+    # C1 audit fix: normalise mods through _parse_mods_raw so the random
+    # pick endpoint stores the same canonical APIMod[] shape that the
+    # create endpoint does. Beatmap.mode is already known to match
+    # ruleset_id (we filtered by it above), so we pass it through here
+    # too — both invariants are now enforced in one place.
+    required_mods_validated = _parse_mods_raw(
+        req.required_mods, ruleset_id=req.ruleset_id, field_name="required_mods"
+    )
+    allowed_mods_validated = _parse_mods_raw(
+        req.allowed_mods, ruleset_id=req.ruleset_id, field_name="allowed_mods"
+    )
     challenge = DailyChallenge(
         beatmap_id=beatmap.id,
         ruleset_id=req.ruleset_id,
-        required_mods=req.required_mods,
-        allowed_mods=req.allowed_mods,
+        required_mods=json.dumps(required_mods_validated),
+        allowed_mods=json.dumps(allowed_mods_validated),
         date=challenge_date,
     )
     session.add(challenge)
@@ -2933,3 +3168,49 @@ async def disable_maintenance_endpoint(
     from app.service.maintenance_mode import disable, to_admin_dict
     state = await disable(redis)
     return to_admin_dict(state)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Mods catalog
+#
+# Exposes the in-memory `API_MODS` dict (populated from static/mods.json
+# at server startup) to the admin web UI. The frontend's daily-challenge
+# composer uses this to render its mod picker dynamically: every mod the
+# server knows about (acronym, name, type, settings schema, incompat
+# list, multiplayer validity flags, etc.) is surfaced for selection,
+# including Torii-specific additions like PA. Without this endpoint the
+# admin web had to keep its own hard-coded list, which drifted every
+# time mods.json changed and never picked up new additions.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/admin/mods-catalog",
+    name="管理员模组目录",
+    tags=["管理", "g0v0 API"],
+)
+async def get_mods_catalog(
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+) -> dict[str, Any]:
+    """Return the full per-ruleset mod catalog.
+
+    Shape mirrors the in-memory `API_MODS` dict — keyed by ruleset id
+    (string for JSON-friendliness) → mapping of acronym → mod definition
+    object (Acronym, Name, Description, Type, Settings, IncompatibleMods,
+    RequiresConfiguration, UserPlayable, ValidForMultiplayer,
+    ValidForFreestyleAsRequiredMod, ValidForMultiplayerAsFreeMod,
+    AlwaysValidForSubmission).
+
+    Restricted to admins for now because the only consumer is the admin
+    composer; nothing here is sensitive but there's no public surface
+    that needs it yet either.
+    """
+    await require_admin(session, user_and_token)
+
+    # API_MODS dict keys are integers (RulesetID) per the static/mods.json
+    # convention. JSON keys must be strings — stringify on the way out so
+    # consumers can deserialise without surprises.
+    return {
+        "rulesets": {str(rid): mods for rid, mods in API_MODS.items()},
+    }
