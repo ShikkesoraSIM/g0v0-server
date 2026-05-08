@@ -89,6 +89,7 @@ from .statistics import (
 )
 from .suspicious_alert import SuspiciousAlert
 from .team import Team, TeamMember, TeamRequest, TeamResp
+from .torii_hiccup_report import ToriiHiccupReport
 from .total_score_best_scores import TotalScoreBestScore
 from .user import (
     User,

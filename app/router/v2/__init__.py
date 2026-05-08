@@ -12,6 +12,7 @@ from . import (  # noqa: F401
     score,
     session_verify,
     tags,
+    torii_hiccup_reports,
     torii_server_pulse,
     user,
 )
