@@ -2164,6 +2164,17 @@ async def delete_team_admin(
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
+    # Mirror the user-facing delete_team in private/team.py: clear the
+    # team_members rows first because the FK on team_members.team_id →
+    # teams.id is declared without ON DELETE CASCADE. Materialise the
+    # ScalarResult with .all() before mutating the session to avoid the
+    # SQLAlchemy `MissingGreenlet` race where iterating an open result
+    # while issuing concurrent deletes on the same connection trips the
+    # async-IO guard.
+    team_members = (await session.exec(select(TeamMember).where(TeamMember.team_id == team_id))).all()
+    for member in team_members:
+        await session.delete(member)
+
     await session.delete(team)
     await session.commit()
 

@@ -390,7 +390,16 @@ async def delete_team(
     if team.leader_id != current_user.id:
         raise HTTPException(status_code=403, detail="You are not the team leader")
 
-    team_members = await session.exec(select(TeamMember).where(TeamMember.team_id == team_id))
+    # Materialise the team_members result with .all() BEFORE deleting any
+    # row. The previous version iterated the open ScalarResult while
+    # interleaving `await session.delete(...)` calls, which made the
+    # session juggle two in-flight I/O operations on the same connection
+    # — under load that surfaces as `MissingGreenlet: greenlet_spawn has
+    # not been called` and the request bubbles a 500 / network-level
+    # disconnect to the client. team_members.team_id has no
+    # ON DELETE CASCADE on the FK, so we have to clear those rows
+    # manually before dropping the parent team.
+    team_members = (await session.exec(select(TeamMember).where(TeamMember.team_id == team_id))).all()
     for member in team_members:
         await session.delete(member)
 
