@@ -39,7 +39,7 @@ from pathlib import Path
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.calculator import calculate_pp, init_calculator
+from app.calculator import calculate_pp, get_calculator, init_calculator
 from app.calculators.performance.performance_server import (
     PerformanceServerPerformanceCalculator,
     TD_PLAY_STYLE_TAP,
@@ -99,9 +99,14 @@ async def _classify_one(
 ) -> tuple[int, str | None]:
     """Run one classification end-to-end. Returns (score_id, error_msg)
     where ``error_msg`` is None on success."""
+    # get_redis() is sync (returns the module-level Redis client);
+    # get_fetcher() is async (warms the OAuth token on first call);
+    # get_storage_service() is sync. Don't await the wrong ones — the
+    # type errors will surface as AttributeErrors deep inside the call
+    # stack when each is used.
     storage = get_storage_service()
-    fetcher = get_fetcher()
-    redis = await get_redis()
+    fetcher = await get_fetcher()
+    redis = get_redis()
 
     async with AsyncSession(engine) as session:
         score = await session.get(Score, score_id)
@@ -207,7 +212,11 @@ async def main() -> None:
 
     await init_calculator()
 
-    calculator = settings.performance_calculator
+    # get_calculator returns the module-level singleton populated by
+    # init_calculator above. settings.performance_calculator isn't a
+    # thing — settings.calculator is the string module name, not the
+    # instance.
+    calculator = get_calculator()
     if not isinstance(calculator, PerformanceServerPerformanceCalculator):
         logger.error(
             "Active performance calculator is {kind}; need "

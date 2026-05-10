@@ -820,8 +820,7 @@ async def _classify_and_store_td_play_style(db, score, replay_bytes: bytes) -> N
     )
     from app.calculator import calculate_pp, get_calculator
     from app.dependencies.database import get_redis
-    from app.fetcher import Fetcher as FetcherClass
-    from app.config import settings
+    from app.dependencies.fetcher import get_fetcher
 
     calculator = get_calculator()
     if not isinstance(calculator, PerformanceServerPerformanceCalculator):
@@ -832,9 +831,11 @@ async def _classify_and_store_td_play_style(db, score, replay_bytes: bytes) -> N
 
     # Pull the .osu raw text. The classifier needs the hit-object timings
     # to know which intervals to look at (everything between consecutive
-    # hits, excluding sliders and spinners).
-    redis = await get_redis()
-    fetcher = FetcherClass(settings)
+    # hits, excluding sliders and spinners). Use the shared fetcher
+    # singleton — it already has a warm OAuth token, redis-cache wiring,
+    # and the right shape for get_or_fetch_beatmap_raw.
+    redis = get_redis()
+    fetcher = await get_fetcher()
     beatmap_raw = await fetcher.get_or_fetch_beatmap_raw(redis, score.beatmap_id)
     if not beatmap_raw:
         logger.warning(
