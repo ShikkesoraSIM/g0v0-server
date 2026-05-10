@@ -61,7 +61,7 @@ from .user import User, UserDict, UserModel
 
 from pydantic import BaseModel, field_serializer, field_validator
 from redis.asyncio import Redis
-from sqlalchemy import Boolean, Column, DateTime, Index, TextClause, exists
+from sqlalchemy import Boolean, Column, DateTime, Index, SmallInteger, TextClause, exists
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import Mapped, aliased, joinedload
 from sqlalchemy.sql.elements import ColumnElement
@@ -169,6 +169,24 @@ class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
     # weighted contribution on every poll. Captured in
     # _process_statistics right after calculate_user_pp runs.
     account_pp_delta: float = Field(default=0.0)
+
+    # Touchscreen play-style classification, populated by the
+    # /touchscreen/classify endpoint on osu-performance-server when a TD-
+    # tagged score with a replay is submitted (or by the bulk-classify
+    # script for legacy scores). Values:
+    #   0 = Unknown  → no verdict, treat as default (TD penalty applies)
+    #   1 = Tap      → FairTouchScreen — pp recalc strips the TD mod
+    #   2 = Drag     → drag-tap cheese, TD penalty applies (default)
+    #   3 = Mixed    → treated as Drag (conservative)
+    # The pp pipeline reads this column when calling /performance and
+    # passes the corresponding string in the td_play_style field so the
+    # perf server can drop TD from the mod list before calculating pp.
+    # Stored as TINYINT to keep the column cheap on the 50k+ scores table.
+    td_play_style: int = Field(default=0, sa_column=Column(SmallInteger, default=0))
+    # Confidence in [0, 1] from the classifier. NULL when never run.
+    # Kept separately from td_play_style so we can re-tune thresholds and
+    # re-derive the verdict without re-parsing replays.
+    td_classification_confidence: float | None = Field(default=None)
     started_at: datetime = Field(sa_column=Column(DateTime))
     total_score: int = Field(default=0, sa_column=Column(BigInteger))
     maximum_statistics: ScoreStatistics = Field(sa_column=Column(JSON), default_factory=dict)

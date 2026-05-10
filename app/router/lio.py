@@ -789,6 +789,105 @@ class ReplayDataRequest(BaseModel):
     beatmap_id: int = Field(validation_alias=AliasChoices("beatmap_id", "beatmapId", "b"))
 
 
+def _score_is_td_osu(score) -> bool:
+    """True when this score is an osu! ruleset play carrying the TD mod —
+    the only combination where the touchscreen classifier has anything
+    meaningful to say."""
+    if score.gamemode != GameMode.OSU:
+        return False
+    mods = score.mods or []
+    return any(
+        isinstance(m, dict) and str(m.get("acronym", "")).upper() == "TD"
+        for m in mods
+    )
+
+
+async def _classify_and_store_td_play_style(db, score, replay_bytes: bytes) -> None:
+    """Call the perf server's touchscreen classifier, persist the verdict,
+    and (if it changes the pp picture) trigger a pp recalc for this score.
+
+    Errors propagate to the caller, which is expected to swallow them —
+    classification is best-effort, never a blocker on the replay upload
+    path. The score keeps td_play_style = 0 (Unknown) on failure, which
+    means the conservative TD penalty stays applied.
+    """
+    # Local imports to keep the cold-import surface of this router lean
+    # — these are only paid when a TD osu! score actually uploads a replay.
+    from app.calculators.performance.performance_server import (
+        PerformanceServerPerformanceCalculator,
+        td_play_style_from_wire,
+        TD_PLAY_STYLE_TAP,
+    )
+    from app.calculator import calculate_pp, get_calculator
+    from app.dependencies.database import get_redis
+    from app.fetcher import Fetcher as FetcherClass
+    from app.config import settings
+
+    calculator = get_calculator()
+    if not isinstance(calculator, PerformanceServerPerformanceCalculator):
+        # Other calculator backends (rosu-pp, no-calculator) don't know
+        # how to ask a perf server for replay classification. Skip
+        # silently — same conservative state as "perf server unreachable".
+        return
+
+    # Pull the .osu raw text. The classifier needs the hit-object timings
+    # to know which intervals to look at (everything between consecutive
+    # hits, excluding sliders and spinners).
+    redis = await get_redis()
+    fetcher = FetcherClass(settings)
+    beatmap_raw = await fetcher.get_or_fetch_beatmap_raw(redis, score.beatmap_id)
+    if not beatmap_raw:
+        logger.warning(
+            "Touchscreen classifier: no beatmap_raw for beatmap {bm_id}, skipping",
+            bm_id=score.beatmap_id,
+        )
+        return
+
+    result = await calculator.classify_touchscreen(
+        replay_bytes=replay_bytes,
+        beatmap_raw=beatmap_raw,
+        beatmap_id=score.beatmap_id,
+        score_id=score.id,
+    )
+
+    new_style = td_play_style_from_wire(result["style"])
+    prev_style = score.td_play_style or 0
+
+    score.td_play_style = new_style
+    score.td_classification_confidence = result["confidence"]
+    await db.commit()
+    await db.refresh(score)
+
+    logger.info(
+        "Touchscreen classifier: score={score_id} bm={bm_id} style={style} confidence={conf:.2f} prev={prev}",
+        score_id=score.id,
+        bm_id=score.beatmap_id,
+        style=result["style"],
+        conf=result["confidence"],
+        prev=prev_style,
+    )
+
+    # Re-run pp for this score iff the verdict changed AND the change
+    # actually affects the pp penalty (Unknown→Tap or Drag→Tap means
+    # FairTouchScreen kicks in; Tap→anything-else means it should come
+    # back off). No-op in the common case where the verdict was already
+    # the same value (replay re-upload, idempotent re-classification).
+    if new_style != prev_style and (new_style == TD_PLAY_STYLE_TAP or prev_style == TD_PLAY_STYLE_TAP):
+        try:
+            new_pp = await calculate_pp(score, beatmap_raw, db)
+            score.pp = new_pp
+            await db.commit()
+            logger.info(
+                "Touchscreen classifier: recomputed pp for score {score_id}: {pp:.2f} (style {prev} → {new})",
+                score_id=score.id, pp=new_pp, prev=prev_style, new=new_style,
+            )
+        except Exception:
+            logger.exception(
+                "Touchscreen classifier: pp recalc failed for score {score_id}",
+                score_id=score.id,
+            )
+
+
 @router.post("/scores/replay")
 async def save_replay(
     req: ReplayDataRequest | None,
@@ -867,6 +966,25 @@ async def save_replay(
             await db.commit()
             await db.refresh(score)
         logger.debug(f"Saved replay for score {score_id} to {replay_path}")
+
+        # FairTouchScreen / TD-cheese classifier hook.
+        # Runs only for osu! ruleset scores carrying the TD mod — that's the
+        # only mod whose pp treatment can flip based on play style. Failures
+        # are swallowed: a 5xx from the perf server, a corrupt .osr, or the
+        # endpoint being temporarily unavailable should never cause the
+        # client's replay upload to fail. Worst case the column stays 0
+        # (Unknown), the score keeps the current TD penalty, and a periodic
+        # batch run can pick it up later.
+        if score is not None and _score_is_td_osu(score):
+            try:
+                await _classify_and_store_td_play_style(db, score, data_bytes)
+            except Exception as exc:
+                logger.warning(
+                    "Touchscreen classification failed for score {score_id}: {exc}",
+                    score_id=score_id,
+                    exc=exc,
+                )
+
         return {"success": True, "path": replay_path}
     except HTTPException:
         raise

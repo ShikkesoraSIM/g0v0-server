@@ -89,31 +89,47 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
 
     async def calculate_performance(self, beatmap_raw: str, score: "Score") -> PerformanceAttributes:
         # https://github.com/GooGuTeam/osu-performance-server#post-performance
+        #
+        # FairTouchScreen passthrough: the perf server strips the TD mod
+        # from its calculator input iff td_play_style == "tap". The verdict
+        # itself was reached server-side by the classifier (see
+        # classify_touchscreen below) and persisted on the score row. Any
+        # other value (drag / mixed / unknown / 0) leaves TD in place and
+        # the existing penalty applies. Field is omitted entirely when the
+        # column says "Unknown" so the perf server treats it as a normal
+        # request — there's no behavioural difference vs. omitting, but
+        # keeps the wire format compact.
+        td_play_style_value = _td_play_style_to_wire(getattr(score, "td_play_style", 0))
+
         async with AsyncClient(timeout=15) as client:
             try:
+                request_body = {
+                    "beatmap_id": score.beatmap_id,
+                    "beatmap_file": beatmap_raw,
+                    "checksum": score.map_md5,
+                    "accuracy": score.accuracy,
+                    "combo": score.max_combo,
+                    "mods": score.mods,
+                    "statistics": {
+                        "great": score.n300,
+                        "ok": score.n100,
+                        "meh": score.n50,
+                        "miss": score.nmiss,
+                        "perfect": score.ngeki,
+                        "good": score.nkatu,
+                        "large_tick_hit": score.nlarge_tick_hit or 0,
+                        "large_tick_miss": score.nlarge_tick_miss or 0,
+                        "small_tick_hit": score.nsmall_tick_hit or 0,
+                        "slider_tail_hit": score.nslider_tail_hit or 0,
+                    },
+                    "ruleset": score.gamemode.to_base_ruleset().value,
+                }
+                if td_play_style_value is not None:
+                    request_body["td_play_style"] = td_play_style_value
+
                 resp = await client.post(
                     f"{self.server_url}/performance",
-                    json={
-                        "beatmap_id": score.beatmap_id,
-                        "beatmap_file": beatmap_raw,
-                        "checksum": score.map_md5,
-                        "accuracy": score.accuracy,
-                        "combo": score.max_combo,
-                        "mods": score.mods,
-                        "statistics": {
-                            "great": score.n300,
-                            "ok": score.n100,
-                            "meh": score.n50,
-                            "miss": score.nmiss,
-                            "perfect": score.ngeki,
-                            "good": score.nkatu,
-                            "large_tick_hit": score.nlarge_tick_hit or 0,
-                            "large_tick_miss": score.nlarge_tick_miss or 0,
-                            "small_tick_hit": score.nsmall_tick_hit or 0,
-                            "slider_tail_hit": score.nslider_tail_hit or 0,
-                        },
-                        "ruleset": score.gamemode.to_base_ruleset().value,
-                    },
+                    json=request_body,
                 )
                 if resp.status_code != 200:
                     raise PerformanceError(f"Failed to calculate performance: {resp.text}")
@@ -169,6 +185,107 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
                 raise DifficultyError(f"Failed to calculate difficulty: {e}") from e
             except Exception as e:
                 raise DifficultyError(f"Unknown error: {e}") from e
+
+
+    async def classify_touchscreen(
+        self,
+        replay_bytes: bytes,
+        beatmap_raw: str,
+        beatmap_id: int | None = None,
+        score_id: int | None = None,
+    ) -> "TouchScreenClassifyResult":
+        """Ask the performance server to decide whether a TD-tagged osu!
+        replay is a discrete-tap play (FairTouchScreen) or drag-tap cheese.
+
+        Returns a verdict + confidence + raw metric bag. Callers should
+        persist the verdict to ``scores.td_play_style`` and the confidence
+        to ``scores.td_classification_confidence`` so the pp pipeline can
+        consult them downstream without re-parsing the replay.
+
+        Raises :class:`CalculateError` on a server-side failure. Callers
+        treat that as "couldn't classify" — they keep the score's existing
+        column values (typically 0=Unknown), which means the conservative
+        TD penalty stays applied.
+        """
+        import base64
+
+        async with AsyncClient(timeout=15) as client:
+            try:
+                resp = await client.post(
+                    f"{self.server_url}/touchscreen/classify",
+                    json={
+                        "replay_file": base64.b64encode(replay_bytes).decode("ascii"),
+                        "beatmap_file": beatmap_raw,
+                        "beatmap_id": beatmap_id,
+                        "score_id": score_id,
+                    },
+                )
+                if resp.status_code != 200:
+                    raise CalculateError(
+                        f"Touchscreen classifier returned {resp.status_code}: {resp.text}"
+                    )
+                payload = resp.json()
+                return TouchScreenClassifyResult(
+                    style=str(payload.get("style", "unknown")).lower(),
+                    confidence=float(payload.get("confidence", 0.0)),
+                    metrics=payload.get("metrics", {}) or {},
+                )
+            except HTTPError as e:
+                raise CalculateError(f"Touchscreen classify HTTP error: {e}") from e
+
+
+class TouchScreenClassifyResult(TypedDict):
+    """Shape of :meth:`PerformanceServerPerformanceCalculator.classify_touchscreen`'s return.
+
+    ``style`` is one of ``"tap"``, ``"drag"``, ``"mixed"``, or ``"unknown"``
+    (lower-cased on the wire); the helpers below convert between the wire
+    form and the int enum stored on ``scores.td_play_style``.
+    """
+
+    style: str
+    confidence: float
+    metrics: dict[str, float]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Enum mapping helpers. The DB stores td_play_style as a SmallInteger
+# (cheap, indexable, easy to compare in WHERE clauses) while the perf
+# server's JSON wire format uses lowercase strings (matches the C# enum
+# name). These two helpers are the single conversion point so we don't
+# scatter magic-number-to-name mappings across the codebase.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Values match the C# enum in PerformanceServer/TouchScreen/TouchScreenPlayStyle.cs
+# and the migration's documented mapping. Don't reorder.
+TD_PLAY_STYLE_UNKNOWN = 0
+TD_PLAY_STYLE_TAP = 1
+TD_PLAY_STYLE_DRAG = 2
+TD_PLAY_STYLE_MIXED = 3
+
+_TD_WIRE_TO_INT: dict[str, int] = {
+    "unknown": TD_PLAY_STYLE_UNKNOWN,
+    "tap": TD_PLAY_STYLE_TAP,
+    "drag": TD_PLAY_STYLE_DRAG,
+    "mixed": TD_PLAY_STYLE_MIXED,
+}
+
+_TD_INT_TO_WIRE: dict[int, str] = {v: k for k, v in _TD_WIRE_TO_INT.items()}
+
+
+def td_play_style_from_wire(style: str) -> int:
+    """Translate ``"tap"`` → 1, ``"drag"`` → 2, etc. Anything unrecognised
+    becomes 0 (Unknown) so the column always has a clean integer."""
+    return _TD_WIRE_TO_INT.get(style.lower(), TD_PLAY_STYLE_UNKNOWN)
+
+
+def _td_play_style_to_wire(value: int | None) -> str | None:
+    """Translate the stored int back to the perf server's wire string,
+    returning None for Unknown / NULL / out-of-range so the caller can
+    elide the field from the request body entirely (less noise on the
+    wire, matches what a pre-migration request would look like)."""
+    if not value:
+        return None
+    return _TD_INT_TO_WIRE.get(int(value)) or None
 
 
 PerformanceCalculator = PerformanceServerPerformanceCalculator
