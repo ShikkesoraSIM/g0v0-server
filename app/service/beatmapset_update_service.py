@@ -46,6 +46,35 @@ class ChangedBeatmap(NamedTuple):
     type: BeatmapChangeType
 
 
+# Fields whose change between an old beatmap row and an incoming one is
+# enough to invalidate existing scores on the map. Anything else (tags,
+# source, video filename, description, etc.) shifts the .osu md5 too —
+# and therefore the wiring that detects MAP_UPDATED — but the gameplay
+# itself is unchanged, so wiping every player's best-score row over a
+# metadata edit is needlessly punishing (huge surprise -pp / -score on
+# the next score submission, reported by users as "I just lost pp for
+# no reason"). Comparing the snapshot below catches the real reworks
+# (notes added/removed, slider ticks rebalanced, diff settings tweaked,
+# upstream SR rework) while skipping the metadata-only flips.
+def _gameplay_snapshot(beatmap: Beatmap) -> tuple:
+    # AR/CS/HP/OD are stored as floats but the API source rounds to 1
+    # decimal place; round to 2 here to absorb the occasional repr-float
+    # jitter (5.0000001 vs 5.0) that would otherwise look like a change.
+    # BPM and SR get a small tolerance for the same reason.
+    return (
+        beatmap.count_circles,
+        beatmap.count_sliders,
+        beatmap.count_spinners,
+        beatmap.max_combo or 0,
+        round(beatmap.ar or 0.0, 2),
+        round(beatmap.cs or 0.0, 2),
+        round(beatmap.drain or 0.0, 2),
+        round(beatmap.accuracy or 0.0, 2),
+        round(beatmap.bpm or 0.0, 2),
+        round(beatmap.difficulty_rating or 0.0, 2),
+    )
+
+
 BASE = 1200
 TAU = 3600
 JITTER_MIN = -30
@@ -439,6 +468,12 @@ class BeatmapsetUpdateService:
                     )
                     new_db_beatmap = await Beatmap.from_resp_no_save(session, beatmap)  # pyright: ignore[reportArgumentType]
                     existing_beatmap = await session.get(Beatmap, change.beatmap_id)
+                    # Snapshot the OLD gameplay fields before session.merge
+                    # overwrites the existing row's attributes. We compare
+                    # against the new snapshot further down to decide whether
+                    # the update is real-rework (wipe scores) or
+                    # metadata-only (preserve scores).
+                    old_gameplay = _gameplay_snapshot(existing_beatmap) if existing_beatmap else None
                     if existing_beatmap:
                         # Preserve the checksum we already have. The official osu! API
                         # serves a different .osu byte stream than mirrors like BeatConnect,
@@ -459,7 +494,33 @@ class BeatmapsetUpdateService:
                                 f"but beatmap not found in database; deletion skipped"
                             )
                     if change.type != BeatmapChangeType.STATUS_CHANGED:
-                        await _process_update_or_delete_beatmaps(change.beatmap_id)
+                        # Decide whether to wipe player best-scores on this
+                        # beatmap. Wipe is appropriate when:
+                        #   - the map was deleted upstream (scores are now
+                        #     orphan and shouldn't keep counting), or
+                        #   - we never had this beatmap before (defensive;
+                        #     no existing scores to preserve in practice), or
+                        #   - the actual gameplay fields changed (notes
+                        #     added/removed, diff settings tweaked, SR rework).
+                        # We DO NOT wipe when only the .osu md5 shifted with
+                        # gameplay fields unchanged — that's almost always a
+                        # metadata-only edit (tags, source, video, description)
+                        # which doesn't affect any existing score's validity,
+                        # and wiping in that case produces the user-visible
+                        # "I just lost pp / score for nothing" surprise.
+                        new_gameplay = _gameplay_snapshot(new_db_beatmap)
+                        should_wipe = (
+                            change.type == BeatmapChangeType.MAP_DELETED
+                            or old_gameplay is None
+                            or old_gameplay != new_gameplay
+                        )
+                        if should_wipe:
+                            await _process_update_or_delete_beatmaps(change.beatmap_id)
+                        else:
+                            logger.opt(colors=True).info(
+                                f"<g>[beatmap: {change.beatmap_id}]</g> md5 changed but gameplay "
+                                f"fields unchanged — preserving existing scores"
+                            )
                 await get_beatmapset_cache_service(get_redis()).invalidate_beatmap_lookup_cache(change.beatmap_id)
 
 
