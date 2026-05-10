@@ -63,9 +63,16 @@ class RankHighest(TypedDict):
 
 
 class UserProfileCover(TypedDict):
+    # `custom_url` and `id` are NotRequired AND nullable: legacy rows store
+    # them as JSON null instead of omitting the keys (e.g. user id=281 has
+    # `{"id": null, "url": "", "custom_url": null}`), which would otherwise
+    # fail Pydantic's strict TypedDict validation when re-validating the
+    # cover dict in `DatabaseModel.transform`. Crash manifested as 500s on
+    # any global leaderboard whose result set included such a user (country
+    # leaderboards stayed up because they happened not to include them).
     url: str
-    custom_url: NotRequired[str]
-    id: NotRequired[str]
+    custom_url: NotRequired[str | None]
+    id: NotRequired[str | None]
 
 
 Badge = TypedDict(
