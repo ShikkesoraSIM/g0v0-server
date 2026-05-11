@@ -108,7 +108,14 @@ async def _classify_one(
     fetcher = await get_fetcher()
     redis = get_redis()
 
-    async with AsyncSession(engine) as session:
+    # expire_on_commit=False prevents the post-commit attribute expiration
+    # that would otherwise force a re-fetch of every column the moment we
+    # touch it for logging. The async re-fetch path can land outside the
+    # greenlet that the original session was running in (the recalc step
+    # detours through HTTP and back), and a re-fetch there raises
+    # MissingGreenlet. None of this script needs to see fresh column values
+    # after commit anyway.
+    async with AsyncSession(engine, expire_on_commit=False) as session:
         score = await session.get(Score, score_id)
         if score is None:
             return score_id, "score row vanished"
