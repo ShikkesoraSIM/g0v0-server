@@ -1,7 +1,11 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 
-ARG PERF_SERVER_REPO=https://github.com/GooGuTeam/osu-performance-server.git
-ARG PERF_SERVER_REF=cb976bc
+# Torii fork carries the FairTouchScreen replay-classifier endpoint
+# (POST /touchscreen/classify) and the TD-pp-bypass passthrough on
+# POST /performance. Both live entirely in the perf-server wrapper so
+# the shared osu.Game DLLs ship to the client untouched.
+ARG PERF_SERVER_REPO=https://github.com/ShikkesoraSIM/torii-performance-server.git
+ARG PERF_SERVER_REF=500ad35
 ARG OSU_REPO=https://github.com/vernonlim/osu.git
 ARG OSU_REF=c2f5ac34625264846a4379e313b96fc4debd06ac
 
