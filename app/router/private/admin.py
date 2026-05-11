@@ -1410,6 +1410,14 @@ async def ban_user(
     except Exception as exc:
         logger.warning(f"Failed to push immediate restriction PM to user {user_id}: {exc}")
 
+    # _send_message above commits internally, which expires every
+    # attribute on `user`. The first access in _evict_user_from_live_services
+    # (`user.id`) would then trigger an async re-fetch outside the
+    # greenlet context and raise MissingGreenlet. Refreshing the user
+    # rehydrates the attributes in the right context so the eviction
+    # path can proceed normally.
+    await session.refresh(user)
+
     await _evict_user_from_live_services(session, redis, user)
 
 
