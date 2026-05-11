@@ -435,6 +435,27 @@ async def chat_websocket(
             ).all()
             for channel in pm_channels:
                 await server.join_channel(user, channel)
+
+            # If the user is restricted, fire a ToriiHalo PM into their
+            # bot-PM channel right after their WS comes up. The message
+            # lands in the bot-PM channel so they see it in their chat
+            # tray every time they reconnect — paired with the frontend
+            # banner this is what "you're restricted" surfaces as.
+            # Failure here is swallowed: a missing/locked PM channel
+            # shouldn't tear down the user's whole WS session.
+            try:
+                if await user.is_restricted(session):
+                    from app.router.notification.banchobot import bot as toriihalo
+                    from app.router.auth import RESTRICTED_LOGIN_MESSAGE
+                    bot_channel = await toriihalo._ensure_pm_channel(user, session)
+                    if bot_channel is not None:
+                        await toriihalo._send_message(
+                            bot_channel,
+                            RESTRICTED_LOGIN_MESSAGE,
+                            session,
+                        )
+            except Exception:
+                logger.exception(f"Failed to send restriction PM for user {user_id} on WS connect")
         # --- SESSION CLOSED HERE — pool connection returned before the loop ---
 
         await _listen_stop(websocket, user_id)

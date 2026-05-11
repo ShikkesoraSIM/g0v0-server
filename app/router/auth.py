@@ -80,8 +80,8 @@ CLIENT_VERSION_HEADER_KEYS = (
     "x-build-version",
 )
 RESTRICTED_LOGIN_MESSAGE = (
-    "Your account is banned from Torii. "
-    "Wait 1 month without any further offenses before trying again."
+    "You are restricted, please wait 1 month before your appeal through a "
+    "ticket in the discord server."
 )
 
 
@@ -557,6 +557,11 @@ async def oauth_token(
         await db.refresh(user)
 
         if await user.is_restricted(db):
+            # Restricted users are allowed to log in so they can see the
+            # in-app PM from ToriiHalo and the frontend restriction banner.
+            # Write-side restrictions (score submission, chat send, etc.)
+            # are still enforced at their respective endpoints — this is
+            # purely the read/visibility path.
             await _notify_restricted_login_attempt(db, user)
             await LoginLogService.record_failed_login(
                 db=db,
@@ -566,13 +571,7 @@ async def oauth_token(
                 user_agent=raw_user_agent,
                 client_hash=normalized_version_hash or None,
                 client_label=client_label_for_log,
-                notes="Restricted account login blocked",
-            )
-            return create_oauth_error_response(
-                error="invalid_grant",
-                description=RESTRICTED_LOGIN_MESSAGE,
-                hint=RESTRICTED_LOGIN_MESSAGE,
-                status_code=403,
+                notes="Restricted account login (allowed for visibility)",
             )
 
         user_id = user.id
@@ -779,15 +778,12 @@ async def oauth_token(
                 description="Associated user no longer exists.",
                 hint="Invalid refresh token",
             )
+        # Restricted users are allowed to refresh their tokens — see the
+        # password-grant branch above for the rationale. The PM is sent
+        # via _notify_restricted_login_attempt so the user sees it on
+        # every refresh as well.
         if await user.is_restricted(db):
-            await db.delete(token_record)
-            await db.commit()
-            return create_oauth_error_response(
-                error="invalid_grant",
-                description=RESTRICTED_LOGIN_MESSAGE,
-                hint=RESTRICTED_LOGIN_MESSAGE,
-                status_code=403,
-            )
+            await _notify_restricted_login_attempt(db, user)
 
         # ç”Ÿæˆæ–°çš„è®¿é—®ä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
@@ -853,14 +849,10 @@ async def oauth_token(
 
         # ç¡®ä¿ç”¨æˆ·å¯¹è±¡ä¸Žå½“å‰ä¼šè¯å…³è”
         await db.refresh(user)
+        # Restricted users go through the authorization-code flow too —
+        # see the password-grant branch above for the rationale.
         if await user.is_restricted(db):
             await _notify_restricted_login_attempt(db, user)
-            return create_oauth_error_response(
-                error="invalid_grant",
-                description=RESTRICTED_LOGIN_MESSAGE,
-                hint=RESTRICTED_LOGIN_MESSAGE,
-                status_code=403,
-            )
 
         # ç”Ÿæˆä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)

@@ -1386,6 +1386,30 @@ async def ban_user(
     session.add(restriction)
     await session.commit()
     await session.refresh(user)
+
+    # Fire the ToriiHalo PM BEFORE eviction so the message rides the
+    # currently-open WebSocket out to any live session — the user sees
+    # the explanation in their chat tray the same instant the ban hits,
+    # rather than only on their next reconnect.
+    #
+    # The connect-time hook in notification/server.py will re-send the
+    # PM on every subsequent reconnect (we want the message persistent,
+    # not one-shot), so a delivery race here isn't a real problem — at
+    # worst the user sees the message a second later when they reconnect
+    # after the eviction closes their socket.
+    try:
+        from app.router.notification.banchobot import bot as toriihalo
+        from app.router.auth import RESTRICTED_LOGIN_MESSAGE
+        bot_channel = await toriihalo._ensure_pm_channel(user, session)
+        if bot_channel is not None:
+            await toriihalo._send_message(
+                bot_channel,
+                RESTRICTED_LOGIN_MESSAGE,
+                session,
+            )
+    except Exception as exc:
+        logger.warning(f"Failed to push immediate restriction PM to user {user_id}: {exc}")
+
     await _evict_user_from_live_services(session, redis, user)
 
 
