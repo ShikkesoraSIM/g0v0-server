@@ -2,12 +2,15 @@
 
 Background. The TD mod ("Touch Device") gets auto-applied whenever the
 client detects a touchscreen input device, and carries a flat pp
-penalty. The penalty is justified for drag-and-side-tap "cheese" play
-but unjustified for discrete-tap (stylus / finger) play.
+penalty. The penalty assumes multi-finger aim (which makes jumps
+trivially easy compared to mouse/tablet). It's justified whenever we
+can't rule out multi-finger aim — but a replay showing a continuously
+moving cursor IS proof of single-finger aim, since osu! filters
+secondary-touch positions from the cursor trace.
 
 The classifier in osu-performance-server replays each .osr against its
 beatmap and emits one of {tap, drag, mixed, unknown}. When it says
-``tap``, the pp pipeline strips TD from the calculator input on every
+``drag``, the pp pipeline strips TD from the calculator input on every
 subsequent pp computation for that score — the "FairTouchScreen"
 outcome — without the user having had to play on a specific client.
 
@@ -42,7 +45,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from app.calculator import calculate_pp, get_calculator, init_calculator
 from app.calculators.performance.performance_server import (
     PerformanceServerPerformanceCalculator,
-    TD_PLAY_STYLE_TAP,
+    TD_PLAY_STYLE_DRAG,
     td_play_style_from_wire,
 )
 from app.config import settings
@@ -170,11 +173,11 @@ async def _classify_one(
         await session.refresh(score)
 
         # Re-run pp iff the verdict actually toggles the TD bypass.
-        # Unknown↔Drag↔Mixed transitions don't affect pp (TD penalty
+        # Unknown↔Tap↔Mixed transitions don't affect pp (TD penalty
         # remains applied for all of those), so skip the recalc — saves
-        # one calculate_pp call per non-Tap classification, which is the
-        # common case (~70% of replays based on early sampling).
-        if new_style != prev_style and (new_style == TD_PLAY_STYLE_TAP or prev_style == TD_PLAY_STYLE_TAP):
+        # one calculate_pp call per non-Drag classification, which is the
+        # common case under the current policy.
+        if new_style != prev_style and (new_style == TD_PLAY_STYLE_DRAG or prev_style == TD_PLAY_STYLE_DRAG):
             try:
                 new_pp = await calculate_pp(score, beatmap_raw, session)
                 score.pp = new_pp

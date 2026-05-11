@@ -5,7 +5,7 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 # POST /performance. Both live entirely in the perf-server wrapper so
 # the shared osu.Game DLLs ship to the client untouched.
 ARG PERF_SERVER_REPO=https://github.com/ShikkesoraSIM/torii-performance-server.git
-ARG PERF_SERVER_REF=500ad35
+ARG PERF_SERVER_REF=601d057
 ARG OSU_REPO=https://github.com/vernonlim/osu.git
 ARG OSU_REF=c2f5ac34625264846a4379e313b96fc4debd06ac
 

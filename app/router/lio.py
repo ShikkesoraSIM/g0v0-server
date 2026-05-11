@@ -816,7 +816,7 @@ async def _classify_and_store_td_play_style(db, score, replay_bytes: bytes) -> N
     from app.calculators.performance.performance_server import (
         PerformanceServerPerformanceCalculator,
         td_play_style_from_wire,
-        TD_PLAY_STYLE_TAP,
+        TD_PLAY_STYLE_DRAG,
     )
     from app.calculator import calculate_pp, get_calculator
     from app.dependencies.database import get_redis
@@ -869,11 +869,11 @@ async def _classify_and_store_td_play_style(db, score, replay_bytes: bytes) -> N
     )
 
     # Re-run pp for this score iff the verdict changed AND the change
-    # actually affects the pp penalty (Unknown→Tap or Drag→Tap means
-    # FairTouchScreen kicks in; Tap→anything-else means it should come
+    # actually affects the pp penalty (Unknown→Drag or Tap→Drag means
+    # FairTouchScreen kicks in; Drag→anything-else means it should come
     # back off). No-op in the common case where the verdict was already
     # the same value (replay re-upload, idempotent re-classification).
-    if new_style != prev_style and (new_style == TD_PLAY_STYLE_TAP or prev_style == TD_PLAY_STYLE_TAP):
+    if new_style != prev_style and (new_style == TD_PLAY_STYLE_DRAG or prev_style == TD_PLAY_STYLE_DRAG):
         try:
             new_pp = await calculate_pp(score, beatmap_raw, db)
             score.pp = new_pp
@@ -968,25 +968,24 @@ async def save_replay(
             await db.refresh(score)
         logger.debug(f"Saved replay for score {score_id} to {replay_path}")
 
-        # FairTouchScreen / TD-cheese classifier hook — TEMPORARILY DISABLED.
-        # The original "Tap pattern → strip TD penalty" policy was wrong:
-        # multi-finger touchscreen play (the common technique on phones)
-        # ALSO produces the cursor-teleport pattern the classifier scored
-        # as "Tap", and that style is genuinely easier than mouse/tablet —
-        # the TD penalty IS justified for it. Leaving the classifier live
-        # but inert until the policy is redesigned, so we still have the
-        # column populated for future work and the new endpoint stays
-        # reachable for manual investigation.
-        #
-        # if score is not None and _score_is_td_osu(score):
-        #     try:
-        #         await _classify_and_store_td_play_style(db, score, data_bytes)
-        #     except Exception as exc:
-        #         logger.warning(
-        #             "Touchscreen classification failed for score {score_id}: {exc}",
-        #             score_id=score_id,
-        #             exc=exc,
-        #         )
+        # FairTouchScreen classifier hook. Runs for osu! ruleset scores
+        # carrying the TD mod — the only combination where the verdict
+        # affects pp. Policy:
+        #   * Tap   (cursor teleports — could be multi-finger aim) → keep penalty
+        #   * Drag  (cursor continuous — single-finger aim proven)  → FairTouchScreen
+        #   * Mixed (gates failed or signals ambiguous)             → keep penalty
+        # Failures are swallowed — the classifier is best-effort, never a
+        # blocker on the upload path. Worst case the column stays 0
+        # (Unknown), which means the score keeps the current TD penalty.
+        if score is not None and _score_is_td_osu(score):
+            try:
+                await _classify_and_store_td_play_style(db, score, data_bytes)
+            except Exception as exc:
+                logger.warning(
+                    "Touchscreen classification failed for score {score_id}: {exc}",
+                    score_id=score_id,
+                    exc=exc,
+                )
 
         return {"success": True, "path": replay_path}
     except HTTPException:
