@@ -968,23 +968,25 @@ async def save_replay(
             await db.refresh(score)
         logger.debug(f"Saved replay for score {score_id} to {replay_path}")
 
-        # FairTouchScreen / TD-cheese classifier hook.
-        # Runs only for osu! ruleset scores carrying the TD mod — that's the
-        # only mod whose pp treatment can flip based on play style. Failures
-        # are swallowed: a 5xx from the perf server, a corrupt .osr, or the
-        # endpoint being temporarily unavailable should never cause the
-        # client's replay upload to fail. Worst case the column stays 0
-        # (Unknown), the score keeps the current TD penalty, and a periodic
-        # batch run can pick it up later.
-        if score is not None and _score_is_td_osu(score):
-            try:
-                await _classify_and_store_td_play_style(db, score, data_bytes)
-            except Exception as exc:
-                logger.warning(
-                    "Touchscreen classification failed for score {score_id}: {exc}",
-                    score_id=score_id,
-                    exc=exc,
-                )
+        # FairTouchScreen / TD-cheese classifier hook — TEMPORARILY DISABLED.
+        # The original "Tap pattern → strip TD penalty" policy was wrong:
+        # multi-finger touchscreen play (the common technique on phones)
+        # ALSO produces the cursor-teleport pattern the classifier scored
+        # as "Tap", and that style is genuinely easier than mouse/tablet —
+        # the TD penalty IS justified for it. Leaving the classifier live
+        # but inert until the policy is redesigned, so we still have the
+        # column populated for future work and the new endpoint stays
+        # reachable for manual investigation.
+        #
+        # if score is not None and _score_is_td_osu(score):
+        #     try:
+        #         await _classify_and_store_td_play_style(db, score, data_bytes)
+        #     except Exception as exc:
+        #         logger.warning(
+        #             "Touchscreen classification failed for score {score_id}: {exc}",
+        #             score_id=score_id,
+        #             exc=exc,
+        #         )
 
         return {"success": True, "path": replay_path}
     except HTTPException:
