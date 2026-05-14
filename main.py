@@ -32,6 +32,7 @@ from app.router import (
     chat_router,
     file_router,
     lio_router,
+    lio_spectator_router,
     private_router,
     redirect_api_router,
 )
@@ -219,6 +220,7 @@ app.include_router(file_router)
 app.include_router(auth_router)
 app.include_router(private_router)
 app.include_router(lio_router)
+app.include_router(lio_spectator_router)
 app.include_router(beatmap_submission_router)
 
 # 会话验证中间件
