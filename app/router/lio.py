@@ -53,7 +53,15 @@ async def _ensure_room_chat_channel(
 
     if ch is None:
         ch = ChatChannel(
-            name=f"mp_{room.id}",  # 频道名可自定义（注意唯一性）
+            # IMPORTANT: the ChatChannel model maps property `channel_name`
+            # to the DB column `name` (see app/database/chat.py:291). Using
+            # the keyword `name=` here silently discards the value at the
+            # Pydantic / SQLModel layer because there is no `name` field
+            # on ChatChannel — the row gets inserted with `name = NULL`,
+            # which then makes the channel anonymous in the lobby and
+            # also breaks lookups like `mp_{room_id}` everywhere else
+            # that resolves channels by name.
+            channel_name=f"mp_{room.id}",
             description=f"Multiplayer room {room.id} chat",
             type=ChannelType.MULTIPLAYER,
         )
@@ -62,7 +70,14 @@ async def _ensure_room_chat_channel(
         await db.commit()
         await db.refresh(ch)
         await db.refresh(room)
-        if room.channel_id is None:
+        # CRITICAL: the Room model defaults `channel_id` to 0 (int, not None).
+        # The previous `if room.channel_id is None` check therefore never
+        # fired on freshly-created rooms, leaving `room.channel_id = 0` —
+        # an invalid channel reference that caused multiplayer chat
+        # messages to route to whatever channel the client's fallback
+        # picked (observed: #osu, the user's most-recent PM, etc.).
+        # Use a falsy check so both `None` and `0` trigger the assignment.
+        if not room.channel_id:
             room.channel_id = ch.channel_id
     else:
         room.channel_id = ch.channel_id
