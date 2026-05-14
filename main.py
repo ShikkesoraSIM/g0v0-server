@@ -219,8 +219,17 @@ app.include_router(redirect_api_router)
 app.include_router(file_router)
 app.include_router(auth_router)
 app.include_router(private_router)
-app.include_router(lio_router)
+# lio_spectator_router MUST be registered BEFORE lio_router. lio.py has a
+# catch-all `@router.api_route("/{path:path}", ...)` at line 996 that
+# matches every `/_lio/*` request and returns `{"error":"not_found"}`,
+# including paths intended for the Phase 1B spectator surface. Registering
+# the more-specific `/_lio/spectator/*` routes FIRST makes FastAPI match
+# them ahead of the catch-all. A proper fix moves the catch-all to the end
+# of lio.py (after every concrete endpoint including
+# `/_lio/ruleset-hashes` at line 1005 which is currently also shadowed)
+# but that's a separate cleanup; this ordering is sufficient for Phase 1.
 app.include_router(lio_spectator_router)
+app.include_router(lio_router)
 app.include_router(beatmap_submission_router)
 
 # 会话验证中间件
