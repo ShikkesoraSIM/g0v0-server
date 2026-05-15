@@ -23,12 +23,12 @@ from typing import Annotated, Any
 from app.database.suspicious_alert import SuspiciousAlert
 from app.database.user import User
 from app.dependencies.database import Database, Redis, get_redis
-from app.dependencies.user import UserAndToken
+from app.dependencies.user import UserAndToken, get_client_user_and_token
 from app.log import log
 from app.service import hwid_tracker
 from app.utils import utcnow
 
-from fastapi import HTTPException, Query
+from fastapi import HTTPException, Query, Security
 from sqlmodel import col, func, select
 
 from .admin import require_admin
@@ -57,7 +57,7 @@ def _serialize_alert(alert: SuspiciousAlert) -> dict[str, Any]:
 @router.get("/admin/anticheat/alerts", tags=["Admin Anti-cheat"])
 async def admin_search_anticheat_alerts(
     session: Database,
-    user_and_token: UserAndToken,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
     kind: Annotated[
         str | None,
         Query(description="Filter on alert kind. Defaults to anticheat_score; pass blank for all kinds."),
@@ -118,7 +118,7 @@ async def admin_search_anticheat_alerts(
 async def admin_anticheat_user_summary(
     user_id: int,
     session: Database,
-    user_and_token: UserAndToken,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
     redis: Redis,
 ) -> dict[str, Any]:
     """Per-user anti-cheat snapshot: alert counts + HWID correlations."""
@@ -185,7 +185,7 @@ async def admin_anticheat_user_summary(
 async def admin_reset_anticheat_alerts(
     user_id: int,
     session: Database,
-    user_and_token: UserAndToken,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
     kind: Annotated[
         str | None,
         Query(description="Only resolve alerts of this kind. Default: anticheat_score."),
@@ -224,7 +224,7 @@ async def admin_reset_anticheat_alerts(
 async def admin_clear_user_hwid(
     user_id: int,
     session: Database,
-    user_and_token: UserAndToken,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
     redis: Redis,
 ) -> dict[str, Any]:
     """Forget a user's recorded HWIDs from Redis. Used when a user
