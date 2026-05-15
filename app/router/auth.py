@@ -371,6 +371,28 @@ async def register_user(
         daily_challenge_user_stats = DailyChallengeStats(user_id=new_user.id)
         db.add(daily_challenge_user_stats)
         await db.commit()
+
+        # The commit above expires every attribute on `new_user`
+        # (SQLAlchemy's default expire_on_commit=True behaviour). The
+        # SuspiciousAlertService below accesses `user.id` deep inside
+        # `_distinct_other_users_by_ip`, which triggers a lazy
+        # reload — outside the greenlet that ran the original ORM
+        # operation, that lazy reload raises MissingGreenlet, which
+        # the inner try/except below catches BUT then its own
+        # f-string interpolation (`{new_user.id}`) re-triggers the
+        # same lazy-reload failure, escalating to the outer except
+        # which logs "Registration error" and rolls back — skipping
+        # the Discord embed block. Net result: every real
+        # registration silently failed to fire the Discord webhook,
+        # even though the env var was correctly set and the function
+        # itself worked fine when called directly.
+        #
+        # The fix mirrors the existing pattern in `ban_user` (see
+        # admin.py around line 1413): refresh the user explicitly so
+        # subsequent attribute access is hydrated and doesn't need a
+        # lazy reload.
+        await db.refresh(new_user)
+
         try:
             alert_result = await SuspiciousAlertService.maybe_record_registration_alert(
                 db,
@@ -381,6 +403,7 @@ async def register_user(
             )
             if alert_result.created:
                 await db.commit()
+                await db.refresh(new_user)
         except Exception as suspicious_err:
             logger.warning(f"Failed to record suspicious registration alert for user {new_user.id}: {suspicious_err}")
 
