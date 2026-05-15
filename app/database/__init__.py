@@ -87,6 +87,7 @@ from .statistics import (
     UserStatisticsDict,
     UserStatisticsModel,
 )
+from .score_anticheat_analysis import ScoreAnticheatAnalysis
 from .suspicious_alert import SuspiciousAlert
 from .team import Team, TeamMember, TeamRequest, TeamResp
 from .torii_hiccup_report import ToriiHiccupReport

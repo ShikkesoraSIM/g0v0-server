@@ -2000,11 +2000,36 @@ async def _submit_to_anticheat_background(engine, score_id: int):
 
             if verdict is None:
                 # Service unreachable / errored — already logged inside
-                # anticheat_client. Nothing more to do here.
+                # anticheat_client. Persist an "error" placeholder so the
+                # admin can see this score was attempted but failed.
+                await _upsert_anticheat_analysis(
+                    bg_session,
+                    score_id=score_.id,
+                    user_id=user.id,
+                    verdict_payload=None,
+                    trust_applied=trust.final_score,
+                    replay_was_available=replay_b64 is not None,
+                    error="service unreachable or errored",
+                )
+                await bg_session.commit()
                 return
 
             verdict_label = str(verdict.get("verdict", "ok")).lower()
             should_alert = bool(getattr(_cfg, "anticheat_critical_creates_alert", True))
+
+            # Persist the full verdict for the admin replay browser. One
+            # row per score; subsequent re-analyses overwrite it. Done
+            # before the suspicious-alert branch so the cache is filled
+            # regardless of whether an alert row was also created.
+            await _upsert_anticheat_analysis(
+                bg_session,
+                score_id=score_.id,
+                user_id=user.id,
+                verdict_payload=verdict,
+                trust_applied=trust.final_score,
+                replay_was_available=replay_b64 is not None,
+                error=None,
+            )
 
             if should_alert and verdict_label in ("suspicious", "critical"):
                 # Fingerprint dedups per (score_id), so re-runs of the
@@ -2059,7 +2084,9 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                         },
                     )
                     bg_session.add(alert_row)
-                    await bg_session.commit()
+            # Single commit at the end of the background task: covers
+            # both the upserted analysis row and any new alert row.
+            await bg_session.commit()
 
     except Exception as exc:
         # Belt-and-suspenders: any uncaught exception in the entire
@@ -2068,6 +2095,76 @@ async def _submit_to_anticheat_background(engine, score_id: int):
         logger.warning(
             "Background anticheat submit failed for score {}: {}",
             score_id, exc,
+        )
+
+
+async def _upsert_anticheat_analysis(
+    session: "AsyncSession",
+    *,
+    score_id: int,
+    user_id: int,
+    verdict_payload: dict[str, Any] | None,
+    trust_applied: float,
+    replay_was_available: bool,
+    error: str | None,
+) -> None:
+    """Insert or replace the cached analysis row for a score.
+
+    Called from `_submit_to_anticheat_background` so every analysis the
+    external service performs is persisted, regardless of whether it
+    crossed the alert threshold. Failures are swallowed — the analysis
+    cache is best-effort.
+    """
+    from app.database.score_anticheat_analysis import ScoreAnticheatAnalysis as _SAA
+    try:
+        existing = (
+            await session.exec(
+                select(_SAA).where(_SAA.score_id == score_id)
+            )
+        ).first()
+        verdict_label = (
+            str(verdict_payload.get("verdict", "ok")).lower()
+            if verdict_payload else "errored"
+        )
+        confidence = float(verdict_payload.get("confidence", 0.0) or 0.0) if verdict_payload else 0.0
+        detectors = list(verdict_payload.get("detectors_fired", []) or []) if verdict_payload else []
+        reasons = list(verdict_payload.get("reasons", []) or []) if verdict_payload else []
+        metrics = dict(verdict_payload.get("metrics", {}) or {}) if verdict_payload else {}
+        now = utcnow()
+        if existing is None:
+            session.add(
+                _SAA(
+                    score_id=score_id,
+                    user_id=user_id,
+                    verdict=verdict_label,
+                    confidence=confidence,
+                    trust_factor_applied=trust_applied,
+                    detectors_fired=detectors,
+                    reasons=reasons,
+                    metrics=metrics,
+                    replay_was_available=replay_was_available,
+                    analyzer_version="1",
+                    error=error,
+                    analyzed_at=now,
+                )
+            )
+        else:
+            existing.user_id = user_id
+            existing.verdict = verdict_label
+            existing.confidence = confidence
+            existing.trust_factor_applied = trust_applied
+            existing.detectors_fired = detectors
+            existing.reasons = reasons
+            existing.metrics = metrics
+            existing.replay_was_available = replay_was_available
+            existing.analyzer_version = "1"
+            existing.error = error
+            existing.analyzed_at = now
+            session.add(existing)
+    except Exception as e:
+        logger.warning(
+            "anticheat: failed to upsert analysis row for score {}: {}",
+            score_id, e,
         )
 
 
