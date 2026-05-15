@@ -12,6 +12,7 @@ from app.database.score_token import ScoreToken
 from app.database.statistics import UserStatistics
 from app.database.user_login_log import UserLoginLog
 from app.database.daily_challenge_model import DailyChallenge, DailyChallengeCreate, DailyChallengeUpdate, DailyChallengeResponse
+from app.database.donation import apply_supporter_grant
 from app.database.team import Team, TeamMember
 from app.database.user import User
 from app.database.user_account_history import UserAccountHistory, UserAccountHistoryType
@@ -27,6 +28,7 @@ from app.log import log
 from app.models.mods import API_MODS, APIMod, get_available_mods
 from app.models.score import GameMode
 from app.models.notification import ChannelMessage, GlobalAnnouncement
+from app.models.torii_groups import is_currently_supporting
 from app.router.notification.server import server
 from app.service.ranking_cache_service import get_ranking_cache_service
 from app.tasks.daily_challenge import create_daily_challenge_room
@@ -38,7 +40,7 @@ import json
 import httpx
 import hashlib
 from fastapi import File, Form, HTTPException, Query, Security
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_ as sql_or
 from sqlmodel import col, func, select
@@ -1453,6 +1455,146 @@ async def unban_user(
         await session.delete(restriction)
 
     await session.commit()
+
+
+# ========== Manual supporter grant ==========
+#
+# Why this endpoint exists:
+#
+# The Ko-fi webhook path (`router/private/donations.py`) and the
+# admin donation-match path (`router/private/admin_donations.py`)
+# both call `apply_supporter_grant` to mutate the user's supporter
+# state atomically — `is_supporter`, `has_supported`,
+# `total_supporter_months`, `donor_end_at`, `support_level` all
+# move together so the client gates / loyalty tiers / hexagon icon
+# never end up in inconsistent combinations.
+#
+# Before this endpoint existed, the admin user-edit form (`update_user`
+# below at /admin/users/{id} PATCH) could change `username`,
+# `country_code`, `is_admin`, badges and titles, but NOT the
+# supporter fields. So when an admin tried to "manually grant
+# supporter" by adding the Supporter badge via the edit form, the
+# client's gating boolean (`IsSupporter || HasSupported` — see
+# `CustomUiHueHelper.IsDonatorTier` in torii-osu) stayed false and
+# the UI accent hue picker remained locked even though the user
+# visibly had the badge.
+#
+# Rather than expose the five raw fields as toggles (which would
+# let admins create inconsistent states like
+# `is_supporter=True, donor_end_at=NULL`), this endpoint takes a
+# simple "grant N months" intent and routes it through the SAME
+# `apply_supporter_grant` the donation flows use. Zero drift with
+# the donation auto/match paths — if it works for a real $5 Ko-fi
+# donation, it works for this.
+
+class GrantSupporterReq(BaseModel):
+    """Admin-side payload for manually granting supporter time to a user.
+
+    Mirrors the shape of a single donation's "months_granted" effect.
+    `reason` is free-form and only used for the audit log line — it
+    never lands in the user's profile or any user-visible field.
+    """
+
+    months: int = Field(
+        ge=1,
+        le=120,
+        description="Months of supporter to grant. Clamped to [1, 120] so a typo can't grant a literal decade by accident.",
+    )
+    reason: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional free-form note for the audit log (e.g. 'comping for Ko-fi outage', 'fix-up for botched match #123').",
+    )
+
+
+class GrantSupporterResp(BaseModel):
+    """Post-grant snapshot of the user's supporter state. Lets the admin
+    UI render an immediate confirmation without needing a second
+    GET /admin/users/{id} roundtrip."""
+
+    user_id: int
+    username: str
+    months_granted: int
+    total_supporter_months: int
+    donor_end_at: datetime | None
+    is_currently_supporting: bool
+
+
+@router.post(
+    "/admin/users/{user_id}/grant-supporter",
+    name="手动授予用户 Supporter 时长",
+    tags=["管理", "g0v0 API"],
+    response_model=GrantSupporterResp,
+)
+async def grant_supporter(
+    session: Database,
+    user_id: int,
+    body: GrantSupporterReq,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+) -> GrantSupporterResp:
+    """Grant the target user N months of supporter time using the same
+    code path the donation auto-match / admin-match endpoints use.
+
+    Effects (in one DB transaction):
+      - `is_supporter` and `has_supported` flip to True (permanent
+        after first grant — same semantics as a real donation).
+      - `total_supporter_months` increments by `months`.
+      - `donor_end_at` extends from max(now, current end) by
+        30 days × months.
+      - `support_level` snaps to the loyalty tier for the new total.
+
+    Refuses to:
+      - Target a non-existent user (404).
+      - Target the requesting admin themselves — admins granting
+        themselves supporter time is loud-noise abuse-resistant
+        rather than a hard prohibition, but for v1 we just block it
+        (use SQL or another admin if you genuinely need to).
+      - Accept months outside [1, 120].
+
+    The grant DOES NOT need the client to log out / log in
+    immediately to take effect server-side — anywhere on the server
+    that reads supporter state from the DB sees the new values right
+    after this returns. The client, however, only refreshes its
+    cached `LocalUser` on login, so a user who wants the UI accent
+    hue picker (or any other supporter-gated client feature) to
+    light up will need to log out and log back in once after the
+    grant.
+    """
+    admin_user = await require_admin(session, user_and_token)
+
+    target_user = await session.get(User, user_id)
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if target_user.id == admin_user.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing to grant supporter to yourself. Use a second admin or raw SQL if you genuinely need this.",
+        )
+
+    await apply_supporter_grant(
+        session, user=target_user, months_granted=body.months
+    )
+    await session.commit()
+    await session.refresh(target_user)
+
+    logger.info(
+        "Admin {} manually granted {} month(s) of supporter to user {} (id={}). Reason: {}",
+        admin_user.username,
+        body.months,
+        target_user.username,
+        target_user.id,
+        body.reason or "(none)",
+    )
+
+    return GrantSupporterResp(
+        user_id=target_user.id or 0,
+        username=target_user.username,
+        months_granted=body.months,
+        total_supporter_months=target_user.total_supporter_months or 0,
+        donor_end_at=target_user.donor_end_at,
+        is_currently_supporting=is_currently_supporting(target_user),
+    )
 
 
 # ========== Beatmap Blacklist ==========
