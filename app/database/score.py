@@ -41,6 +41,8 @@ from app.models.scoring_mode import ScoringMode
 from app.storage import StorageService
 from app.utils import utcnow
 from app.service.suspicious_alert_service import SuspiciousAlertService
+from app.service.anticheat_client import submit_for_analysis as _anticheat_submit
+from app.service.trust_factor import compute_trust_factor as _compute_trust_factor
 
 from ._base import DatabaseModel, OnDemand, included, ondemand
 from .beatmap import Beatmap, BeatmapDict, BeatmapModel
@@ -1756,6 +1758,242 @@ async def _process_beatmap_playcount(session: AsyncSession, beatmap_id: int, use
             count=beatmap_playcount.playcount,
         )
 
+async def _submit_to_anticheat_background(engine, score_id: int):
+    """Fire-and-forget call to the external anti-cheat service (torii-slitwrist).
+
+    Runs after the score is fully committed + processed, so anything that
+    fails in here is purely advisory — never blocks submission, never rolls
+    back state, never modifies the score row itself. The only persistent
+    side effect is a SuspiciousAlert row when the service returns a
+    verdict that crosses the alert threshold (configurable via
+    settings.anticheat_critical_creates_alert).
+
+    Lifecycle:
+      1. Skip immediately if the feature is disabled (anticheat_url empty).
+      2. Open a fresh AsyncSession — the request session is closed by now.
+      3. Load Score + User + Beatmap joined.
+      4. Compute the user's trust factor (5 small per-user queries).
+      5. Build the payloads for the anti-cheat service.
+      6. Optionally pull the replay binary from storage (gated by
+         anticheat_include_replay AND score.has_replay).
+      7. POST to the service, await verdict (timeout from config).
+      8. If verdict ∈ {suspicious, critical} AND the alert flag is on,
+         insert a SuspiciousAlert row deduplicated by score_id.
+
+    Why this lives here (next to _process_score_events_background) rather
+    than as a separate task chain: both have identical infrastructure needs
+    (fresh session, joined load, error isolation). Keeping them adjacent
+    in the file documents the "post-submit fan-out" pattern in one place.
+    """
+    from app.config import settings as _cfg
+    from app.service.anticheat_client import submit_for_analysis as _ac_submit
+    from app.service.trust_factor import compute_trust_factor as _ac_trust
+    from app.database.suspicious_alert import SuspiciousAlert as _ACSuspiciousAlert
+
+    if not (getattr(_cfg, "anticheat_url", "") or "").strip():
+        return  # feature disabled — no log, this is the default for forks
+
+    try:
+        async with AsyncSession(engine) as bg_session:
+            score_ = (
+                await bg_session.exec(
+                    select(Score)
+                    .where(Score.id == score_id)
+                    .options(
+                        joinedload(Score.user),
+                        joinedload(Score.beatmap),
+                    )
+                )
+            ).first()
+
+            if score_ is None or score_.user is None:
+                return
+
+            user = score_.user
+            beatmap = score_.beatmap
+
+            try:
+                trust = await _ac_trust(bg_session, user.id)
+            except Exception as trust_err:
+                logger.warning(
+                    "anticheat: trust factor computation failed for user {}: {}",
+                    user.id, trust_err,
+                )
+                # Degrade gracefully — still call the service with a neutral
+                # trust factor rather than skipping the check entirely.
+                from app.service.trust_factor import TrustFactorBreakdown as _TFB
+                trust = _TFB(
+                    base=50.0, account_age_days=0, account_age_bonus=0.0,
+                    play_count=0, play_count_bonus=0.0,
+                    supporter_bonus=0.0, staff_bonus=0.0,
+                    distinct_ip_count=0, distinct_ip_penalty=0.0,
+                    prior_alert_count=0, prior_alert_penalty=0.0,
+                    has_restriction_history=False, restriction_penalty=0.0,
+                    final_score=50.0,
+                )
+
+            # Build the wire payload. Mirror the contract documented in
+            # app/service/anticheat_client.py — adding a field here means
+            # updating that file's docstring and the consuming service.
+            score_payload = {
+                "score_id": score_.id,
+                "user_id": user.id,
+                "beatmap_id": beatmap.id if beatmap else None,
+                "passed": bool(score_.passed),
+                "rank": getattr(score_, "rank", None),
+                "total_score": int(getattr(score_, "total_score", 0) or 0),
+                "max_combo": int(getattr(score_, "max_combo", 0) or 0),
+                "accuracy": float(getattr(score_, "accuracy", 0.0) or 0.0),
+                "n300": int(getattr(score_, "n300", 0) or 0),
+                "n100": int(getattr(score_, "n100", 0) or 0),
+                "n50": int(getattr(score_, "n50", 0) or 0),
+                "nmiss": int(getattr(score_, "nmiss", 0) or 0),
+                "ngeki": int(getattr(score_, "ngeki", 0) or 0),
+                "nkatu": int(getattr(score_, "nkatu", 0) or 0),
+                "mods": getattr(score_, "mods", None) or [],
+                "ruleset_id": int(getattr(score_, "ruleset_id", 0) or 0),
+                "pp": float(getattr(score_, "pp", 0.0) or 0.0),
+                "total_length_ms": (
+                    int(beatmap.total_length * 1000)
+                    if beatmap and getattr(beatmap, "total_length", None) is not None
+                    else None
+                ),
+                "submitted_at": (
+                    score_.ended_at.isoformat()
+                    if getattr(score_, "ended_at", None) is not None
+                    else None
+                ),
+            }
+
+            user_payload = {
+                "trust_factor": trust.final_score,
+                "account_age_days": trust.account_age_days,
+                "play_count_global": trust.play_count,
+                "is_supporter": bool(trust.supporter_bonus > 0),
+                "distinct_ip_count": trust.distinct_ip_count,
+                "prior_alerts": trust.prior_alert_count,
+                "has_restriction_history": trust.has_restriction_history,
+            }
+
+            beatmap_payload = {
+                "object_count": (
+                    (int(getattr(beatmap, "count_circles", 0) or 0)
+                     + int(getattr(beatmap, "count_sliders", 0) or 0)
+                     + int(getattr(beatmap, "count_spinners", 0) or 0))
+                    if beatmap else None
+                ),
+                "circle_count": int(getattr(beatmap, "count_circles", 0) or 0) if beatmap else None,
+                "slider_count": int(getattr(beatmap, "count_sliders", 0) or 0) if beatmap else None,
+                "spinner_count": int(getattr(beatmap, "count_spinners", 0) or 0) if beatmap else None,
+                "cs": float(getattr(beatmap, "cs", 0) or 0) if beatmap else None,
+                "od": float(getattr(beatmap, "od", 0) or 0) if beatmap else None,
+                "ar": float(getattr(beatmap, "ar", 0) or 0) if beatmap else None,
+                "hp": float(getattr(beatmap, "hp", 0) or 0) if beatmap else None,
+            }
+
+            # Replay forwarding: gated on both has_replay (DB flag — false
+            # by default at time of writing because replay upload isn't
+            # wired yet) AND the config toggle. Once replay storage is in,
+            # this branch transparently activates.
+            replay_b64: str | None = None
+            include_replay = bool(getattr(_cfg, "anticheat_include_replay", True))
+            if include_replay and getattr(score_, "has_replay", False):
+                try:
+                    import base64 as _b64
+                    from app.storage import StorageService as _StorageSvc
+                    storage = _StorageSvc()
+                    raw = await storage.read_file(score_.replay_filename)
+                    if raw:
+                        replay_b64 = _b64.b64encode(raw).decode("ascii")
+                except Exception as replay_err:
+                    # Replay missing or storage failure is non-fatal —
+                    # behavioural detectors still run on the score+user
+                    # payload alone.
+                    logger.warning(
+                        "anticheat: failed to load replay for score {}: {}",
+                        score_id, replay_err,
+                    )
+
+            verdict = await _ac_submit(
+                score_payload=score_payload,
+                user_payload=user_payload,
+                beatmap_payload=beatmap_payload,
+                replay_b64=replay_b64,
+            )
+
+            if verdict is None:
+                # Service unreachable / errored — already logged inside
+                # anticheat_client. Nothing more to do here.
+                return
+
+            verdict_label = str(verdict.get("verdict", "ok")).lower()
+            should_alert = bool(getattr(_cfg, "anticheat_critical_creates_alert", True))
+
+            if should_alert and verdict_label in ("suspicious", "critical"):
+                # Fingerprint dedups per (score_id), so re-runs of the
+                # background task for the same score (e.g. retries on
+                # transient errors) never create duplicate alerts.
+                fingerprint = f"anticheat:score:{score_.id}"
+                existing = (
+                    await bg_session.exec(
+                        select(_ACSuspiciousAlert).where(
+                            _ACSuspiciousAlert.fingerprint == fingerprint
+                        )
+                    )
+                ).first()
+                if existing is None:
+                    detectors = verdict.get("detectors_fired", []) or []
+                    reasons = verdict.get("reasons", []) or []
+                    title = (
+                        f"Anti-cheat [{verdict_label}] · score {score_.id} · "
+                        + (", ".join(str(d) for d in detectors[:3]) or "pattern")
+                    )[:200]
+                    body_lines = [
+                        "Triggered by torii-slitwrist external detection service.",
+                        "",
+                        f"Confidence: {float(verdict.get('confidence', 0.0) or 0.0):.2f}",
+                        f"Trust factor applied: {trust.final_score:.1f}",
+                        f"Detectors fired: {list(detectors)}",
+                        "",
+                    ]
+                    if reasons:
+                        body_lines.append("Reasons:")
+                        for r in list(reasons)[:10]:
+                            if isinstance(r, dict):
+                                body_lines.append(
+                                    f"  - [{r.get('severity', '?')}] "
+                                    f"{r.get('detector', '?')}: {r.get('code', '?')}"
+                                )
+                            else:
+                                body_lines.append(f"  - {r}")
+
+                    alert_row = _ACSuspiciousAlert(
+                        kind="anticheat_score",
+                        severity=verdict_label,
+                        fingerprint=fingerprint,
+                        user_id=user.id,
+                        score_id=score_.id,
+                        beatmap_id=beatmap.id if beatmap else None,
+                        title=title,
+                        body="\n".join(body_lines),
+                        payload={
+                            "verdict": verdict,
+                            "trust_breakdown": trust.to_dict(),
+                        },
+                    )
+                    bg_session.add(alert_row)
+                    await bg_session.commit()
+
+    except Exception as exc:
+        # Belt-and-suspenders: any uncaught exception in the entire
+        # background task tree gets swallowed here. Score processing is
+        # already done; this task cannot affect it.
+        logger.warning(
+            "Background anticheat submit failed for score {}: {}",
+            score_id, exc,
+        )
+
+
 async def _process_score_events_background(engine, score_id: int):
     """
     🔧 CHANGED (NEW):
@@ -1910,6 +2148,18 @@ async def process_user(
     # This avoids blocking the submit pipeline on expensive rank calculations / event generation.
     # engine = session.get_bind()  # AsyncEngine bound to this session
     asyncio.create_task(_process_score_events_background(db_engine, score_id))
+
+    # Torii anti-cheat: fan-out the score to the external detection service
+    # (torii-slitwrist). Fire-and-forget — no awaited result, no exception
+    # propagation back into this coroutine. See
+    # _submit_to_anticheat_background docstring for the full lifecycle.
+    #
+    # Gated only by the score being passed; failed scores aren't sent
+    # because they carry less signal (a cheater who failed the map
+    # presumably isn't worth the analyser-budget). Adjust here if we
+    # want to scan fail-attempts too (e.g. retry-storm detection).
+    if score.passed:
+        asyncio.create_task(_submit_to_anticheat_background(db_engine, score_id))
     # asyncio.create_task(_process_score_events_background(engine, score_id))
 
     logger.info(

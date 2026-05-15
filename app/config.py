@@ -784,6 +784,50 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="Comma-separated user ids to suppress suspicious-login alerts (admin alt accounts)."),
         "验证服务设置",
     ]
+    # ─── External anti-cheat service (torii-slitwrist) ─────────────────────
+    # Detection logic lives in a separate private repo / container; this
+    # service only knows the HTTP contract. Empty URL = feature disabled
+    # (default). Forks of g0v0-server get a no-op stub for free.
+    anticheat_url: Annotated[
+        str,
+        Field(
+            default="",
+            description="Base URL of the private anti-cheat detection service (e.g. http://torii-slitwrist:8082). Empty = feature disabled.",
+        ),
+        "验证服务设置",
+    ]
+    anticheat_token: Annotated[
+        str,
+        Field(
+            default="",
+            description="Shared secret sent as X-AC-Token on every anti-cheat call. Match the value the service is configured to accept.",
+        ),
+        "验证服务设置",
+    ]
+    anticheat_timeout_sec: Annotated[
+        float,
+        Field(
+            default=8.0,
+            description="Read timeout for the anti-cheat call. Fire-and-forget; a hung service must NOT block score submission.",
+        ),
+        "验证服务设置",
+    ]
+    anticheat_include_replay: Annotated[
+        bool,
+        Field(
+            default=True,
+            description="Whether to forward the binary replay (base64-encoded) when available. Disable to reduce bandwidth if the service only does behavioural / score-shape checks.",
+        ),
+        "验证服务设置",
+    ]
+    anticheat_critical_creates_alert: Annotated[
+        bool,
+        Field(
+            default=True,
+            description="When the anti-cheat verdict is 'critical' or 'suspicious', create a SuspiciousAlert row so the existing mod-alert dispatch pipeline picks it up. The score is NEVER auto-rejected regardless of verdict.",
+        ),
+        "验证服务设置",
+    ]
     banned_name: Annotated[
         list[str],
         Field(
