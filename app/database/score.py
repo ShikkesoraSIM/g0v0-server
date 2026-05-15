@@ -2034,7 +2034,10 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                 error=None,
             )
 
-            if should_alert and verdict_label in ("suspicious", "critical"):
+            # Only "critical" reaches the moderator alert feed for now.
+            # "suspicious" still gets cached in score_anticheat_analysis
+            # for admin browsing but does NOT page the mods.
+            if should_alert and verdict_label == "critical":
                 # Fingerprint dedups per (score_id), so re-runs of the
                 # background task for the same score (e.g. retries on
                 # transient errors) never create duplicate alerts.
