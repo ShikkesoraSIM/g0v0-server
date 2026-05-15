@@ -1864,7 +1864,10 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                 "ngeki": int(getattr(score_, "ngeki", 0) or 0),
                 "nkatu": int(getattr(score_, "nkatu", 0) or 0),
                 "mods": getattr(score_, "mods", None) or [],
-                "ruleset_id": int(getattr(score_, "ruleset_id", 0) or 0),
+                # ruleset_id is an @staticmethod on the Score model, not a
+                # column, so getattr returns the bound method. Derive it
+                # from the gamemode column instead.
+                "ruleset_id": int(score_.gamemode) if score_.gamemode is not None else 0,
                 "pp": float(getattr(score_, "pp", 0.0) or 0.0),
                 "total_length_ms": (
                     int(beatmap.total_length * 1000)

@@ -258,13 +258,16 @@ async def admin_clear_user_hwid(
 
 def _serialize_replay_row(score: Score, beatmap: Beatmap | None, user: User | None,
                           analysis: ScoreAnticheatAnalysis | None) -> dict[str, Any]:
+    # Beatmap rows don't carry artist/title (those live on Beatmapset).
+    # Use the difficulty name + id rather than join through to keep
+    # the list query cheap.
     return {
         "score_id": score.id,
         "user_id": score.user_id,
         "username": user.username if user else None,
         "beatmap_id": score.beatmap_id,
         "beatmap_title": (
-            f"{beatmap.artist} - {beatmap.title} [{beatmap.version}]"
+            f"{beatmap.version} (#{beatmap.id})"
             if beatmap else None
         ),
         "gamemode": int(getattr(score, "gamemode", 0) or 0),
