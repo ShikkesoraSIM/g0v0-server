@@ -1980,8 +1980,8 @@ async def _submit_to_anticheat_background(engine, score_id: int):
             if include_replay and getattr(score_, "has_replay", False):
                 try:
                     import base64 as _b64
-                    from app.storage import StorageService as _StorageSvc
-                    storage = _StorageSvc()
+                    from app.dependencies.storage import get_storage_service
+                    storage = get_storage_service()
                     raw = await storage.read_file(score_.replay_filename)
                     if raw:
                         replay_b64 = _b64.b64encode(raw).decode("ascii")
