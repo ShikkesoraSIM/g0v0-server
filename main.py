@@ -20,6 +20,7 @@ from app.dependencies.database import (
 from app.dependencies.fetcher import get_fetcher
 from app.dependencies.scheduler import start_scheduler, stop_scheduler
 from app.log import system_logger
+from app.middleware.hwid_tracking import HwidTrackingMiddleware
 from app.middleware.verify_session import VerifySessionMiddleware
 from app.models.mods import init_mods, init_ranked_mods
 from app.models.score import init_ruleset_version_hash
@@ -235,6 +236,10 @@ app.include_router(beatmap_submission_router)
 # 会话验证中间件
 if settings.enable_session_verification:
     app.add_middleware(VerifySessionMiddleware)
+
+# Capture X-Torii-HWID on write requests for multi-account correlation.
+# Fire-and-forget — never blocks the response.
+app.add_middleware(HwidTrackingMiddleware)
 
 # CORS 配置
 origins = []

@@ -1758,6 +1758,19 @@ async def _process_beatmap_playcount(session: AsyncSession, beatmap_id: int, use
             count=beatmap_playcount.playcount,
         )
 
+async def _anticheat_no_replay_fallback(engine, score_id: int):
+    """Wait up to 30s for the replay to upload. If it doesn't, run the
+    anti-cheat check with replay=None so score_consistency still catches
+    blatant payload tampering on scores submitted without a replay."""
+    for _ in range(60):
+        await asyncio.sleep(0.5)
+        async with AsyncSession(engine) as s:
+            row = (await s.exec(select(Score.has_replay).where(Score.id == score_id))).first()
+            if row:
+                return  # replay arrived, the replay-upload path will trigger the analysis
+    await _submit_to_anticheat_background(engine, score_id)
+
+
 async def _submit_to_anticheat_background(engine, score_id: int):
     """Fire-and-forget call to the external anti-cheat service (torii-slitwrist).
 
@@ -1865,6 +1878,67 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                 ),
             }
 
+            # HWID context — opaque struct shipped to the detection
+            # service. The values are summary metadata, not a contract
+            # the public stub interprets. Failures here are non-fatal.
+            hwid_summary: dict[str, Any] = {
+                "known_hwids": [],
+                "correlated_user_ids": [],
+                "correlated_account_count": 0,
+            }
+            try:
+                from app.service import hwid_tracker as _hwid
+                from app.dependencies.database import get_redis as _gr
+                _r = _gr()
+                user_hwids = await _hwid.hwids_for(_r, user.id)
+                correlated: set[int] = set()
+                for h in user_hwids:
+                    for u in await _hwid.users_for(_r, h):
+                        if u != user.id:
+                            correlated.add(u)
+                # Cap the list we send across the wire; the count is the
+                # signal that matters, the IDs are just for debug context.
+                hwid_summary = {
+                    "known_hwids": user_hwids[:8],
+                    "correlated_user_ids": sorted(correlated)[:32],
+                    "correlated_account_count": len(correlated),
+                }
+            except Exception as hwid_err:
+                logger.debug(
+                    "anticheat: hwid correlation lookup failed for user {}: {}",
+                    user.id, hwid_err,
+                )
+
+            # Per-user behavioural baseline + submission velocity.
+            # Baseline = how this user normally plays (shape of scores).
+            # Velocity = how often they submit (rate). Both are
+            # computed in one place so the queries share the DB session.
+            baseline_payload: dict[str, Any] = {}
+            velocity_payload: dict[str, Any] = {}
+            try:
+                from app.service.behavioral_profile import (
+                    compute_submission_velocity,
+                    compute_user_baseline,
+                )
+                baseline = await compute_user_baseline(
+                    bg_session,
+                    user_id=user.id,
+                    gamemode=int(getattr(score_, "gamemode", 0) or 0),
+                    exclude_score_id=score_.id,
+                )
+                baseline_payload = baseline.to_dict()
+                velocity = await compute_submission_velocity(
+                    bg_session,
+                    user_id=user.id,
+                    beatmap_id=score_.beatmap_id,
+                )
+                velocity_payload = velocity.to_dict()
+            except Exception as bp_err:
+                logger.debug(
+                    "anticheat: baseline/velocity computation failed for user {}: {}",
+                    user.id, bp_err,
+                )
+
             user_payload = {
                 "trust_factor": trust.final_score,
                 "account_age_days": trust.account_age_days,
@@ -1873,6 +1947,9 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                 "distinct_ip_count": trust.distinct_ip_count,
                 "prior_alerts": trust.prior_alert_count,
                 "has_restriction_history": trust.has_restriction_history,
+                "hwid": hwid_summary,
+                "baseline": baseline_payload,
+                "velocity": velocity_payload,
             }
 
             beatmap_payload = {
@@ -2149,17 +2226,13 @@ async def process_user(
     # engine = session.get_bind()  # AsyncEngine bound to this session
     asyncio.create_task(_process_score_events_background(db_engine, score_id))
 
-    # Torii anti-cheat: fan-out the score to the external detection service
-    # (torii-slitwrist). Fire-and-forget — no awaited result, no exception
-    # propagation back into this coroutine. See
-    # _submit_to_anticheat_background docstring for the full lifecycle.
-    #
-    # Gated only by the score being passed; failed scores aren't sent
-    # because they carry less signal (a cheater who failed the map
-    # presumably isn't worth the analyser-budget). Adjust here if we
-    # want to scan fail-attempts too (e.g. retry-storm detection).
+    # Anti-cheat fan-out. Replay arrives on a separate endpoint after
+    # this one returns, so the primary trigger lives in the replay
+    # upload handler (router/lio.py). This here is the no-replay
+    # fallback: wait briefly, and if no replay shows up, run a
+    # score-shape-only check so we still catch payload tampering.
     if score.passed:
-        asyncio.create_task(_submit_to_anticheat_background(db_engine, score_id))
+        asyncio.create_task(_anticheat_no_replay_fallback(db_engine, score_id))
     # asyncio.create_task(_process_score_events_background(engine, score_id))
 
     logger.info(

@@ -981,6 +981,16 @@ async def save_replay(
             score.has_replay = True
             await db.commit()
             await db.refresh(score)
+
+            # Now that the replay is on disk and has_replay is set,
+            # kick the anti-cheat task. Fire-and-forget.
+            try:
+                import asyncio as _asyncio
+                from app.database.score import _submit_to_anticheat_background
+                from app.dependencies.database import engine as _engine
+                _asyncio.create_task(_submit_to_anticheat_background(_engine, score_id))
+            except Exception as ac_err:
+                logger.warning(f"anticheat dispatch failed for score {score_id}: {ac_err}")
         logger.debug(f"Saved replay for score {score_id} to {replay_path}")
 
         # FairTouchScreen classifier hook. Runs for osu! ruleset scores
