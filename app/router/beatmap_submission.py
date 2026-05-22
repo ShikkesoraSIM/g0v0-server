@@ -1,9 +1,22 @@
 from datetime import datetime
 from typing import Annotated
 
-from app.database import Beatmap, Beatmapset
+from app.database import Beatmap, Beatmapset, User
 from app.database.beatmap import clear_cached_beatmap_raws
-from app.dependencies.user import ClientUser, get_current_user
+# NOTE: the previous parameter annotation was
+#   Annotated[ClientUser, Security(get_current_user, scopes=["public"])]
+# which is the only place in the whole router tree that combined a typedef
+# carrying a Security marker (ClientUser = Annotated[User, Security(get_client_user, scopes=["*"])])
+# with an additional Security() at the call site. Annotated flattens, so
+# FastAPI ended up trying to satisfy BOTH dependencies — the
+# `get_client_user` half hard-requires the `oauth2_password` scheme alone
+# with scope `*`, while the `get_current_user` half wants any scheme with
+# scope `public`. The two contradict and every BSS call landed in 401.
+# Aligning with /api/v2/* pattern (`User` + a single `get_current_user`
+# Security) is what makes lazer's password-grant token + OAuth-code
+# clients both work, same as every other endpoint that authenticates a
+# real user.
+from app.dependencies.user import get_current_user
 from app.dependencies.cache import BeatmapsetCacheService
 from app.dependencies.database import Database, Redis
 from app.dependencies.storage import StorageService
@@ -33,7 +46,7 @@ async def initialize_beatmapset_upload(
     db: Database,
     storage: StorageService,
     req: PutBeatmapSetRequest,
-    current_user: Annotated[ClientUser, Security(get_current_user, scopes=["public"])],
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
 ):
     if req.beatmapset_id:
         beatmapset = await db.get(Beatmapset, req.beatmapset_id)
@@ -158,7 +171,7 @@ async def upload_beatmapset_package(
     cache_service: BeatmapsetCacheService,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
     beatmapArchive: Annotated[UploadFile, File(description="OSZ 文件")],
-    current_user: Annotated[ClientUser, Security(get_current_user, scopes=["public"])],
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
 ):
     beatmapset = await db.get(Beatmapset, beatmapset_id)
     if not beatmapset:
@@ -192,7 +205,7 @@ async def patch_beatmapset_package(
     storage: StorageService,
     cache_service: BeatmapsetCacheService,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
-    current_user: Annotated[ClientUser, Security(get_current_user, scopes=["public"])],
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
     filesChanged: Annotated[list[UploadFile] | None, File()] = None,
     filesDeleted: Annotated[list[str] | None, Form()] = None,
 ):
