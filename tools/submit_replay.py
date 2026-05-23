@@ -56,7 +56,7 @@ from app.database.score_token import ScoreToken  # noqa: E402
 from app.database.user import User  # noqa: E402
 from app.dependencies.database import get_redis, with_db  # noqa: E402
 from app.dependencies.fetcher import get_fetcher  # noqa: E402
-from app.models.score import HitResult, Rank, SoloScoreSubmissionInfo  # noqa: E402
+from app.models.score import GameMode, HitResult, Rank, SoloScoreSubmissionInfo  # noqa: E402
 
 
 # Standard mod-bit -> lazer acronym. Mirrors the bits the .osr file uses.
@@ -234,10 +234,17 @@ async def main():
         # set by process_score to utcnow() -- we accept the small lie
         # there because we don't know the exact replay duration without
         # decoding the LZMA payload.
+        # ScoreToken.ruleset_id is the string-backed GameMode enum, not a
+        # raw int -- passing the .osr's mode byte directly trips a
+        # LookupError at insert time ("'0' is not among the defined enum
+        # values"). process_score derives the *canonical* gamemode for
+        # the Score row from info.ruleset_id + info.mods (handling
+        # RX/AP/etc. via to_special_mode), so the token-level field just
+        # needs the base ruleset enum.
         token = ScoreToken(
             user_id=user.id,
             beatmap_id=beatmap.id,
-            ruleset_id=replay["mode"],
+            ruleset_id=GameMode.from_int(replay["mode"]),
             beatmap=beatmap,
             client_version="manual-submit",
             created_at=replay["played_at_utc"],
