@@ -105,9 +105,34 @@ class ToriiHashesResponse(BaseModel):
     """Lookup payload for the spectator: maps each known Torii executable hash to its
     canonical client name. The spectator queries this once at startup (and on a
     refresh interval) to verify which connected users are running a real Torii build.
+
+    Value format (per hash):
+        * Legacy:      ``"torii"`` (single token)
+        * Rich:        ``"<brand>|<os>"`` — brand is the original display string
+                       (e.g. ``"Torii"``, ``"Torii Nova"``); os is the OS label
+                       registered with that hash (``"Windows"``, ``"Linux"``,
+                       ``"macOS"``, ``"Android"``).
+
+    The pipe-separated rich format lets the spectator forward the value through
+    its existing ``UserClientNameUpdated(int, string)`` SignalR event unchanged,
+    so we don't have to break the wire shape. The osu! client parses the format
+    and renders accordingly (different colour per stream + platform icon).
     """
 
     hashes: dict[str, str]
+
+
+def _is_torii_brand(client_name: str | None) -> bool:
+    """True when the registered display name canonicalises to anything that
+    contains 'torii' (case-insensitive, ignoring spaces and ``!``).
+
+    Was a literal equality check against ``"osutorii"`` which broke at the May
+    2026 rebrand when the CI started registering ``"Torii Nova"`` -- that
+    canonicalises to ``"toriinova"`` which obviously didn't match. The badge
+    disappeared for every shipped build until this was generalised.
+    """
+    canonical = (client_name or "").strip().lower().replace("!", "").replace(" ", "")
+    return "torii" in canonical
 
 
 @router.get(
@@ -116,9 +141,11 @@ class ToriiHashesResponse(BaseModel):
     tags=["Client Versions"],
     response_model=ToriiHashesResponse,
     description=(
-        "Returns the lowercase MD5 → client_name map for every executable registered "
-        "as 'osu! Torii'. Consumed by the spectator server to flag verified Torii "
-        "connections in presence broadcasts."
+        "Returns the lowercase MD5 -> '<brand>|<os>' map for every executable "
+        "registered as a Torii variant (current: 'Torii' master / 'Torii Nova' "
+        "preview). Consumed by the spectator server to flag verified Torii "
+        "connections in presence broadcasts; the osu! client parses brand + os "
+        "out of the value to render the right pill colour + platform icon."
     ),
     dependencies=[Depends(_require_webhook_auth)],
 )
@@ -126,12 +153,21 @@ async def list_torii_hashes(
     verification_service: ClientVerificationService,
 ) -> ToriiHashesResponse:
     hashes: dict[str, str] = {}
-    for client_hash, (client_name, _version, _os) in verification_service.versions.items():
-        # Match the badge expectation on the client side (UserPresence.ClientName == "torii").
-        # We expose 'torii' for any hash whose client_name canonicalises to that, regardless
-        # of casing / spacing in the registered display name.
-        if (client_name or "").strip().lower().replace("!", "").replace(" ", "") == "osutorii":
-            hashes[client_hash] = "torii"
+    for client_hash, (client_name, _version, os_name) in verification_service.versions.items():
+        if not _is_torii_brand(client_name):
+            continue
+
+        # Use the original display brand (preserves casing / spacing for nicer
+        # UI), falling back to the literal "torii" token if nothing is stored.
+        brand = (client_name or "").strip() or "torii"
+
+        # Encode OS as the right-hand side of the pipe when present. When the
+        # registry has no os_name on file, just send the brand alone -- old
+        # clients (substring-match 'torii') still light up, new clients fall
+        # back to a generic platform icon.
+        os_label = (os_name or "").strip()
+        hashes[client_hash] = f"{brand}|{os_label}" if os_label else brand
+
     return ToriiHashesResponse(hashes=hashes)
 
 
