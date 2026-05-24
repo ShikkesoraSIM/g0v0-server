@@ -294,7 +294,24 @@ async def health_check():
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):  # noqa: ARG001
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Log the validation detail so we can debug why a request is being
+    # rejected without having to either ask the user to share devtools
+    # or add a one-off diagnostic deploy each time. Path + brief error
+    # summary is enough -- the full error list is also returned in the
+    # response body so the client can show it to the user.
+    try:
+        errors = exc.errors()
+        summary = "; ".join(
+            f"{'.'.join(str(p) for p in (e.get('loc') or []))}: {e.get('msg')}"
+            for e in errors[:5]
+        )
+        system_logger("Validation").warning(
+            f"422 on {request.method} {request.url.path} -- {summary}"
+        )
+    except Exception:
+        # Logging must never break the error response itself.
+        pass
     return JSONResponse(
         status_code=422,
         content={
