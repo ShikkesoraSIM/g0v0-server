@@ -43,7 +43,7 @@ from fastapi import File, Form, HTTPException, Query, Security
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_ as sql_or
-from sqlmodel import col, func, select
+from sqlmodel import col, exists, func, select
 
 logger = log("AdminRouter")
 
