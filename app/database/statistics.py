@@ -109,6 +109,8 @@ class UserStatisticsModel(DatabaseModel[UserStatisticsDict]):
     @included
     @staticmethod
     async def global_rank_percent(session: AsyncSession, statistics: "UserStatistics") -> float | None:
+        from .user import User
+
         rank = await get_rank(session, statistics)
         if rank is None:
             return None
@@ -118,6 +120,8 @@ class UserStatisticsModel(DatabaseModel[UserStatisticsDict]):
                     UserStatistics.mode == statistics.mode,
                     UserStatistics.pp > 0,
                     col(UserStatistics.is_ranked).is_(True),
+                    col(UserStatistics.user).has(is_active=True),
+                    ~User.is_restricted_query(col(UserStatistics.user_id)),
                 )
             )
         ).one()
@@ -204,6 +208,8 @@ async def get_rank(session: AsyncSession, statistics: UserStatistics, country: s
         UserStatistics.mode == statistics.mode,
         UserStatistics.pp > 0,
         col(UserStatistics.is_ranked).is_(True),
+        col(UserStatistics.user).has(is_active=True),
+        ~User.is_restricted_query(col(UserStatistics.user_id)),
     )
 
     if country is not None:

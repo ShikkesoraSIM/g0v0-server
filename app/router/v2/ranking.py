@@ -565,6 +565,8 @@ async def get_user_ranking(
         col(UserStatistics.mode) == ruleset,
         col(UserStatistics.pp) > 0,
         col(UserStatistics.is_ranked),
+        col(UserStatistics.user).has(is_active=True),
+        ~User.is_restricted_query(col(UserStatistics.user_id)),
     ]
     include = UserStatistics.RANKING_INCLUDES.copy()
     if sort == "performance":
@@ -585,7 +587,6 @@ async def get_user_ranking(
         select(UserStatistics)
         .where(
             *wheres,
-            ~User.is_restricted_query(col(UserStatistics.user_id)),
         )
         .order_by(order_by)
         .limit(50)
