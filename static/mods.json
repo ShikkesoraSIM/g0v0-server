@@ -73,8 +73,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -103,8 +102,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -215,8 +213,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -245,8 +242,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1348,10 +1344,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
@@ -1431,8 +1423,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1461,8 +1452,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1598,8 +1588,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -1628,8 +1617,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2096,10 +2084,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
@@ -2186,8 +2170,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2215,8 +2198,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2318,8 +2300,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2347,8 +2328,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2783,10 +2763,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
@@ -2874,8 +2850,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -2904,8 +2879,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3030,8 +3004,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3060,8 +3033,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3824,10 +3796,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
@@ -3871,8 +3839,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -3901,8 +3868,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4091,8 +4057,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4121,8 +4086,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4540,10 +4504,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
@@ -4629,8 +4589,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4659,8 +4618,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4780,8 +4738,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -4810,8 +4767,7 @@
           "NC",
           "WU",
           "WD",
-          "AS",
-          "PA"
+          "AS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5333,10 +5289,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
@@ -5397,8 +5349,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5426,8 +5377,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5511,8 +5461,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5540,8 +5489,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5713,10 +5661,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
@@ -5759,8 +5703,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5788,8 +5731,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5876,8 +5818,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -5905,8 +5846,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -6057,10 +5997,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
@@ -6145,8 +6081,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -6174,8 +6109,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -6290,8 +6224,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -6319,8 +6252,7 @@
           "DT",
           "NC",
           "WU",
-          "WD",
-          "PA"
+          "WD"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -6569,10 +6501,6 @@
           }
         ],
         "IncompatibleMods": [
-          "HT",
-          "DC",
-          "DT",
-          "NC",
           "WU",
           "WD",
           "AS"
