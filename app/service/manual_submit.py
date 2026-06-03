@@ -359,13 +359,25 @@ async def commit(
 
     info = _build_submission_info(replay, acc_pct)
 
+    # Snapshot everything we'll report BEFORE process_score runs. process_score
+    # commits internally, and a commit expires the ORM instances
+    # (expire_on_commit). Reading an expired attribute afterward triggers an
+    # implicit *sync* lazy-load, which fails under the async session with
+    # "MissingGreenlet". So capture the already-loaded user/beatmap fields here,
+    # and reload the freshly-created score explicitly (awaited) below.
+    user_id = user.id
+    username = user.username
+    bm_id = beatmap.id
+    bm_version = beatmap.version
+    mods_acr = mods_to_acronyms(replay["mods"])
+
     # Backdate the token's created_at to when the play actually happened.
     # ScoreToken.ruleset_id is the string-backed GameMode enum (not the raw
     # int byte) — process_score derives the canonical mode for the Score row
     # from info.ruleset_id + mods, so the token only needs the base ruleset.
     token = ScoreToken(
-        user_id=user.id,
-        beatmap_id=beatmap.id,
+        user_id=user_id,
+        beatmap_id=bm_id,
         ruleset_id=GameMode.from_int(replay["mode"]),
         beatmap=beatmap,
         client_version=actor_label,
@@ -376,36 +388,42 @@ async def commit(
 
     score = await process_score(
         user=user,
-        beatmap_id=beatmap.id,
+        beatmap_id=bm_id,
         ranked=False,  # never grant pp inline; recalc handles ranked pp separately
         score_token=token,
         info=info,
         session=session,
     )
 
-    new_rank: int | None = None
+    # process_score committed -> the score's attributes are expired. Reload it
+    # in the async context (awaited) before reading any column, then pull the
+    # values into plain locals so the rest of the function touches no ORM state.
+    await session.refresh(score)
+    score_id = score.id
+    score_acc = float(score.accuracy)
+    score_rank = str(score.rank)
+    score_total = int(score.total_score)
+
     try:
         from app.router.v2.score import _process_user
-        await _process_user(score.id, user.id, redis, fetcher)
-        # Best-effort: read back the user's global rank if the stats row exposes it.
-        await session.refresh(user)
+        await _process_user(score_id, user_id, redis, fetcher)
     except Exception as exc:  # noqa: BLE001 — score is already committed; stats are best-effort
-        logger.warning(f"manual submit: user-stat recompute failed for {user.id}: {exc}")
+        logger.warning(f"manual submit: user-stat recompute failed for {user_id}: {exc}")
 
     logger.info(
-        f"manual submit: score {score.id} created for user {user.id} ({user.username}) "
-        f"on beatmap {beatmap.id} via {actor_label}"
+        f"manual submit: score {score_id} created for user {user_id} ({username}) "
+        f"on beatmap {bm_id} via {actor_label}"
     )
 
     return {
-        "score_id": score.id,
-        "user_id": user.id,
-        "username": user.username,
-        "beatmap_id": beatmap.id,
-        "beatmap_version": beatmap.version,
-        "accuracy": round(float(score.accuracy) * 100, 2),
-        "rank": str(score.rank),
-        "total_score": int(score.total_score),
-        "mods": mods_to_acronyms(replay["mods"]),
-        "new_global_rank": new_rank,
+        "score_id": score_id,
+        "user_id": user_id,
+        "username": username,
+        "beatmap_id": bm_id,
+        "beatmap_version": bm_version,
+        "accuracy": round(score_acc * 100, 2),
+        "rank": score_rank,
+        "total_score": score_total,
+        "mods": mods_acr,
+        "new_global_rank": None,
     }
