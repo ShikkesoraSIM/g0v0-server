@@ -3345,6 +3345,68 @@ async def disable_maintenance_endpoint(
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Manual score submission (admin recovery tool)
+#
+# Honour a play whose live submission was lost (missed window, transient
+# lookup failure, etc.) by uploading the player's .osr. /preview is a
+# dry-run — parse + resolve user/beatmap, NO writes — that backs the
+# confirm step in the admin UI; /commit does the real insert via the same
+# process_score(...) the live POST handler uses. Both admin-gated + audited.
+#
+# Wraps app/service/manual_submit.py (the canonical server path; the CLI
+# tools/submit_replay.py is the older offline equivalent).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/admin/manual-submit/preview",
+    name="手动提交成绩预览",
+    tags=["管理", "g0v0 API"],
+)
+async def manual_submit_preview_endpoint(
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    replay: bytes = File(...),
+    user_id: int | None = Form(None),
+):
+    await require_admin(session, user_and_token)
+    from app.service.manual_submit import ReplayParseError, preview
+    try:
+        return await preview(session, replay, user_id)
+    except ReplayParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post(
+    "/admin/manual-submit/commit",
+    name="手动提交成绩",
+    tags=["管理", "g0v0 API"],
+)
+async def manual_submit_commit_endpoint(
+    session: Database,
+    redis: Redis,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    replay: bytes = File(...),
+    user_id: int | None = Form(None),
+):
+    admin = await require_admin(session, user_and_token)
+    admin_username = admin.username
+    admin_id = admin.id
+    from app.dependencies.fetcher import get_fetcher
+    from app.service.manual_submit import ReplayParseError, commit
+    try:
+        fetcher = await get_fetcher()
+        result = await commit(session, replay, user_id, redis, fetcher)
+    except (ReplayParseError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    logger.info(
+        f"admin {admin_username}#{admin_id} manually submitted score {result['score_id']} "
+        f"for user {result['user_id']} ({result['username']}) on beatmap {result['beatmap_id']}"
+    )
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Mods catalog
 #
 # Exposes the in-memory `API_MODS` dict (populated from static/mods.json

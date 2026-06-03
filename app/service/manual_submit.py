@@ -1,0 +1,411 @@
+"""Manual score submission from a raw .osr replay.
+
+Powers the admin "manual submit" panel: an admin uploads a player's .osr
+(e.g. the player's score never reached the server because the submission
+window was missed, a transient lookup failure, etc.) and we honour the
+play after the fact by landing it exactly as a normal submit would.
+
+This is the canonical, server-side path. The standalone CLI
+(`tools/submit_replay.py`) predates it and carries its own copy of the
+parser for offline / no-import-path use; the .osr binary layout is a
+frozen historical format (osu! stable replay), so the two parsers can't
+drift in any meaningful way. New behaviour should land HERE.
+
+Two entry points:
+  * preview(...)  -> resolve + describe, NO writes. Backs the dry-run UI.
+  * commit(...)   -> insert the score via the same process_score(...) the
+                     live POST handler uses, then refresh the user's stats.
+
+Note on pp: like the CLI, commit() submits with ranked=False, so pp is
+NOT granted inline even on ranked maps. The play still lands in history;
+if pp should count, run the existing per-user PP recalc afterwards (the
+admin maintenance page exposes that right next to this panel).
+"""
+from __future__ import annotations
+
+import datetime
+import io
+import struct
+
+from sqlalchemy import func, text
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.database.beatmap import Beatmap
+from app.database.score import process_score
+from app.database.score_token import ScoreToken
+from app.database.user import User
+from app.log import log
+from app.models.score import GameMode, HitResult, Rank, SoloScoreSubmissionInfo
+
+logger = log("ManualSubmit")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# .osr parsing (bytes in, dict out). Mirrors tools/parse_osr.py — the format
+# is frozen, so this is a straight port operating on an in-memory buffer
+# instead of a file path.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class ReplayParseError(ValueError):
+    """Raised when the uploaded bytes aren't a well-formed .osr."""
+
+
+def _read_uleb128(f: io.BytesIO) -> int:
+    result = 0
+    shift = 0
+    while True:
+        chunk = f.read(1)
+        if not chunk:
+            raise ReplayParseError("truncated ULEB128 while reading replay header")
+        b = chunk[0]
+        result |= (b & 0x7F) << shift
+        if (b & 0x80) == 0:
+            return result
+        shift += 7
+
+
+def _read_str(f: io.BytesIO) -> str:
+    marker = f.read(1)
+    if not marker or marker[0] != 0x0B:
+        return ""
+    length = _read_uleb128(f)
+    return f.read(length).decode("utf-8", errors="replace")
+
+
+_MODE_NAMES = ["osu", "taiko", "catch", "mania"]
+
+
+def parse_replay(data: bytes) -> dict:
+    """Decode a .osr byte blob into the fields the submission path needs."""
+    try:
+        f = io.BytesIO(data)
+        mode = f.read(1)[0]
+        version = struct.unpack("<i", f.read(4))[0]
+        beatmap_md5 = _read_str(f)
+        player = _read_str(f)
+        replay_md5 = _read_str(f)
+        n300, n100, n50, geki, katu, miss = struct.unpack("<HHHHHH", f.read(12))
+        total_score = struct.unpack("<i", f.read(4))[0]
+        max_combo = struct.unpack("<H", f.read(2))[0]
+        perfect = bool(f.read(1)[0])
+        mods = struct.unpack("<i", f.read(4))[0]
+        _life_bar = _read_str(f)
+        timestamp_ticks = struct.unpack("<q", f.read(8))[0]
+        replay_len = struct.unpack("<i", f.read(4))[0]
+        f.seek(replay_len, 1)
+        online_score_id = struct.unpack("<q", f.read(8))[0]
+    except (IndexError, struct.error) as exc:
+        raise ReplayParseError(f"not a valid .osr file: {exc}") from exc
+
+    if not (0 <= mode <= 3):
+        raise ReplayParseError(f"unknown ruleset byte in replay: {mode}")
+    if not beatmap_md5:
+        raise ReplayParseError("replay has no beatmap checksum")
+
+    # Windows ticks (epoch 0001-01-01, 100ns units) -> UTC datetime.
+    played_at = datetime.datetime(1, 1, 1) + datetime.timedelta(microseconds=timestamp_ticks // 10)
+
+    return dict(
+        mode=mode,
+        mode_name=_MODE_NAMES[mode],
+        version=version,
+        beatmap_md5=beatmap_md5,
+        player=player,
+        replay_md5=replay_md5,
+        n300=n300, n100=n100, n50=n50, geki=geki, katu=katu, miss=miss,
+        total_score=total_score,
+        max_combo=max_combo,
+        perfect=perfect,
+        mods=mods,
+        timestamp_ticks=timestamp_ticks,
+        played_at_utc=played_at,
+        replay_len=replay_len,
+        online_score_id=online_score_id,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Derived values
+# ──────────────────────────────────────────────────────────────────────────
+
+# osr mod-bit -> lazer acronym. Bits without a current lazer mod (legacy
+# keymode flags etc.) are dropped rather than guessed; worst case the score
+# lands as NoMod, which beats lying about which mods were active.
+_OSR_MOD_TO_LAZER = {
+    1 << 0: "NF", 1 << 1: "EZ", 1 << 3: "HD", 1 << 4: "HR",
+    1 << 5: "SD", 1 << 6: "DT", 1 << 7: "RX", 1 << 8: "HT",
+    1 << 9: "NC", 1 << 10: "FL", 1 << 12: "SO", 1 << 13: "AP",
+    1 << 14: "PF",
+}
+
+_MODS_DISPLAY = {
+    1 << 0: "NF", 1 << 1: "EZ", 1 << 2: "TD", 1 << 3: "HD",
+    1 << 4: "HR", 1 << 5: "SD", 1 << 6: "DT", 1 << 7: "RX",
+    1 << 8: "HT", 1 << 9: "NC", 1 << 10: "FL", 1 << 11: "AT",
+    1 << 12: "SO", 1 << 13: "AP", 1 << 14: "PF", 1 << 29: "V2",
+}
+
+
+def mods_to_acronyms(mods_bitmask: int) -> list[str]:
+    return [acr for bit, acr in _MODS_DISPLAY.items() if mods_bitmask & bit]
+
+
+def osr_mods_to_lazer(mods_bitmask: int) -> list[dict]:
+    """Convert the .osr int bitmask to lazer's APIMod list shape."""
+    acronyms = [acr for bit, acr in _OSR_MOD_TO_LAZER.items() if mods_bitmask & bit]
+    # NC implies DT and PF implies SD; lazer's validator rejects the pair.
+    if "NC" in acronyms and "DT" in acronyms:
+        acronyms.remove("DT")
+    if "PF" in acronyms and "SD" in acronyms:
+        acronyms.remove("SD")
+    return [{"acronym": a, "settings": {}} for a in acronyms]
+
+
+def accuracy(mode: int, n300: int, n100: int, n50: int, miss: int, geki: int, katu: int) -> float:
+    """Standard per-mode accuracy formulas (matches tools/parse_osr.py)."""
+    if mode == 0:
+        total = 300 * (n300 + n100 + n50 + miss)
+        return (50 * n50 + 100 * n100 + 300 * n300) / total * 100 if total else 0.0
+    if mode == 1:
+        total = 2 * (n300 + n100 + miss)
+        return (n100 + 2 * n300) / total * 100 if total else 0.0
+    if mode == 2:
+        total = n300 + n100 + n50 + miss + katu
+        return (n300 + n100 + n50) / total * 100 if total else 0.0
+    if mode == 3:
+        total = 300 * (n300 + n100 + n50 + miss + geki + katu)
+        return (50 * n50 + 100 * n100 + 200 * katu + 300 * (n300 + geki)) / total * 100 if total else 0.0
+    return 0.0
+
+
+def compute_rank_osu(accuracy_pct: float, n50: int, total_hits: int, miss: int, mods_bitmask: int) -> Rank:
+    """osu! standard rank thresholds (HD/FL bump S/X to their silver variants)."""
+    silver = bool(mods_bitmask & ((1 << 3) | (1 << 10)))
+    if accuracy_pct >= 100.0:
+        return Rank.XH if silver else Rank.X
+    if accuracy_pct >= 90.0 and miss == 0 and (total_hits == 0 or n50 / total_hits <= 0.01):
+        return Rank.SH if silver else Rank.S
+    if accuracy_pct >= 80.0:
+        return Rank.A
+    if accuracy_pct >= 70.0:
+        return Rank.B
+    if accuracy_pct >= 60.0:
+        return Rank.C
+    return Rank.D
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Resolution (no raising — callers decide how to surface a miss)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+async def resolve_user(session: AsyncSession, player_name: str, override_id: int | None) -> User | None:
+    if override_id is not None:
+        return await session.get(User, override_id)
+
+    # Current username (hits the unique index).
+    user = (await session.exec(select(User).where(User.username == player_name))).first()
+    if user:
+        return user
+
+    # Username-history match — the player renamed since the replay was captured.
+    if player_name:
+        result = await session.exec(
+            select(User).where(
+                func.json_contains(User.previous_usernames, text(f"JSON_QUOTE('{player_name}')")) == 1
+            )
+        )
+        user = result.first()
+        if user:
+            return user
+    return None
+
+
+async def resolve_beatmap(session: AsyncSession, beatmap_md5: str) -> Beatmap | None:
+    return (await session.exec(select(Beatmap).where(Beatmap.checksum == beatmap_md5))).first()
+
+
+def _build_submission_info(replay: dict, acc_pct: float) -> SoloScoreSubmissionInfo:
+    statistics: dict = {
+        HitResult.GREAT: replay["n300"],
+        HitResult.OK: replay["n100"],
+        HitResult.MEH: replay["n50"],
+        HitResult.MISS: replay["miss"],
+    }
+    if replay["geki"]:
+        statistics[HitResult.PERFECT] = replay["geki"]
+    if replay["katu"]:
+        statistics[HitResult.GOOD] = replay["katu"]
+
+    total_hits = replay["n300"] + replay["n100"] + replay["n50"] + replay["miss"]
+    maximum_statistics: dict = {HitResult.GREAT: total_hits}
+    rank = compute_rank_osu(acc_pct, replay["n50"], total_hits, replay["miss"], replay["mods"])
+
+    return SoloScoreSubmissionInfo(
+        rank=rank,
+        total_score=replay["total_score"],
+        total_score_without_mods=replay["total_score"],  # NoMod-multiplier path; safe approximation
+        accuracy=acc_pct / 100.0,
+        pp=0,  # process_score recomputes if granted; manual submits stay at 0
+        max_combo=replay["max_combo"],
+        ruleset_id=replay["mode"],
+        passed=True,  # a final score in hand means they finished
+        mods=osr_mods_to_lazer(replay["mods"]),
+        statistics=statistics,
+        maximum_statistics=maximum_statistics,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Public API
+# ──────────────────────────────────────────────────────────────────────────
+
+
+async def preview(session: AsyncSession, data: bytes, override_user_id: int | None) -> dict:
+    """Parse + resolve + describe. No DB writes. Drives the dry-run UI."""
+    replay = parse_replay(data)
+    acc_pct = accuracy(
+        replay["mode"], replay["n300"], replay["n100"], replay["n50"],
+        replay["miss"], replay["geki"], replay["katu"],
+    )
+
+    user = await resolve_user(session, replay["player"], override_user_id)
+    beatmap = await resolve_beatmap(session, replay["beatmap_md5"])
+
+    warnings: list[str] = []
+    if user is None:
+        warnings.append(
+            f"Could not resolve player '{replay['player']}'. Provide a user id to submit."
+            if override_user_id is None
+            else f"User id {override_user_id} does not exist."
+        )
+    if beatmap is None:
+        warnings.append(
+            "This beatmap has never been seen by the server, so the score can't be attached. "
+            "The map's leaderboard has to exist first."
+        )
+    if replay["online_score_id"] and replay["online_score_id"] != 0:
+        warnings.append(
+            "This replay carries an online score id (it was submitted somewhere before) — "
+            "submitting may create a duplicate of an existing score."
+        )
+    warnings.append(
+        "Manual submit does not grant pp inline. The play lands in history; "
+        "run a per-user PP recalc afterwards if the map is ranked and pp should count."
+    )
+
+    return {
+        "can_submit": user is not None and beatmap is not None,
+        "player_name": replay["player"],
+        "mode": replay["mode_name"],
+        "total_score": replay["total_score"],
+        "max_combo": replay["max_combo"],
+        "accuracy": round(acc_pct, 2),
+        "mods": mods_to_acronyms(replay["mods"]),
+        "played_at": replay["played_at_utc"].isoformat(),
+        "counts": {
+            "great": replay["n300"], "ok": replay["n100"], "meh": replay["n50"],
+            "miss": replay["miss"], "geki": replay["geki"], "katu": replay["katu"],
+        },
+        "resolved_user": (
+            {"id": user.id, "username": user.username} if user is not None else None
+        ),
+        "resolved_beatmap": (
+            {
+                "id": beatmap.id,
+                "version": beatmap.version,
+                "status": beatmap.beatmap_status.value,
+            }
+            if beatmap is not None else None
+        ),
+        "warnings": warnings,
+    }
+
+
+async def commit(
+    session: AsyncSession,
+    data: bytes,
+    override_user_id: int | None,
+    redis,
+    fetcher,
+    actor_label: str = "manual-submit",
+) -> dict:
+    """Insert the score via the live process_score path, then refresh stats.
+
+    Raises ValueError (-> 400) for a malformed replay or an unresolvable
+    user/beatmap; the caller maps those to HTTP errors.
+    """
+    replay = parse_replay(data)
+    acc_pct = accuracy(
+        replay["mode"], replay["n300"], replay["n100"], replay["n50"],
+        replay["miss"], replay["geki"], replay["katu"],
+    )
+
+    user = await resolve_user(session, replay["player"], override_user_id)
+    if user is None:
+        raise ValueError(
+            f"Could not resolve player '{replay['player']}'."
+            if override_user_id is None
+            else f"User id {override_user_id} does not exist."
+        )
+
+    beatmap = await resolve_beatmap(session, replay["beatmap_md5"])
+    if beatmap is None:
+        raise ValueError(
+            f"Beatmap {replay['beatmap_md5']} is not known to the server; can't attach the score."
+        )
+
+    info = _build_submission_info(replay, acc_pct)
+
+    # Backdate the token's created_at to when the play actually happened.
+    # ScoreToken.ruleset_id is the string-backed GameMode enum (not the raw
+    # int byte) — process_score derives the canonical mode for the Score row
+    # from info.ruleset_id + mods, so the token only needs the base ruleset.
+    token = ScoreToken(
+        user_id=user.id,
+        beatmap_id=beatmap.id,
+        ruleset_id=GameMode.from_int(replay["mode"]),
+        beatmap=beatmap,
+        client_version=actor_label,
+        created_at=replay["played_at_utc"],
+    )
+    session.add(token)
+    await session.flush()
+
+    score = await process_score(
+        user=user,
+        beatmap_id=beatmap.id,
+        ranked=False,  # never grant pp inline; recalc handles ranked pp separately
+        score_token=token,
+        info=info,
+        session=session,
+    )
+
+    new_rank: int | None = None
+    try:
+        from app.router.v2.score import _process_user
+        await _process_user(score.id, user.id, redis, fetcher)
+        # Best-effort: read back the user's global rank if the stats row exposes it.
+        await session.refresh(user)
+    except Exception as exc:  # noqa: BLE001 — score is already committed; stats are best-effort
+        logger.warning(f"manual submit: user-stat recompute failed for {user.id}: {exc}")
+
+    logger.info(
+        f"manual submit: score {score.id} created for user {user.id} ({user.username}) "
+        f"on beatmap {beatmap.id} via {actor_label}"
+    )
+
+    return {
+        "score_id": score.id,
+        "user_id": user.id,
+        "username": user.username,
+        "beatmap_id": beatmap.id,
+        "beatmap_version": beatmap.version,
+        "accuracy": round(float(score.accuracy) * 100, 2),
+        "rank": str(score.rank),
+        "total_score": int(score.total_score),
+        "mods": mods_to_acronyms(replay["mods"]),
+        "new_global_rank": new_rank,
+    }
