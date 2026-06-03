@@ -1771,6 +1771,80 @@ async def _anticheat_no_replay_fallback(engine, score_id: int):
     await _submit_to_anticheat_background(engine, score_id)
 
 
+def _parse_osu_breaks(raw: str) -> list[dict[str, float]]:
+    """Pull break periods out of a raw .osu file's [Events] section.
+
+    Break events are lines in [Events] of the form ``2,start,end`` or
+    ``Break,start,end`` (event type 2 = break), with times in beatmap
+    milliseconds. We parse them by hand rather than via osupyparser so the
+    anticheat path doesn't depend on that library's object model — a few
+    string splits over an already-cached file is cheap and self-contained.
+
+    Returns a list of ``{"start_ms": float, "end_ms": float}`` dicts, which
+    slitwrist uses to excuse the legitimate mid-map clock seek produced by
+    the client's "skip break" feature. On any malformed input we just skip
+    the offending line, so a weird beatmap can never break submission.
+    """
+    breaks: list[dict[str, float]] = []
+    in_events = False
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("["):
+            in_events = stripped.lower() == "[events]"
+            continue
+        if not in_events or stripped.startswith("//"):
+            continue
+
+        parts = stripped.split(",")
+        if len(parts) < 3:
+            continue
+        if parts[0].strip() not in ("2", "Break"):
+            continue
+
+        try:
+            start = float(parts[1])
+            end = float(parts[2])
+        except ValueError:
+            continue
+
+        if end > start:
+            breaks.append({"start_ms": start, "end_ms": end})
+
+    return breaks
+
+
+async def _fetch_beatmap_breaks(beatmap) -> list[dict[str, float]]:
+    """Best-effort fetch + parse of a beatmap's break periods for the
+    anticheat payload. Fully fail-open: any error (no beatmap, fetch miss,
+    timeout, parse error) yields an empty list, which simply disables the
+    break-skip exemption on slitwrist's side rather than affecting the score.
+    """
+    beatmap_id = getattr(beatmap, "id", None)
+    if not beatmap_id:
+        return []
+
+    try:
+        import asyncio
+
+        from app.dependencies.database import get_redis
+        from app.dependencies.fetcher import get_fetcher
+
+        fetcher = await get_fetcher()
+        redis = get_redis()
+        # The .osu is normally already warm in Redis (PP/difficulty calc
+        # fetched it during this very submission). Bound it anyway so a cold
+        # cache + slow mirror can't stall the advisory anticheat task.
+        raw = await asyncio.wait_for(fetcher.get_or_fetch_beatmap_raw(redis, beatmap_id), timeout=8.0)
+        if not raw:
+            return []
+        return _parse_osu_breaks(raw)
+    except Exception:
+        return []
+
+
 async def _submit_to_anticheat_background(engine, score_id: int):
     """Fire-and-forget call to the external anti-cheat service (torii-slitwrist).
 
@@ -1969,6 +2043,11 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                 "od": float(getattr(beatmap, "od", 0) or 0) if beatmap else None,
                 "ar": float(getattr(beatmap, "ar", 0) or 0) if beatmap else None,
                 "hp": float(getattr(beatmap, "hp", 0) or 0) if beatmap else None,
+                # Break periods so slitwrist can excuse the legitimate mid-map
+                # clock seek from the client's "skip break" feature instead of
+                # flagging the resulting frame gap. Server-authoritative (parsed
+                # from the .osu here), so it can't be spoofed by the client.
+                "breaks": await _fetch_beatmap_breaks(beatmap) if beatmap else [],
             }
 
             # Replay forwarding: gated on both has_replay (DB flag — false
