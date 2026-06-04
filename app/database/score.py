@@ -500,6 +500,11 @@ class Score(ScoreModel, table=True):
         Index("idx_score_user_mode_pinned", "user_id", "gamemode", "pinned_order", "id"),
         Index("idx_score_user_mode_pp", "user_id", "gamemode", "pp", "id"),
         Index("idx_score_user_mode_date", "user_id", "gamemode", "ended_at", "id"),
+        # Standalone ended_at index for time-window scans that carry no
+        # user_id/gamemode prefix (server-pulse play counts, sparkline,
+        # recent plays). The composite above can't serve those because
+        # ended_at isn't its leading column.
+        Index("idx_score_ended_at", "ended_at"),
     )
 
     # ScoreStatistics

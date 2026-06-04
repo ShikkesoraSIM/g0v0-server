@@ -24,6 +24,7 @@ CACHE_JOB_IDS: Final[dict[str, str]] = {
     "ranking_refresh": "cache:ranking:refresh",
     "user_preload": "cache:user:preload",
     "user_cleanup": "cache:user:cleanup",
+    "pulse_refresh": "cache:pulse:refresh",
 }
 
 
@@ -229,6 +230,23 @@ def register_cache_jobs() -> None:
         coalesce=True,
         max_instances=1,
         misfire_grace_time=300,
+    )
+
+    # Server-pulse snapshot refresh. 8s interval sits just under the 10s
+    # cache TTL so the cached snapshot never expires between refreshes;
+    # client polls then always read warm cache instead of triggering a
+    # ~200-500 ms inline recompute, and DB load is capped at one recompute
+    # per 8s globally. Lazy import to avoid a router<-task import cycle.
+    from app.router.v2.torii_server_pulse import refresh_pulse_cache
+
+    scheduler.add_job(
+        refresh_pulse_cache,
+        trigger=IntervalTrigger(seconds=8, timezone=UTC),
+        id=CACHE_JOB_IDS["pulse_refresh"],
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=10,
     )
 
     logger.info("Registered cache APScheduler jobs")

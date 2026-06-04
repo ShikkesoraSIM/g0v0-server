@@ -64,7 +64,8 @@ from app.database.beatmapset import Beatmapset
 from app.database.score import Score
 from app.database.score_token import ScoreToken
 from app.database.user import User, UserModel
-from app.dependencies.database import Database, get_redis
+from app.dependencies.database import Database, get_redis, with_db
+from app.log import logger
 
 from .router import router
 
@@ -167,6 +168,27 @@ async def get_server_pulse(session: Database) -> dict[str, Any]:
         pass
 
     return snapshot
+
+
+async def refresh_pulse_cache() -> None:
+    """Recompute the snapshot and write it to the Redis cache.
+
+    Registered as an APScheduler interval job (see app.tasks.cache) that
+    runs just under the cache TTL, so a warm snapshot is always present.
+    With this active, client polls read the cache and never pay the
+    ~200-500 ms recompute inline, and DB load is capped at one recompute
+    per interval globally no matter how many clients poll. The endpoint
+    keeps its inline-compute fallback for the brief pre-first-refresh
+    window (or if this job ever stops running). Best-effort: any failure
+    is logged and swallowed so the scheduler keeps the job alive.
+    """
+    try:
+        redis = get_redis()
+        async with with_db() as session:
+            snapshot = await _compute_pulse_snapshot(session, redis)
+        await redis.set(_PULSE_CACHE_KEY, json.dumps(snapshot), ex=_PULSE_CACHE_TTL_SECONDS)
+    except Exception as e:
+        logger.error(f"Pulse cache refresh failed: {e}")
 
 
 # --- Snapshot composition -----------------------------------------------------
