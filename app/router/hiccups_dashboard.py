@@ -55,7 +55,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlmodel import col, select
 
 from app.database.torii_hiccup_report import ToriiHiccupReport
@@ -93,7 +93,13 @@ def _parse_filters(
     by default — keeps the dashboard's default view in sync with what the
     client considers a hiccup).
     """
-    now = utcnow()
+    # utcnow() is tz-aware, but _parse_dt() returns naive datetimes (it
+    # strips tz to match the no-tz captured_at column). Mixing the two in
+    # the `parsed_since >= parsed_until` check below raises "can't compare
+    # offset-naive and offset-aware datetimes" whenever one bound falls back
+    # to a utcnow() default. Drop tz here so every datetime in this function
+    # is naive-UTC, consistent with the column and with _parse_dt.
+    now = utcnow().replace(tzinfo=None)
 
     parsed_since = _parse_dt(since) or now - timedelta(days=7)
     parsed_until = _parse_dt(until) or now
@@ -276,26 +282,27 @@ async def histogram(
     """
     f = _parse_filters(since, until, min_frame_ms, cause, user_id, device_hash, platform, version, screen)
 
-    bucket_edges = [33.0, 50.0, 100.0, 200.0, 500.0]
+    # Server-side CASE-WHEN aggregate: one indexed GROUP BY rather than
+    # streaming every frame_ms row in the window into Python. The old
+    # scan-and-count pulled the whole filtered set over the wire and held a
+    # long read that tripped MySQL's lock-wait timeout once the table grew,
+    # 500ing the chart.
     bucket_labels = ["33–50 ms", "50–100 ms", "100–200 ms", "200–500 ms", "500 ms+"]
-    counts = [0, 0, 0, 0, 0]
+    bucket_case = case(
+        (col(ToriiHiccupReport.frame_ms) < 50.0, 0),
+        (col(ToriiHiccupReport.frame_ms) < 100.0, 1),
+        (col(ToriiHiccupReport.frame_ms) < 200.0, 2),
+        (col(ToriiHiccupReport.frame_ms) < 500.0, 3),
+        else_=4,
+    ).label("bucket")
 
-    # One scan + bucket-side accumulation. With our indexes this is fast
-    # enough for the dashboard's typical 7-day window; if the table grows
-    # past a few million rows we'd switch to a CASE-WHEN aggregate.
-    stmt = select(ToriiHiccupReport.frame_ms)
-    stmt = _apply_filters(stmt, f)
-    for (frame_ms,) in (await session.exec(stmt)).all():
-        if frame_ms < bucket_edges[1]:
-            counts[0] += 1
-        elif frame_ms < bucket_edges[2]:
-            counts[1] += 1
-        elif frame_ms < bucket_edges[3]:
-            counts[2] += 1
-        elif frame_ms < bucket_edges[4]:
-            counts[3] += 1
-        else:
-            counts[4] += 1
+    stmt = select(bucket_case, func.count(ToriiHiccupReport.id))
+    stmt = _apply_filters(stmt, f).group_by("bucket")
+
+    counts = [0, 0, 0, 0, 0]
+    for bucket_idx, n in (await session.exec(stmt)).all():
+        if bucket_idx is not None and 0 <= int(bucket_idx) < 5:
+            counts[int(bucket_idx)] = int(n)
 
     return {"labels": bucket_labels, "counts": counts}
 
