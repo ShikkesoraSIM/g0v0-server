@@ -64,9 +64,14 @@ async def _transform_user_relation(
     if relationship is None:
         return {"user_relation": None}
     return {
+        # Include `mutual` so the add/check responses carry the correct flag —
+        # the client colours the follow button (green = not mutual, pink =
+        # mutual) straight off this response. Without it, following back
+        # someone who already follows you wrongly shows as not-mutual until
+        # the profile is reloaded.
         "user_relation": await RelationshipModel.transform(
             relationship,
-            includes=[],
+            includes=["mutual"],
             ruleset=ruleset,
         )
     }
