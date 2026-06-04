@@ -303,10 +303,10 @@ class SuspiciousAlertService:
                 f"New account {user.username} (#{user.id}) was created from suspicious signals: "
                 + "; ".join(reasons)
             ),
-            user_id=user_id,
+            user_id=user.id,
             payload={
-                "username": username,
-                "user_id": user_id,
+                "username": user.username,
+                "user_id": user.id,
                 "country_code": user.country_code,
                 "ip_address": ip_address,
                 "web_uuid": web_uuid,
