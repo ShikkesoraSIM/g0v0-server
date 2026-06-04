@@ -1,10 +1,8 @@
+from datetime import datetime
 from typing import Annotated, Any
 
 from app.auth import validate_username
-from app.config import settings
 from app.database import User
-from app.database.user import UserModel
-from app.database.events import Event, EventType
 from app.database.user_preference import (
     DEFAULT_ORDER,
     BeatmapCardSize,
@@ -15,6 +13,7 @@ from app.database.user_preference import (
     UserListView,
     UserPreference,
 )
+from app.database.username_change_request import STATUS_PENDING, UsernameChangeRequest
 from app.dependencies.cache import UserCacheService
 from app.dependencies.database import Database
 from app.dependencies.user import ClientUser
@@ -28,71 +27,125 @@ from app.models.userpage import (
     ValidateBBCodeResponse,
 )
 from app.service.bbcode_service import bbcode_service
-from app.utils import hex_to_hue, utcnow
+from app.utils import hex_to_hue
 
 from .router import router
 
 from fastapi import Body, HTTPException
 from pydantic import BaseModel, Field
-from sqlmodel import exists, select, col
-from sqlalchemy import update as sql_update, text
+from sqlmodel import col, exists, select
 
 
-@router.post("/rename", name="修改用户名", tags=["用户", "g0v0 API"])
+class UsernameChangeRequestResp(BaseModel):
+    id: int
+    current_username: str
+    requested_username: str
+    status: str
+    created_at: datetime
+    reject_reason: str | None = None
+
+
+def _username_request_to_resp(request: UsernameChangeRequest) -> UsernameChangeRequestResp:
+    return UsernameChangeRequestResp(
+        id=request.id or 0,
+        current_username=request.current_username,
+        requested_username=request.requested_username,
+        status=request.status,
+        created_at=request.created_at,
+        reject_reason=request.reject_reason,
+    )
+
+
+@router.post(
+    "/rename",
+    name="申请修改用户名",
+    tags=["用户", "g0v0 API"],
+    response_model=UsernameChangeRequestResp,
+)
 async def user_rename(
     session: Database,
     new_name: Annotated[str, Body(..., description="新的用户名")],
     current_user: ClientUser,
-    cache_service: UserCacheService,
 ):
-    """修改用户名
+    """申请修改用户名
 
-    为指定用户修改用户名，并将原用户名添加到历史用户名列表中
+    不会立即修改用户名，而是创建一个待管理员审核的申请。管理员在网页后台通过或
+    拒绝该申请。
 
     错误情况:
-    - 404: 找不到指定用户
-    - 409: 新用户名已被占用
-
-    返回:
-    - 成功: None
+    - 403: 账号被封禁，或新用户名未通过校验
+    - 409: 新用户名已被占用、与当前用户名相同，或已存在待审核的申请
     """
     if await current_user.is_restricted(session):
         # https://github.com/ppy/osu-web/blob/cae2fdf03cfb8c30c8e332cfb142e03188ceffef/app/Libraries/ChangeUsername.php#L48-L49
         raise HTTPException(403, "Your account is restricted and cannot perform this action.")
 
-    samename_user = (await session.exec(select(exists()).where(User.username == new_name))).first()
-    if samename_user:
-        raise HTTPException(409, "Username Exists")
+    new_name = new_name.strip()
+    if new_name == current_user.username:
+        raise HTTPException(409, "That is already your username.")
+
     errors = validate_username(new_name)
     if errors:
         raise HTTPException(403, "\n".join(errors))
-    previous_username = []
-    previous_username.extend(current_user.previous_usernames)
-    previous_username.append(current_user.username)
-    current_user.username = new_name
-    current_user.previous_usernames = previous_username
-    rename_event = Event(
-        created_at=utcnow(),
-        type=EventType.USERNAME_CHANGE,
-        user_id=current_user.id,
-        user=current_user,
-    )
-    rename_event.event_payload["user"] = {
-        "username": new_name,
-        "url": settings.web_url + "users/" + str(current_user.id),
-        "previous_username": current_user.previous_usernames[-1],
-    }
-    session.add(rename_event)
-    await cache_service.invalidate_user_cache(current_user.id)
-    await session.commit()
 
-    return None
+    samename_user = (await session.exec(select(exists()).where(col(User.username) == new_name))).first()
+    if samename_user:
+        raise HTTPException(409, "Username Exists")
+
+    existing_pending = (
+        await session.exec(
+            select(UsernameChangeRequest).where(
+                col(UsernameChangeRequest.user_id) == current_user.id,
+                col(UsernameChangeRequest.status) == STATUS_PENDING,
+            )
+        )
+    ).first()
+    if existing_pending is not None:
+        raise HTTPException(409, "You already have a pending username change request.")
+
+    request = UsernameChangeRequest(
+        user_id=current_user.id,
+        current_username=current_user.username,
+        requested_username=new_name,
+        status=STATUS_PENDING,
+    )
+    session.add(request)
+    await session.commit()
+    await session.refresh(request)
+
+    return _username_request_to_resp(request)
+
+
+@router.get(
+    "/username-change-request",
+    name="获取待审核的用户名修改申请",
+    tags=["用户", "g0v0 API"],
+    response_model=UsernameChangeRequestResp | None,
+)
+async def get_my_username_change_request(
+    session: Database,
+    current_user: ClientUser,
+):
+    """返回当前用户最近一条待审核的用户名修改申请，没有则返回 null。"""
+    request = (
+        await session.exec(
+            select(UsernameChangeRequest)
+            .where(
+                col(UsernameChangeRequest.user_id) == current_user.id,
+                col(UsernameChangeRequest.status) == STATUS_PENDING,
+            )
+            .order_by(col(UsernameChangeRequest.created_at).desc())
+        )
+    ).first()
+    if request is None:
+        return None
+    return _username_request_to_resp(request)
 
 
 class UserSelfUpdate(BaseModel):
     country_code: str | None = None
     # Add other fields here if needed in the future, matching Admin's flexibility
-    # username: str | None = None 
+    # username: str | None = None
 
 
 @router.patch("/me", name="更新个人信息", tags=["用户", "g0v0 API"])
@@ -104,19 +157,19 @@ async def update_user_profile(
     cache_service: UserCacheService,
 ):
     """Update user profile (Self) - Logic mirrored from Admin Panel"""
-    
+
     if await current_user.is_restricted(session):
         raise HTTPException(403, "Your account is restricted and cannot perform this action.")
 
     if request.country_code is not None:
         # Match Admin Panel logic: Direct assignment
         # Admin logic: user.country_code = user_data.country_code
-        
+
         # We still need basic validation because unlike admin, user input is untrusted
         country_code = request.country_code.upper()
         if not country_code or len(country_code) != 2:
              raise HTTPException(400, "Invalid country code format.")
-        
+
         from app.database.user import COUNTRIES
         if country_code not in COUNTRIES:
             raise HTTPException(400, f"Invalid country code: {country_code}")
@@ -127,7 +180,7 @@ async def update_user_profile(
     await session.commit()
     await session.refresh(current_user)
 
-    # Invalidate cache (Good practice, even if Admin doesn't explicit it in the snippet, 
+    # Invalidate cache (Good practice, even if Admin doesn't explicit it in the snippet,
     # self-update should reflect immediately)
     await cache_service.invalidate_user_cache(current_user.id)
     await cache_service.invalidate_v1_user_cache(current_user.id)

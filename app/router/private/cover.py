@@ -1,11 +1,13 @@
 import hashlib
 from typing import Annotated
 
+from app.database.profile_media_review import MEDIA_COVER
 from app.database.user import UserProfileCover
 from app.dependencies.cache import UserCacheService
 from app.dependencies.database import Database
 from app.dependencies.storage import StorageService
 from app.dependencies.user import ClientUser
+from app.service.profile_media_review_service import record_media_upload
 from app.utils import check_image
 
 from .router import router
@@ -52,6 +54,15 @@ async def upload_cover(
     url = await storage.get_file_url(storage_path)
     current_user.cover = UserProfileCover(url=url)
     current_user.cover_nsfw = is_nsfw
+    await record_media_upload(
+        session,
+        user_id=current_user.id,
+        media_type=MEDIA_COVER,
+        url=url,
+        storage_path=storage_path,
+        filehash=filehash,
+        is_nsfw=is_nsfw,
+    )
     await cache_service.invalidate_user_cache(current_user.id)
     await session.commit()
 

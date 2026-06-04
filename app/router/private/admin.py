@@ -2,7 +2,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Annotated, cast, Any
 
-from app.auth import invalidate_user_tokens
+from app.auth import invalidate_user_tokens, validate_username
+from app.config import settings
 from app.database.auth import OAuthToken
 from app.database.beatmap import Beatmap, BannedBeatmaps
 from app.database.beatmapset import Beatmapset
@@ -14,11 +15,25 @@ from app.database.user_login_log import UserLoginLog
 from app.database.daily_challenge_model import DailyChallenge, DailyChallengeCreate, DailyChallengeUpdate, DailyChallengeResponse
 from app.database.donation import apply_supporter_grant
 from app.database.team import Team, TeamMember
-from app.database.user import User
+from app.database.user import User, UserProfileCover
 from app.database.user_account_history import UserAccountHistory, UserAccountHistoryType
 from app.database.user_badge import UserBadge, UserBadgeCreate, UserBadgeUpdate, UserBadgeResponse
 from app.database.verification import LoginSession, LoginSessionResp, TrustedDevice, TrustedDeviceResp
+from app.database.events import Event, EventType
+from app.database.username_change_request import (
+    STATUS_APPROVED as UCR_APPROVED,
+    STATUS_PENDING as UCR_PENDING,
+    STATUS_REJECTED as UCR_REJECTED,
+    UsernameChangeRequest,
+)
+from app.database.profile_media_review import (
+    MEDIA_AVATAR,
+    MEDIA_COVER,
+    STATUS_REVOKED as PMR_REVOKED,
+    ProfileMediaReview,
+)
 from app.const import BANCHOBOT_ID
+from app.dependencies.cache import UserCacheService
 from app.dependencies.database import Database, Redis, get_redis
 from app.dependencies.client_verification import ClientVerificationService
 from app.dependencies.geoip import GeoIPService
@@ -3450,3 +3465,385 @@ async def get_mods_catalog(
     return {
         "rulesets": {str(rid): mods for rid, mods in API_MODS.items()},
     }
+
+
+# ========== Username Change Requests ==========
+
+
+class AdminUsernameChangeRequestResp(BaseModel):
+    id: int
+    user_id: int
+    username: str | None
+    avatar_url: str | None
+    current_username: str
+    requested_username: str
+    status: str
+    reject_reason: str | None
+    created_at: datetime
+    reviewed_at: datetime | None
+    reviewed_by_id: int | None
+
+
+class AdminUsernameChangeRequestListResp(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    requests: list[AdminUsernameChangeRequestResp]
+
+
+class RejectUsernameChangeReq(BaseModel):
+    reason: str | None = None
+
+
+def _ucr_to_admin_resp(
+    request: UsernameChangeRequest,
+    username: str | None,
+    avatar_url: str | None,
+) -> AdminUsernameChangeRequestResp:
+    return AdminUsernameChangeRequestResp(
+        id=request.id or 0,
+        user_id=request.user_id,
+        username=username,
+        avatar_url=avatar_url,
+        current_username=request.current_username,
+        requested_username=request.requested_username,
+        status=request.status,
+        reject_reason=request.reject_reason,
+        created_at=request.created_at,
+        reviewed_at=request.reviewed_at,
+        reviewed_by_id=request.reviewed_by_id,
+    )
+
+
+@router.get(
+    "/admin/username-change-requests",
+    name="获取用户名修改申请列表",
+    tags=["管理", "g0v0 API"],
+    response_model=AdminUsernameChangeRequestListResp,
+)
+async def list_username_change_requests(
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    status: str = Query("pending"),
+    search: str = Query(""),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+):
+    await require_admin(session, user_and_token)
+
+    conditions = []
+    status_value = status.strip().lower()
+    if status_value and status_value != "all":
+        conditions.append(col(UsernameChangeRequest.status) == status_value)
+
+    search_value = search.strip()
+    if search_value:
+        conditions.append(
+            sql_or(
+                col(UsernameChangeRequest.current_username).ilike(f"%{search_value}%"),
+                col(UsernameChangeRequest.requested_username).ilike(f"%{search_value}%"),
+            )
+        )
+
+    count_stmt = select(func.count()).select_from(UsernameChangeRequest)
+    data_stmt = select(UsernameChangeRequest)
+    if conditions:
+        count_stmt = count_stmt.where(*conditions)
+        data_stmt = data_stmt.where(*conditions)
+
+    total = (await session.exec(count_stmt)).one()
+    rows = (
+        await session.exec(
+            data_stmt.order_by(col(UsernameChangeRequest.created_at).desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+    ).all()
+
+    user_ids = sorted({row.user_id for row in rows})
+    user_map: dict[int, tuple[str | None, str | None]] = {}
+    if user_ids:
+        users = (
+            await session.exec(
+                select(User.id, User.username, User.avatar_url).where(col(User.id).in_(user_ids))
+            )
+        ).all()
+        user_map = {uid: (uname, avatar) for uid, uname, avatar in users}
+
+    requests = [
+        _ucr_to_admin_resp(row, *user_map.get(row.user_id, (None, None)))
+        for row in rows
+    ]
+    return AdminUsernameChangeRequestListResp(total=total, page=page, per_page=per_page, requests=requests)
+
+
+@router.post(
+    "/admin/username-change-requests/{request_id}/approve",
+    name="通过用户名修改申请",
+    tags=["管理", "g0v0 API"],
+    response_model=AdminUsernameChangeRequestResp,
+)
+async def approve_username_change_request(
+    session: Database,
+    request_id: int,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    cache_service: UserCacheService,
+):
+    admin = await require_admin(session, user_and_token)
+
+    request = await session.get(UsernameChangeRequest, request_id)
+    if request is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if request.status != UCR_PENDING:
+        raise HTTPException(status_code=409, detail="Request already reviewed")
+
+    user = await session.get(User, request.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    new_name = request.requested_username
+    # Re-validate at approval time: the name may have been taken or changed
+    # banned-list status since the request was submitted.
+    errors = validate_username(new_name)
+    if errors:
+        raise HTTPException(status_code=409, detail="\n".join(errors))
+    taken = (
+        await session.exec(
+            select(User.id).where(col(User.username) == new_name, col(User.id) != user.id)
+        )
+    ).first()
+    if taken is not None:
+        raise HTTPException(status_code=409, detail="Username is already in use")
+
+    old_username = user.username
+    previous = list(await user.awaitable_attrs.previous_usernames)
+    previous.append(old_username)
+    user.username = new_name
+    user.previous_usernames = previous
+
+    rename_event = Event(
+        created_at=utcnow(),
+        type=EventType.USERNAME_CHANGE,
+        user_id=user.id,
+        user=user,
+    )
+    rename_event.event_payload["user"] = {
+        "username": new_name,
+        "url": settings.web_url + "users/" + str(user.id),
+        "previous_username": old_username,
+    }
+    session.add(rename_event)
+
+    request.status = UCR_APPROVED
+    request.reviewed_at = utcnow()
+    request.reviewed_by_id = admin.id
+    session.add(request)
+
+    await cache_service.invalidate_user_cache(user.id)
+    await session.commit()
+    await session.refresh(request)
+
+    try:
+        announcement = GlobalAnnouncement.init(
+            source_user_id=admin.id,
+            title="Username change approved",
+            message=f"Your username change to '{new_name}' has been approved.",
+            severity="info",
+            receiver_ids=[user.id],
+        )
+        await server.new_private_notification(announcement)
+    except Exception as e:
+        logger.debug(f"Failed to notify user {user.id} about approved rename: {e}")
+
+    return _ucr_to_admin_resp(request, new_name, user.avatar_url)
+
+
+@router.post(
+    "/admin/username-change-requests/{request_id}/reject",
+    name="拒绝用户名修改申请",
+    tags=["管理", "g0v0 API"],
+    response_model=AdminUsernameChangeRequestResp,
+)
+async def reject_username_change_request(
+    session: Database,
+    request_id: int,
+    req: RejectUsernameChangeReq,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    admin = await require_admin(session, user_and_token)
+
+    request = await session.get(UsernameChangeRequest, request_id)
+    if request is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if request.status != UCR_PENDING:
+        raise HTTPException(status_code=409, detail="Request already reviewed")
+
+    reason = (req.reason or "").strip() or None
+    request.status = UCR_REJECTED
+    request.reject_reason = reason
+    request.reviewed_at = utcnow()
+    request.reviewed_by_id = admin.id
+    session.add(request)
+    await session.commit()
+    await session.refresh(request)
+
+    user = await session.get(User, request.user_id)
+    try:
+        message = f"Your username change to '{request.requested_username}' was rejected."
+        if reason:
+            message += f" Reason: {reason}"
+        announcement = GlobalAnnouncement.init(
+            source_user_id=admin.id,
+            title="Username change rejected",
+            message=message,
+            severity="warning",
+            receiver_ids=[request.user_id],
+        )
+        await server.new_private_notification(announcement)
+    except Exception as e:
+        logger.debug(f"Failed to notify user {request.user_id} about rejected rename: {e}")
+
+    return _ucr_to_admin_resp(request, user.username if user else None, user.avatar_url if user else None)
+
+
+# ========== NSFW Profile Media Review ==========
+
+
+class AdminProfileMediaReviewResp(BaseModel):
+    id: int
+    user_id: int
+    username: str | None
+    media_type: str
+    url: str
+    status: str
+    is_current: bool
+    created_at: datetime
+    reviewed_at: datetime | None
+
+
+class AdminProfileMediaReviewListResp(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    items: list[AdminProfileMediaReviewResp]
+
+
+def _pmr_to_admin_resp(review: ProfileMediaReview, username: str | None) -> AdminProfileMediaReviewResp:
+    return AdminProfileMediaReviewResp(
+        id=review.id or 0,
+        user_id=review.user_id,
+        username=username,
+        media_type=review.media_type,
+        url=review.url,
+        status=review.status,
+        is_current=review.is_current,
+        created_at=review.created_at,
+        reviewed_at=review.reviewed_at,
+    )
+
+
+@router.get(
+    "/admin/profile-media-reviews",
+    name="获取待审核的 NSFW 资料媒体列表",
+    tags=["管理", "g0v0 API"],
+    response_model=AdminProfileMediaReviewListResp,
+)
+async def list_profile_media_reviews(
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    status: str = Query("pending"),
+    media_type: str = Query(""),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+):
+    await require_admin(session, user_and_token)
+
+    conditions = []
+    status_value = status.strip().lower()
+    if status_value and status_value != "all":
+        conditions.append(col(ProfileMediaReview.status) == status_value)
+
+    media_value = media_type.strip().lower()
+    if media_value in (MEDIA_AVATAR, MEDIA_COVER):
+        conditions.append(col(ProfileMediaReview.media_type) == media_value)
+
+    count_stmt = select(func.count()).select_from(ProfileMediaReview)
+    data_stmt = select(ProfileMediaReview)
+    if conditions:
+        count_stmt = count_stmt.where(*conditions)
+        data_stmt = data_stmt.where(*conditions)
+
+    total = (await session.exec(count_stmt)).one()
+    rows = (
+        await session.exec(
+            data_stmt.order_by(col(ProfileMediaReview.created_at).desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+    ).all()
+
+    user_ids = sorted({row.user_id for row in rows})
+    username_map: dict[int, str] = {}
+    if user_ids:
+        users = (
+            await session.exec(select(User.id, User.username).where(col(User.id).in_(user_ids)))
+        ).all()
+        username_map = {uid: uname for uid, uname in users}
+
+    items = [_pmr_to_admin_resp(row, username_map.get(row.user_id)) for row in rows]
+    return AdminProfileMediaReviewListResp(total=total, page=page, per_page=per_page, items=items)
+
+
+@router.post(
+    "/admin/profile-media-reviews/{review_id}/revoke",
+    name="撤下 NSFW 资料媒体",
+    tags=["管理", "g0v0 API"],
+    response_model=AdminProfileMediaReviewResp,
+)
+async def revoke_profile_media(
+    session: Database,
+    review_id: int,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    storage: StorageService,
+    cache_service: UserCacheService,
+):
+    admin = await require_admin(session, user_and_token)
+
+    review = await session.get(ProfileMediaReview, review_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="Review not found")
+    if review.status == PMR_REVOKED:
+        raise HTTPException(status_code=409, detail="Already revoked")
+
+    user = await session.get(User, review.user_id)
+    if user is not None:
+        if review.media_type == MEDIA_AVATAR:
+            user.avatar_url = User.DEFAULT_AVATAR_URL
+            user.avatar_nsfw = False
+        else:
+            user.cover = UserProfileCover(url=User.DEFAULT_COVER_URL)
+            user.cover_nsfw = False
+        session.add(user)
+
+    # Remove the offending file from storage (best-effort).
+    path = review.storage_path
+    if not path and review.url:
+        path = storage.get_file_name_by_url(review.url)
+    if path:
+        try:
+            await storage.delete_file(path)
+        except Exception as e:
+            logger.debug(f"Failed to delete revoked media file {path}: {e}")
+
+    review.status = PMR_REVOKED
+    review.is_current = False
+    review.reviewed_at = utcnow()
+    review.reviewed_by_id = admin.id
+    session.add(review)
+
+    if user is not None:
+        await cache_service.invalidate_user_cache(user.id)
+    await session.commit()
+    await session.refresh(review)
+
+    return _pmr_to_admin_resp(review, user.username if user else None)

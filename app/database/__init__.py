@@ -67,6 +67,7 @@ from .notification import Notification, UserNotification
 from .password_reset import PasswordReset
 from .playlist_best_score import PlaylistBestScore
 from .playlists import Playlist, PlaylistDict, PlaylistModel
+from .profile_media_review import ProfileMediaReview
 from .rank_history import RankHistory, RankHistoryResp, RankTop
 from .relationship import Relationship, RelationshipDict, RelationshipModel, RelationshipType
 from .room import APIUploadedRoom, Room, RoomDict, RoomModel
@@ -104,6 +105,7 @@ from .user_account_history import (
 )
 from .user_login_log import UserLoginLog
 from .user_preference import UserPreference
+from .username_change_request import UsernameChangeRequest
 from .verification import EmailVerification, LoginSession, LoginSessionResp, TrustedDevice, TrustedDeviceResp
 
 __all__ = [
@@ -155,6 +157,7 @@ __all__ = [
     "PlaylistBestScore",
     "PlaylistDict",
     "PlaylistModel",
+    "ProfileMediaReview",
     "RankHistory",
     "RankHistoryResp",
     "RankTop",
@@ -181,9 +184,9 @@ __all__ = [
     "TeamMember",
     "TeamRequest",
     "TeamResp",
+    "ToriiBriefingRadarSnapshot",
     "TotalScoreBestScore",
     "TotpKeys",
-    "ToriiBriefingRadarSnapshot",
     "TrustedDevice",
     "TrustedDeviceResp",
     "User",
@@ -200,6 +203,7 @@ __all__ = [
     "UserStatistics",
     "UserStatisticsDict",
     "UserStatisticsModel",
+    "UsernameChangeRequest",
     "V1APIKeys",
 ]
 
