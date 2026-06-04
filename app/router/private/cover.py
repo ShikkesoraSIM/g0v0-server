@@ -7,12 +7,16 @@ from app.dependencies.cache import UserCacheService
 from app.dependencies.database import Database
 from app.dependencies.storage import StorageService
 from app.dependencies.user import ClientUser
+from app.log import log
 from app.service.profile_media_review_service import record_media_upload
+from app.service.suspicious_alert_service import SuspiciousAlertService
 from app.utils import check_image
 
 from .router import router
 
 from fastapi import File, Form, HTTPException
+
+logger = log("Cover")
 
 
 @router.post("/cover/upload", name="上传头图", tags=["用户", "g0v0 API"])
@@ -63,6 +67,19 @@ async def upload_cover(
         filehash=filehash,
         is_nsfw=is_nsfw,
     )
+    if is_nsfw:
+        # Best-effort: a failure here must never block the upload itself.
+        try:
+            await SuspiciousAlertService.alert_nsfw_media_upload(
+                session,
+                user_id=current_user.id,
+                username=current_user.username,
+                media_type=MEDIA_COVER,
+                url=url,
+                filehash=filehash,
+            )
+        except Exception:
+            logger.warning(f"failed to enqueue NSFW media alert for user {current_user.id}", exc_info=True)
     await cache_service.invalidate_user_cache(current_user.id)
     await session.commit()
 

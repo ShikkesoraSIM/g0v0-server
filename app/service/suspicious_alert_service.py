@@ -533,6 +533,43 @@ class SuspiciousAlertService:
             },
         )
 
+    @classmethod
+    async def alert_nsfw_media_upload(
+        cls,
+        session: AsyncSession,
+        *,
+        user_id: int,
+        username: str,
+        media_type: str,
+        url: str,
+        filehash: str | None = None,
+    ) -> AlertResult:
+        """Surface a self-flagged NSFW avatar/cover upload to the mod feed.
+
+        Low severity on purpose so the Discord side does not ping @here. The
+        image url rides along in the payload so the bot can repost it behind a
+        spoiler. Deduped per user + media type + file hash so re-saving the
+        same image will not spam the channel.
+        """
+        label = "avatar" if media_type == "avatar" else "cover"
+        fingerprint = cls._fingerprint("nsfw_media", user_id, media_type, filehash or url)
+        return await cls._create_alert(
+            session,
+            kind="nsfw_media_upload",
+            severity="warning",
+            fingerprint=fingerprint,
+            title=f"NSFW {label}: {username}",
+            body=f"{username} (#{user_id}) uploaded an NSFW {label}.",
+            user_id=user_id,
+            payload={
+                "username": username,
+                "user_id": user_id,
+                "media_type": label,
+                "image_url": url,
+                "filehash": filehash,
+            },
+        )
+
     @staticmethod
     async def get_pending_alerts(session: AsyncSession, limit: int = 10) -> list[SuspiciousAlert]:
         return (
