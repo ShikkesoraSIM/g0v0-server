@@ -247,6 +247,81 @@ async def get_relationships(
     return [UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media) for user_resp in users]
 
 
+@router.get(
+    "/followers",
+    tags=["relationship"],
+    responses={
+        200: api_doc(
+            "Incoming followers: users who have friended the current user, each with a mutual flag.",
+            list[RelationshipModel],
+            ["mutual", *[f"target.{inc}" for inc in FRIEND_TARGET_INCLUDES]],
+        )
+    },
+)
+async def get_followers(
+    db: Database,
+    current_user: Annotated[User, Security(get_current_user, scopes=["friends.read"])],
+):
+    """Who follows me: rows where someone set target_id == me with type=friend.
+
+    Shaped like GET /friends (target_id / type / mutual / target) so the same
+    client + web list rendering works as-is, except here `target` is the
+    follower and `mutual` means I follow them back. Mutuals are listed first.
+    """
+    show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
+
+    incoming = (
+        await db.exec(
+            select(RelationshipTable).where(
+                RelationshipTable.target_id == current_user.id,
+                RelationshipTable.type == RelationshipType.FOLLOW,
+                ~User.is_restricted_query(col(RelationshipTable.user_id)),
+            )
+        )
+    ).all()
+    follower_ids = [rel.user_id for rel in incoming]
+    if not follower_ids:
+        return []
+
+    follow_back_ids = set(
+        (
+            await db.exec(
+                select(RelationshipTable.target_id).where(
+                    RelationshipTable.user_id == current_user.id,
+                    RelationshipTable.type == RelationshipType.FOLLOW,
+                    col(RelationshipTable.target_id).in_(follower_ids),
+                )
+            )
+        ).all()
+    )
+
+    followers = (await db.exec(select(User).where(col(User.id).in_(follower_ids)))).all()
+    follower_by_id = {user.id: user for user in followers}
+
+    result: list[dict[str, Any]] = []
+    for follower_id in follower_ids:
+        follower = follower_by_id.get(follower_id)
+        if follower is None:
+            continue
+        target_resp = await UserModel.transform(
+            follower,
+            ruleset=current_user.playmode,
+            includes=FRIEND_TARGET_INCLUDES,
+            show_nsfw_media=True,
+        )
+        result.append(
+            {
+                "target_id": follower_id,
+                "type": RelationshipType.FOLLOW.value,
+                "mutual": follower_id in follow_back_ids,
+                "target": UserModel.apply_nsfw_media_policy(target_resp, show_nsfw_media),
+            }
+        )
+    # Mutuals first; stable sort preserves DB order within each group.
+    result.sort(key=lambda relation: not relation["mutual"])
+    return result
+
+
 @router.get("/friends/{target}", include_in_schema=False)
 @router.get("/blocks/{target}", include_in_schema=False)
 async def get_relationship_by_target(
