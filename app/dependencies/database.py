@@ -27,15 +27,16 @@ def json_serializer(value):
 engine = create_async_engine(
     settings.database_url,
     json_serializer=json_serializer,
-    # MySQL allows 151 connections and peaks ~91 across all clients, but this
-    # pool capped at 30+50=80, so under load the app starved its OWN pool and
-    # timed out ("QueuePool limit ... connection timed out"), which 500'd replay
-    # uploads (POST /_lio/scores/replay) and silently dropped replays (the score
-    # then shows "replay unavailable"). Bumped to 50+70=120; still leaves
-    # headroom under MySQL's 151 for adminer / the performance server / others.
-    # If 120 still exhausts, raise MySQL max_connections (dynamic, no restart).
-    pool_size=50,
-    max_overflow=70,
+    # Sized against MySQL's max_connections (raised 151 -> 500) with room left
+    # for adminer / the performance server / spectator. The old 30+50=80 cap
+    # starved the app under load and timed out ("QueuePool limit ... connection
+    # timed out"), which 500'd replay uploads (POST /_lio/scores/replay) so
+    # replays silently went missing ("replay unavailable"). 100+100=200 is
+    # generous; each connection is ~2 MB, so 200 is ~400 MB, trivial on a 15 GB
+    # box, and queries are now served from a 2 GB InnoDB buffer pool (whole DB
+    # fits in RAM) so connections free up fast.
+    pool_size=100,
+    max_overflow=100,
     pool_timeout=30.0,
     pool_recycle=3600,  # 1小时回收连接
     pool_pre_ping=True,  # 启用连接预检查

@@ -64,6 +64,13 @@ services:
 
   mysql:
     image: mysql:8.0
+    # Tuning for a 15GB box: stock max_connections (151) + 128MB buffer pool were
+    # too small. 500 connections (the app pool alone wants ~200, ~2MB each) + a
+    # 2GB buffer pool that caches the whole ~0.6GB DB in RAM. Also applied live
+    # via SET GLOBAL; these flags make it survive a container recreate.
+    command:
+      - "--max-connections=500"
+      - "--innodb-buffer-pool-size=2G"
     container_name: osu_api_mysql
     env_file:
       - .env
