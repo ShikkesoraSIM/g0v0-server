@@ -589,39 +589,45 @@ async def download_beatmapset(
             by_name[url] = (url, None, url)
 
     if settings.beatconnect_api_token:
+        # BeatConnect's no-rate-limit programmatic path is the ?token= QUERY
+        # param, not a Token header (confirmed by the operator). The header
+        # variant still trips the per-IP ~10rpm 429 even with a paid token,
+        # which is why this used to be relegated to a slow last-resort fallback.
+        # The query token lifts that. The token only travels on our
+        # server-to-mirror request (we proxy + stream the body), never to the
+        # client, so it stays secret.
         by_name["beatconnect"] = (
-            f"{str(settings.beatconnect_base_url).rstrip('/')}/b/{beatmapset_id}/",
-            {"Token": settings.beatconnect_api_token},
+            f"{str(settings.beatconnect_base_url).rstrip('/')}/b/{beatmapset_id}/?token={settings.beatconnect_api_token}",
+            None,
             "BeatConnect",
         )
 
     if not by_name:
         raise HTTPException(status_code=503, detail="No download URLs available")
 
-    # Race tier — all four mirrors fired in parallel. The first to return a
-    # valid 200 wins, losers cancelled mid-flight. Each fills a different
-    # niche so the union catches every map any of them has:
+    # Race tier — mirrors fired in parallel. The first to return a valid 200
+    # wins, losers cancelled mid-flight. Each fills a different niche so the
+    # union catches every map any of them has:
+    #   - BeatConnect: paid mirror (Patreon token), complete catalog, and on the
+    #     ?token= query path it's unrate-limited — our most reliable source for
+    #     maps the free mirrors 404 on. This is what fixes "some maps won't
+    #     download".
     #   - Nerinyan: fast 302 (~30ms), broad newer catalog, occasional CDN 404s.
     #   - osu.direct: ~600ms-2s, very stable, broad coverage.
     #   - Akatsuki: ~3-6s, complete-ish catalog for newer maps.
-    #   - Gatari: ~1-2s for older maps the other three often don't have
+    #   - Gatari: ~1-2s for older maps the other often don't have
     #     (e.g. 2015-era beatmapsets that got purged from newer mirrors).
     #
-    # Why we accept 4 concurrent connections per request: each mirror's TCP
-    # handshake is ~50ms, the data only flows from the winner, and the
-    # complementary catalogue coverage means the user almost never falls
-    # through to the slow serial fallback.
-    #
-    # Why BeatConnect is NOT in the race despite the paid token: real-world
-    # testing shows it still hits a per-IP rate limit (429) around ~10rpm
-    # regardless of the token. Hot-path inclusion would inject sporadic
-    # failures. It stays as the lone serial fallback — the literal "I don't
-    # care how slow, just give me the map" lifeline.
+    # The data only flows from the winner, so the extra concurrent connections
+    # cost little, and the complementary coverage means we almost never fall
+    # through to the serial fallback. BeatConnect used to sit in that fallback
+    # because the Token-header path kept hitting a per-IP 429; the ?token= query
+    # path (built above) lifts that, so it now races like the rest.
     race_group: list[tuple[str, dict[str, str] | None, str]] = [
-        by_name[k] for k in ("nerinyan", "osu.direct", "akatsuki", "gatari") if k in by_name
+        by_name[k] for k in ("beatconnect", "nerinyan", "osu.direct", "akatsuki", "gatari") if k in by_name
     ]
     serial_fallback: list[tuple[str, dict[str, str] | None, str]] = [
-        by_name[k] for k in ("beatconnect", "sayobot") if k in by_name
+        by_name[k] for k in ("sayobot",) if k in by_name
     ]
     # Anything we don't recognise (custom config) goes to serial fallback at
     # the end so we still try it before giving up.
