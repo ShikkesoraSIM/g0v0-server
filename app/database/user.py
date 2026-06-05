@@ -954,6 +954,11 @@ class User(AsyncAttrs, UserModel, table=True):
     # aura system (not in the schema yet, but the field is here so we
     # don't need a migration when we add one).
     total_supporter_months: int = Field(default=0, nullable=False)
+    # Torii points: earned-only economy balance (play daily, top plays, daily
+    # challenge, medals, redeemed codes). This is a cached running balance; the
+    # authoritative history is torii_point_transactions. Spent in the cosmetics
+    # store. Never buyable with money. See app.service.points_service.
+    points: int = Field(default=0, nullable=False)
     # Optional override: if the user's Ko-fi display name differs from
     # their Torii username, they can set this so inbound donations match
     # without needing @username in the message field. Case-insensitive

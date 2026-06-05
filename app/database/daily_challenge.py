@@ -108,3 +108,17 @@ async def process_daily_challenge_score(session: AsyncSession, user_id: int, roo
     stats.last_update = now
     stats.last_day_streak = now
     stats.last_weekly_streak = now
+
+    # Torii points: completing the daily challenge pays once per (UTC) day. The
+    # date-stamped idempotency key makes re-submissions on the same day a no-op.
+    from app.models.torii_points import POINTS_DAILY_CHALLENGE, PointReason
+    from app.service.points_service import award
+
+    await award(
+        session,
+        user_id,
+        POINTS_DAILY_CHALLENGE,
+        PointReason.DAILY_CHALLENGE,
+        ref=str(room_id),
+        idempotency_key=f"daily_challenge:{user_id}:{now.date().isoformat()}",
+    )

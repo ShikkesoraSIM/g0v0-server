@@ -1382,6 +1382,16 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
     beatmap_id = score.beatmap_id
     previous_pp_best = await get_user_best_pp_in_beatmap(session, beatmap_id, user_id, score.gamemode)
     if previous_pp_best is None or score.pp > previous_pp_best.pp:
+        # Count existing top plays in this mode BEFORE adding the new one — the
+        # points gate below needs the prior history count.
+        existing_top_plays = (
+            await session.exec(
+                select(func.count())
+                .select_from(BestScore)
+                .where(BestScore.user_id == user_id, BestScore.gamemode == score.gamemode)
+            )
+        ).one()
+
         best_score = BestScore(
             user_id=user_id,
             score_id=score.id,
@@ -1398,6 +1408,30 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
             score_id=score.id,
             pp=score.pp,
         )
+
+        # Torii points: reward a new top play (new PP-best on this map). Gated so
+        # fresh accounts can't farm it (need a real top-play history first) and
+        # capped per day. These adds are committed by process_user's commit.
+        from app.models.torii_points import (
+            POINTS_TOP_PLAY,
+            TOP_PLAY_DAILY_CAP,
+            TOP_PLAY_MIN_EXISTING,
+            PointReason,
+        )
+        from app.service.points_service import award, count_today_awards
+
+        if (
+            existing_top_plays >= TOP_PLAY_MIN_EXISTING
+            and await count_today_awards(session, user_id, PointReason.TOP_PLAY) < TOP_PLAY_DAILY_CAP
+        ):
+            await award(
+                session,
+                user_id,
+                POINTS_TOP_PLAY,
+                PointReason.TOP_PLAY,
+                ref=str(score.id),
+                idempotency_key=f"top_play:{score.id}",
+            )
 
 
 
@@ -2323,6 +2357,14 @@ async def process_user(
         user_id=user_id,
         beatmap_id=score.beatmap_id,
     )
+
+    # Torii points: first passed play of the (UTC) day pays a small daily bonus
+    # plus a consecutive-day streak. Idempotent per day inside the service;
+    # persisted by the critical-path commit below.
+    if score.passed:
+        from app.service.points_service import award_daily_play
+
+        await award_daily_play(session, user_id)
 
     # ---- Critical path (must be done before response) ----
     _pp_zero_reason = await _process_score_pp(score, session, redis, fetcher)

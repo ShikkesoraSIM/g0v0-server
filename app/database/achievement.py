@@ -48,6 +48,8 @@ class UserAchievementResp(UserAchievementBase):
 
 async def process_achievements(session: AsyncSession, redis: Redis, score_id: int):
     from .score import Score
+    from app.models.torii_points import POINTS_MEDAL, PointReason
+    from app.service.points_service import award
 
     score = await session.get(Score, score_id, options=[joinedload(Score.beatmap)])
     if not score:
@@ -89,4 +91,14 @@ async def process_achievements(session: AsyncSession, redis: Redis, score_id: in
             },
         )
         session.add(event)
+        # Torii points: every newly unlocked medal pays a flat bonus. Keyed by
+        # (user, medal) so it can never pay twice for the same medal.
+        await award(
+            session,
+            score.user_id,
+            POINTS_MEDAL,
+            PointReason.MEDAL,
+            ref=str(r.id),
+            idempotency_key=f"medal:{score.user_id}:{r.id}",
+        )
     await session.commit()
