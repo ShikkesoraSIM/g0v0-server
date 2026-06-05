@@ -365,6 +365,13 @@ CALCULATOR_CONFIG='{}'
         Field(default=False, description="æ˜¯å¦å¯ç”¨ Cloudflare Turnstile éªŒè¯ï¼ˆä»…å¯¹éž osu! å®¢æˆ·ç«¯ï¼‰"),
         "éªŒè¯æœåŠ¡è®¾ç½®",
     ]
+    ordr_verification_key: Annotated[
+        str,
+        Field(
+            default="devmode_success",
+            description="o!rdr API verification key for the replay-to-video render proxy. Server-side only; defaults to the public dev key (simulated renders, no real output) until a real contributor key is set in .env.",
+        ),
+    ]
     turnstile_secret_key: Annotated[
         str,
         Field(default="", description="Cloudflare Turnstile Secret Key"),

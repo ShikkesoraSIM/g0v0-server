@@ -13,6 +13,7 @@ from . import (  # noqa: F401
     session_verify,
     tags,
     torii_hiccup_reports,
+    torii_replay_render,
     torii_server_pulse,
     user,
 )
