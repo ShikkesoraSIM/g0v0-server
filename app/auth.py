@@ -46,9 +46,17 @@ def validate_username(username: str) -> list[str]:
     if len(username) > 15:
         errors.append("Username must be at most 15 characters long")
 
-    # 检查用户名格式（只允许字母、数字、下划线、连字符）
-    if not re.match(r"^[a-zA-Z0-9_-]+$", username):
-        errors.append("Username can only contain letters, numbers, underscores, and hyphens")
+    # Username format: letters, numbers, underscores, hyphens, and spaces.
+    if not re.match(r"^[a-zA-Z0-9_ -]+$", username):
+        errors.append("Username can only contain letters, numbers, spaces, underscores, and hyphens")
+
+    # A single space between words is allowed, but not a leading/trailing space
+    # or doubled spaces (so "first last" works; " name", "name " and
+    # "first  last" do not).
+    if username != username.strip():
+        errors.append("Username cannot start or end with a space")
+    elif "  " in username:
+        errors.append("Username cannot contain consecutive spaces")
 
     # 检查是否以数字开头
     if username[0].isdigit():
