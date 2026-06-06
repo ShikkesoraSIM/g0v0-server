@@ -579,6 +579,19 @@ async def oauth_token(
         # ç¡®ä¿ç”¨æˆ·å¯¹è±¡ä¸Žå½“å‰ä¼šè¯å…³è”
         await db.refresh(user)
 
+        # Capture all user primitives NOW, before any awaits below. The
+        # restricted branch in particular does extra awaits that COMMIT (the
+        # failed-login log), and a commit expires the ORM object - after which
+        # touching user.<attr> triggers a sync lazy-load that dies with
+        # MissingGreenlet in async context. That 500'd /oauth/token with no CORS
+        # header ("network error" on the web), which is why restricted accounts
+        # could never actually log in to see their restriction notice.
+        user_id = user.id
+        _user_username = user.username
+        _user_email = user.email
+        _user_country_code = user.country_code
+        _user_join_date = user.join_date
+
         if await user.is_restricted(db):
             # Restricted users are allowed to log in so they can see the
             # in-app PM from ToriiHalo and the frontend restriction banner.
@@ -596,15 +609,6 @@ async def oauth_token(
                 client_label=client_label_for_log,
                 notes="Restricted account login (allowed for visibility)",
             )
-
-        user_id = user.id
-        # Capture all user primitives now - after subsequent awaits the ORM
-        # object's attributes get expired and accessing them triggers a sync
-        # lazy-load which fails with MissingGreenlet in async context.
-        _user_username = user.username
-        _user_email = user.email
-        _user_country_code = user.country_code
-        _user_join_date = user.join_date
         totp_key: TotpKeys | None = await user.awaitable_attrs.totp_key
         if normalized_version_hash:
             validation = version_validation or await verification_service.validate_client_version(normalized_version_hash)
@@ -872,6 +876,10 @@ async def oauth_token(
 
         # ç¡®ä¿ç”¨æˆ·å¯¹è±¡ä¸Žå½“å‰ä¼šè¯å…³è”
         await db.refresh(user)
+        # Capture user.id before the restricted-login notify below: sending the
+        # ToriiHalo PM commits, which expires the ORM object, after which reading
+        # user.id would do a sync lazy-load that dies with MissingGreenlet.
+        user_id = user.id
         # Restricted users go through the authorization-code flow too —
         # see the password-grant branch above for the rationale.
         if await user.is_restricted(db):
@@ -879,7 +887,6 @@ async def oauth_token(
 
         # ç”Ÿæˆä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
-        user_id = user.id
         access_token = create_access_token(data={"sub": str(user_id)}, expires_delta=access_token_expires)
         refresh_token_str = generate_refresh_token()
 
