@@ -98,11 +98,14 @@ async def get_client_user_and_token(
     user = (await db.exec(select(User).where(User.id == token_record.user_id))).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    if await user.is_restricted(db):
-        # Keep the token alive (don't delete it) so the client / website can
-        # still reach GET /api/v2/torii/restriction with it and show the user
-        # WHY they are restricted. The 403 below still blocks every normal
-        # endpoint; write-side restriction checks are enforced separately.
+    # The website (web client) keeps READ access while restricted, so a restricted
+    # player can still log in and browse their own profile read-only and see the
+    # restriction banner. Every WRITE endpoint blocks restricted users on its own
+    # (search: current_user.is_restricted -> 403), so this only opens reads. The
+    # in-game client and third-party OAuth apps stay fully blocked; the client uses
+    # that 403 to pop the ToriiBriefingGlass restriction panel. The token is kept
+    # (never deleted) either way so /api/v2/torii/restriction stays reachable.
+    if token_record.client_id != settings.osu_web_client_id and await user.is_restricted(db):
         raise HTTPException(status_code=403, detail=RESTRICTED_ACCESS_DETAIL)
 
     return user, token_record
@@ -168,11 +171,14 @@ async def _validate_token(
     user = (await db.exec(select(User).where(User.id == token_record.user_id))).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    if await user.is_restricted(db):
-        # Keep the token alive (don't delete it) so the client / website can
-        # still reach GET /api/v2/torii/restriction with it and show the user
-        # WHY they are restricted. The 403 below still blocks every normal
-        # endpoint; write-side restriction checks are enforced separately.
+    # The website (web client) keeps READ access while restricted, so a restricted
+    # player can still log in and browse their own profile read-only and see the
+    # restriction banner. Every WRITE endpoint blocks restricted users on its own
+    # (search: current_user.is_restricted -> 403), so this only opens reads. The
+    # in-game client and third-party OAuth apps stay fully blocked; the client uses
+    # that 403 to pop the ToriiBriefingGlass restriction panel. The token is kept
+    # (never deleted) either way so /api/v2/torii/restriction stays reachable.
+    if token_record.client_id != settings.osu_web_client_id and await user.is_restricted(db):
         raise HTTPException(status_code=403, detail=RESTRICTED_ACCESS_DETAIL)
     return user, token_record
 
