@@ -2901,6 +2901,23 @@ async def update_daily_challenge(
         },
     )
 
+    # Propagate mod/beatmap edits to the live room's playlist. The osu! client
+    # reads the ROOM (room_playlists), not the daily_challenge row — so without
+    # this, editing an already-materialised challenge silently no-ops in-game
+    # (the bug behind "I fixed the mods but players still see the broken ones").
+    if challenge.room_id is not None:
+        from app.database.playlists import Playlist  # local import, mirrors Room in delete
+
+        playlist_items = (
+            await session.exec(select(Playlist).where(col(Playlist.room_id) == challenge.room_id))
+        ).all()
+        for item in playlist_items:
+            item.beatmap_id = next_beatmap_id
+            item.ruleset_id = next_ruleset_id
+            item.required_mods = validated_required
+            item.allowed_mods = validated_allowed
+            session.add(item)
+
     # Automatically assign room_id if for today and not provided
     if challenge.room_id is None and challenge_date == utcnow().date():
         now = utcnow()
@@ -2946,6 +2963,46 @@ async def update_daily_challenge(
     return challenge_res
 
 
+async def _purge_room_and_dependents(session: Database, room_id: int) -> None:
+    """Hard-delete a multiplayer room and every row that FK-references it.
+
+    The schema points several tables at rooms.id / scores.id WITHOUT
+    ON DELETE CASCADE, so `DELETE FROM rooms` on its own trips MySQL error
+    1451 (foreign key constraint fails) and the surrounding transaction
+    rolls back. That's the bug behind "the daily challenge won't delete"
+    (the endpoint 500s and nothing is removed). We tear the dependents down
+    child-first so the final room delete actually lands:
+
+      1. score-children keyed by this room's score ids
+         (best_scores, total_score_best_scores, score_anticheat_analysis)
+      2. playlist_best_scores  (room-scoped; also a score-child)
+      3. the room's score rows
+      4. room-children with no score link
+         (item_attempts_count, multiplayer_events, room_participated_users)
+      5. room_playlists, then the room itself
+
+    Idempotent: every statement is room-scoped, so calling it for a room
+    that is already partly gone simply deletes zero rows.
+    """
+    from sqlalchemy import text
+
+    score_ids = "SELECT id FROM scores WHERE room_id = :rid"
+    statements = (
+        f"DELETE FROM best_scores WHERE score_id IN ({score_ids})",
+        f"DELETE FROM total_score_best_scores WHERE score_id IN ({score_ids})",
+        f"DELETE FROM score_anticheat_analysis WHERE score_id IN ({score_ids})",
+        "DELETE FROM playlist_best_scores WHERE room_id = :rid",
+        "DELETE FROM scores WHERE room_id = :rid",
+        "DELETE FROM item_attempts_count WHERE room_id = :rid",
+        "DELETE FROM multiplayer_events WHERE room_id = :rid",
+        "DELETE FROM room_participated_users WHERE room_id = :rid",
+        "DELETE FROM room_playlists WHERE room_id = :rid",
+        "DELETE FROM rooms WHERE id = :rid",
+    )
+    for stmt in statements:
+        await session.execute(text(stmt), {"rid": room_id})
+
+
 @router.delete(
     "/admin/daily-challenge/{date}",
     name="删除每日挑战",
@@ -2972,28 +3029,18 @@ async def delete_daily_challenge(
     if not challenge:
         raise HTTPException(status_code=404, detail="Daily challenge not found")
 
-    # M1 audit fix: clean up the linked multiplayer Room (if any) and the
-    # Redis queue entry, otherwise the challenge row goes but its
-    # materialised state lingers — leaderboards keep referencing a "ghost"
-    # daily and the Redis key still flags the date as taken to the cron job.
-    from app.database.room import Room  # local import to avoid bumping module-level deps
+    # Clean up the linked multiplayer Room (if any) and the Redis queue entry,
+    # otherwise the challenge row goes but its materialised state lingers —
+    # leaderboards keep referencing a "ghost" daily and the Redis key still
+    # flags the date as taken to the cron job.
+    #
+    # The room and its dependents are torn down by _purge_room_and_dependents,
+    # which deletes the FK-referencing rows (item_attempts_count,
+    # multiplayer_events, playlist_best_scores, room_participated_users, scores)
+    # before the room itself — those FKs have no ON DELETE CASCADE, so deleting
+    # the room directly used to 500 with a 1451 constraint error.
     if challenge.room_id is not None:
-        room = await session.get(Room, challenge.room_id)
-        if room is not None:
-            # Force-end the room so any in-flight scoring sees a closed window;
-            # delete after so playlist_items / scores cascade through SQLAlchemy.
-            try:
-                room.ends_at = utcnow()
-                session.add(room)
-                await session.flush()
-                await session.delete(room)
-            except Exception as e:
-                # If a related table doesn't cascade-delete cleanly, log and
-                # continue — leaving an orphan room is strictly better than
-                # leaving the challenge row alongside it.
-                logger.warning(
-                    f"Failed to delete daily challenge room {challenge.room_id} for {challenge_date}: {e}"
-                )
+        await _purge_room_and_dependents(session, challenge.room_id)
 
     redis = get_redis()
     try:
