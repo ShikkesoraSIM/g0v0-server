@@ -14,6 +14,7 @@ from . import (  # noqa: F401
     tags,
     torii_hiccup_reports,
     torii_replay_render,
+    torii_restriction,
     torii_server_pulse,
     user,
 )

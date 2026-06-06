@@ -99,8 +99,10 @@ async def get_client_user_and_token(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     if await user.is_restricted(db):
-        await db.delete(token_record)
-        await db.commit()
+        # Keep the token alive (don't delete it) so the client / website can
+        # still reach GET /api/v2/torii/restriction with it and show the user
+        # WHY they are restricted. The 403 below still blocks every normal
+        # endpoint; write-side restriction checks are enforced separately.
         raise HTTPException(status_code=403, detail=RESTRICTED_ACCESS_DETAIL)
 
     return user, token_record
@@ -167,8 +169,10 @@ async def _validate_token(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     if await user.is_restricted(db):
-        await db.delete(token_record)
-        await db.commit()
+        # Keep the token alive (don't delete it) so the client / website can
+        # still reach GET /api/v2/torii/restriction with it and show the user
+        # WHY they are restricted. The 403 below still blocks every normal
+        # endpoint; write-side restriction checks are enforced separately.
         raise HTTPException(status_code=403, detail=RESTRICTED_ACCESS_DETAIL)
     return user, token_record
 
