@@ -95,7 +95,7 @@ class Donation(SQLModel, table=True):
 
 # Match anything starting with "@" then one or more username-safe chars.
 # osu! usernames allow spaces and a-z/0-9/_/-/[]; we deliberately stop on
-# whitespace so a `@nahuel thanks for the server` works.
+# whitespace so a `@username thanks for the server` works.
 _USERNAME_RE = re.compile(r"@([A-Za-z0-9_\-\[\]]+)")
 
 
