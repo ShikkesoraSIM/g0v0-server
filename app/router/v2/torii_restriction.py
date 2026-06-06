@@ -57,9 +57,18 @@ async def get_my_restriction(
     # Latest currently-active RESTRICTION row for this user, if any. Active =
     # permanent, or timestamp+length still in the future - mirrors
     # User.is_restricted_query. timestamp is naive-UTC on MySQL.
+    # Select scalar COLUMNS, not the ORM object: on an async session, touching a
+    # lazy/expired attribute of a returned model does sync IO outside the greenlet
+    # (sqlalchemy MissingGreenlet) and tears the request down (and can leave the
+    # transaction holding locks). Plain column values dodge that entirely.
     row = (
         await db.exec(
-            select(UserAccountHistory)
+            select(
+                UserAccountHistory.description,
+                UserAccountHistory.permanent,
+                UserAccountHistory.length,
+                UserAccountHistory.timestamp,
+            )
             .where(
                 UserAccountHistory.user_id == token_record.user_id,
                 UserAccountHistory.type == UserAccountHistoryType.RESTRICTION,
@@ -83,14 +92,16 @@ async def get_my_restriction(
     if row is None:
         return {"is_restricted": False}
 
+    description, permanent, length, timestamp = row
+
     ends_at: datetime | None = None
-    if not row.permanent and row.length:
-        ends_at = row.timestamp + timedelta(seconds=row.length)
+    if not permanent and length:
+        ends_at = timestamp + timedelta(seconds=length)
 
     return {
         "is_restricted": True,
-        "permanent": bool(row.permanent),
-        "reason": row.description,
+        "permanent": bool(permanent),
+        "reason": description,
         # Naive-UTC in the DB; tag with Z so the client parses it as UTC.
         "ends_at": ends_at.isoformat() + "Z" if ends_at is not None else None,
     }
