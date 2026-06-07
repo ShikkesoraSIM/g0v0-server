@@ -5,6 +5,7 @@ from app.database.chat import ChannelType, ChatChannel
 from app.database.playlists import Playlist
 from app.database.room import APIUploadedRoom, Room
 from app.dependencies.fetcher import get_fetcher
+from app.log import logger
 from app.models.room import MatchType, QueueMode, RoomCategory, RoomStatus
 from app.utils import utcnow
 
@@ -83,9 +84,23 @@ async def create_playlist_room(
 
 async def add_playlists_to_room(session: AsyncSession, room_id: int, playlist: list[Playlist], owner_id: int):
     for item in playlist:
-        if not (await session.exec(select(exists().where(col(Beatmap.id) == item.beatmap)))).first():
-            fetcher = await get_fetcher()
-            await Beatmap.get_or_fetch(session, fetcher, item.beatmap_id)
+        # Skip empty / "invisible" playlist items (no beatmap selected). The osu!
+        # client can leave a husk item with no beatmap_id; without this guard it
+        # fetches beatmap 0 or trips a FK error on commit, 500ing the whole room
+        # creation. Dropping it mirrors deleting the blank row by hand.
+        if not item.beatmap_id or item.beatmap_id <= 0:
+            continue
+
+        if not (await session.exec(select(exists().where(col(Beatmap.id) == item.beatmap_id)))).first():
+            try:
+                fetcher = await get_fetcher()
+                await Beatmap.get_or_fetch(session, fetcher, item.beatmap_id)
+            except Exception as e:
+                # A beatmap we can't resolve (deleted / restricted / network) must
+                # not take the whole room down - skip just that item.
+                logger.warning(f"Skipping playlist item with unresolvable beatmap {item.beatmap_id}: {e}")
+                continue
+
         item.id = await Playlist.get_next_id_for_room(room_id, session)
         item.room_id = room_id
         item.owner_id = owner_id
