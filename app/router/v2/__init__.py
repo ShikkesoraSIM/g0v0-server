@@ -17,6 +17,7 @@ from . import (  # noqa: F401
     torii_replay_render,
     torii_restriction,
     torii_server_pulse,
+    torii_store,
     user,
 )
 from .router import router as api_v2_router
