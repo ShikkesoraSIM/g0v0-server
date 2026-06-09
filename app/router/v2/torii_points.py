@@ -129,6 +129,60 @@ async def get_my_points_history(
     }
 
 
+class PointEventResp(BaseModel):
+    id: int
+    amount: int
+    reason: str
+    ref: str | None
+    balance_after: int
+    created_at: datetime
+
+
+@router.get(
+    "/torii/points/feed",
+    tags=["Torii"],
+    name="Get my recent points earnings",
+    description=(
+        "Earned (positive) point events with id greater than since_id, oldest first. "
+        "The client uses this to pop a '+N points' toast and explain why it was earned. "
+        "Clients persist last_id as their cursor so each earn is celebrated once."
+    ),
+)
+async def get_my_points_feed(
+    db: Database,
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+    since_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    rows = (
+        await db.exec(
+            select(ToriiPointTransaction)
+            .where(
+                ToriiPointTransaction.user_id == current_user.id,
+                ToriiPointTransaction.id > since_id,
+                ToriiPointTransaction.amount > 0,
+            )
+            .order_by(ToriiPointTransaction.id.asc())
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "balance": current_user.points or 0,
+        "last_id": rows[-1].id if rows else since_id,
+        "events": [
+            PointEventResp(
+                id=r.id,
+                amount=r.amount,
+                reason=r.reason,
+                ref=r.ref,
+                balance_after=r.balance_after,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ],
+    }
+
+
 class RedeemRequest(BaseModel):
     code: str
 
