@@ -224,23 +224,30 @@ async def get_rank(session: AsyncSession, statistics: UserStatistics, country: s
 
     if country is None:
         today = utcnow().date()
-        rank_history = (
+        # Daily snapshot for the profile rank graph. Insert it once per day; do
+        # NOT update it on every call. get_rank() runs on hot read paths (profile
+        # views, cache pre-warm) as well as score submits, so updating the shared
+        # "today" row from all of them serialised concurrent callers on one hot
+        # row and held its lock until each caller transaction committed, which is
+        # the source of the rank_history 1205 lock-wait-timeouts on the busiest
+        # users. The midnight batch (calculate_user_rank) finalises today's value;
+        # the live rank shown elsewhere is computed fresh above.
+        already = (
             await session.exec(
-                select(RankHistory).where(
+                select(RankHistory.id).where(
                     RankHistory.user_id == statistics.user_id,
                     RankHistory.mode == statistics.mode,
                     RankHistory.date == today,
                 )
             )
         ).first()
-        if rank_history is None:
-            rank_history = RankHistory(
-                user_id=statistics.user_id,
-                mode=statistics.mode,
-                date=today,
-                rank=rank,
+        if already is None:
+            session.add(
+                RankHistory(
+                    user_id=statistics.user_id,
+                    mode=statistics.mode,
+                    date=today,
+                    rank=rank,
+                )
             )
-            session.add(rank_history)
-        else:
-            rank_history.rank = rank
     return rank
