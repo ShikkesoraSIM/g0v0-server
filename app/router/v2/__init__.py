@@ -12,6 +12,7 @@ from . import (  # noqa: F401
     score,
     session_verify,
     tags,
+    torii_gifts,
     torii_hiccup_reports,
     torii_points,
     torii_replay_render,

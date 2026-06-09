@@ -91,6 +91,7 @@ from .statistics import (
 from .score_anticheat_analysis import ScoreAnticheatAnalysis
 from .suspicious_alert import SuspiciousAlert
 from .team import Team, TeamMember, TeamRequest, TeamResp
+from .torii_gifts import ToriiGift
 from .torii_hiccup_report import ToriiHiccupReport
 from .torii_points import ToriiAccessCode, ToriiAccessCodeRedemption, ToriiPointTransaction
 from .torii_store import ToriiStoreConfig

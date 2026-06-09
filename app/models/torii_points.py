@@ -24,6 +24,7 @@ class PointReason(StrEnum):
     MEDAL = "medal"
     MILESTONE = "milestone"
     ACCESS_CODE = "access_code"
+    GIFT = "gift"
     STORE_PURCHASE = "store_purchase"
     ADMIN_ADJUST = "admin_adjust"
 
