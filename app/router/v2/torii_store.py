@@ -21,10 +21,12 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from app.database import User
-from app.database.torii_store import ToriiStoreConfig
+from app.database.torii_store import ToriiOwnedCosmetic, ToriiStoreConfig, record_owned_cosmetics
 from app.dependencies.database import Database
 from app.dependencies.user import get_current_user
 from app.log import log
+from app.models.torii_points import PointReason
+from app.service.points_service import get_balance, spend
 from app.utils import utcnow
 
 from .router import router
@@ -113,3 +115,73 @@ async def set_store_config(
         n=len(cleaned),
     )
     return StoreConfigResp(disabled=cleaned)
+
+
+@router.get(
+    "/torii/store/owned",
+    tags=["Torii"],
+    name="Get my owned cosmetics",
+    description="Catalog ids the authenticated user owns server-side (bought or granted). The client mirrors these into its local owned set.",
+)
+async def get_owned(
+    db: Database,
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+) -> dict:
+    rows = (
+        await db.exec(select(ToriiOwnedCosmetic.cosmetic_id).where(ToriiOwnedCosmetic.user_id == current_user.id))
+    ).all()
+    return {"owned": sorted({str(r) for r in rows})}
+
+
+class PurchaseRequest(BaseModel):
+    cosmetic_id: str
+    price: int = 0
+
+
+@router.post(
+    "/torii/store/purchase",
+    tags=["Torii"],
+    name="Buy a cosmetic with points",
+    description="Spend points (server-authoritative balance) to own a cosmetic. Idempotent: re-buying something you already own is a no-op success and never double-charges.",
+)
+async def purchase(
+    body: PurchaseRequest,
+    db: Database,
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+) -> dict:
+    cid = body.cosmetic_id.strip()
+    if not cid:
+        raise HTTPException(status_code=400, detail="Missing cosmetic")
+    # NOTE: the price still comes from the client (the catalog lives client-side).
+    # It's bounded here; moving the price table server-side is the proper hardening.
+    if body.price < 0 or body.price > 100_000:
+        raise HTTPException(status_code=400, detail="Invalid price")
+    if cid in await _read_disabled(db):
+        raise HTTPException(status_code=400, detail="That cosmetic isn't available")
+
+    already = (
+        await db.exec(
+            select(ToriiOwnedCosmetic.id).where(
+                ToriiOwnedCosmetic.user_id == current_user.id,
+                ToriiOwnedCosmetic.cosmetic_id == cid,
+            )
+        )
+    ).first()
+    if already is not None:
+        return {"owned": True, "already_owned": True, "balance": await get_balance(db, current_user.id)}
+
+    if body.price > 0 and not await spend(
+        db, current_user.id, body.price, PointReason.STORE_PURCHASE, ref=f"cosmetic:{cid}"
+    ):
+        raise HTTPException(status_code=400, detail="Not enough points")
+
+    await record_owned_cosmetics(db, current_user.id, [cid], "store")
+    await db.commit()
+
+    logger.info(
+        "User {uid} bought cosmetic {cid} for {price} points",
+        uid=current_user.id,
+        cid=cid,
+        price=body.price,
+    )
+    return {"owned": True, "balance": await get_balance(db, current_user.id)}

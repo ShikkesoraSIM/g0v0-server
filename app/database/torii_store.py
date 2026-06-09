@@ -22,9 +22,14 @@ from sqlmodel import (
     Column,
     DateTime,
     Field,
+    ForeignKey,
     SQLModel,
     String,
+    UniqueConstraint,
+    col,
+    select,
 )
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 
 class ToriiStoreConfig(SQLModel, table=True):
@@ -40,3 +45,51 @@ class ToriiStoreConfig(SQLModel, table=True):
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
+
+
+class ToriiOwnedCosmetic(SQLModel, table=True):
+    """One cosmetic a user owns (bought or granted). The server-authoritative
+    ownership record; the client mirrors it into its local owned set so it
+    persists across devices and reinstalls."""
+
+    __tablename__: str = "torii_owned_cosmetics"
+    __table_args__ = (UniqueConstraint("user_id", "cosmetic_id", name="uq_torii_owned_user_cosmetic"),)
+
+    id: int | None = Field(default=None, sa_column=Column(BigInteger, primary_key=True))
+    user_id: int = Field(
+        sa_column=Column(
+            BigInteger,
+            ForeignKey("lazer_users.id", ondelete="CASCADE"),
+            index=True,
+            nullable=False,
+        )
+    )
+    cosmetic_id: str = Field(sa_column=Column(String(128), nullable=False))
+    source: str | None = Field(default=None, sa_column=Column(String(32), nullable=True))
+    acquired_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+async def record_owned_cosmetics(session: AsyncSession, user_id: int, cosmetic_ids, source: str) -> None:
+    """Idempotently record cosmetic ownership for a user, skipping any ids they
+    already own. The caller commits."""
+    ids = [str(c).strip() for c in (cosmetic_ids or []) if str(c).strip()]
+    if not ids:
+        return
+
+    existing = set(
+        (
+            await session.exec(
+                select(ToriiOwnedCosmetic.cosmetic_id).where(
+                    ToriiOwnedCosmetic.user_id == user_id,
+                    col(ToriiOwnedCosmetic.cosmetic_id).in_(ids),
+                )
+            )
+        ).all()
+    )
+
+    for cid in ids:
+        if cid not in existing:
+            session.add(ToriiOwnedCosmetic(user_id=user_id, cosmetic_id=cid, source=source))
