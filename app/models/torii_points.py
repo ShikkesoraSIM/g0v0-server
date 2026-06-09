@@ -80,4 +80,4 @@ def top_play_breakdown(existing_top_plays: int, pp_gained: int) -> tuple[int, in
 # ── One-time milestones ──────────────────────────────────────────────────────
 # Crossed once, ever. {threshold: points}. Checked on score submission.
 PLAYCOUNT_MILESTONES: dict[int, int] = {1_000: 200, 5_000: 500, 10_000: 1_000, 25_000: 2_000}
-PP_MILESTONES: dict[int, int] = {5_000: 500, 10_000: 1_000, 15_000: 2_000}
+PP_MILESTONES: dict[int, int] = {5_000: 250, 7_500: 400, 10_000: 600, 15_000: 1_000, 20_000: 1_500}

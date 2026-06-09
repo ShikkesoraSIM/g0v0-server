@@ -215,6 +215,40 @@ async def award_top_play(
     )
 
 
+async def award_pp_milestones(session: AsyncSession, user_id: int, mode, total_pp: float) -> None:
+    """One-time pp milestones. Each threshold pays once ever (idempotency-keyed
+    without mode, so it fires on your first time reaching it in any mode), gated
+    by >=500 best plays in the reaching mode so fresh accounts can't trip them."""
+    from app.models.torii_points import PP_MILESTONES
+
+    reached = [thr for thr in PP_MILESTONES if total_pp >= thr]
+    if not reached:
+        return
+
+    from app.database.score import BestScore
+
+    best_count = (
+        await session.exec(
+            select(func.count()).select_from(BestScore).where(
+                BestScore.user_id == user_id,
+                BestScore.gamemode == mode,
+            )
+        )
+    ).one()
+    if best_count < 500:
+        return
+
+    for thr in reached:
+        await award(
+            session,
+            user_id,
+            PP_MILESTONES[thr],
+            PointReason.MILESTONE,
+            ref=f"pp:{thr}",
+            idempotency_key=f"pp_milestone:{user_id}:{thr}",
+        )
+
+
 async def award_daily_play(session: AsyncSession, user_id: int) -> bool:
     """First ranked play of the (UTC) day: base + consecutive-day streak bonus.
 
