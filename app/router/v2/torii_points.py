@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Query, Security
 from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel, Field as PydanticField
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import select
+from sqlmodel import col, func, select
 
 from app.database import User
 from app.database.torii_points import (
@@ -317,4 +317,62 @@ async def create_access_code(
         "max_uses": code.max_uses,
         "note": code.note,
         "expires_at": code.expires_at,
+    }
+
+
+@router.get(
+    "/torii/points/admin/activity",
+    tags=["Torii"],
+    name="Points activity (admin)",
+    description="Earning activity for spotting abuse: top earners in the window plus recent large awards. Admin only.",
+)
+async def points_activity(
+    db: Database,
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+    days: int = Query(default=7, ge=1, le=90),
+    limit: int = Query(default=25, ge=1, le=100),
+) -> dict[str, Any]:
+    _require_admin(current_user)
+
+    cutoff = utcnow().replace(tzinfo=None) - timedelta(days=days)
+    earned = func.sum(ToriiPointTransaction.amount)
+
+    top_rows = (
+        await db.exec(
+            select(User.id, User.username, earned, User.points)
+            .join(ToriiPointTransaction, col(ToriiPointTransaction.user_id) == col(User.id))
+            .where(ToriiPointTransaction.amount > 0, ToriiPointTransaction.created_at >= cutoff)
+            .group_by(col(User.id), col(User.username), col(User.points))
+            .order_by(earned.desc())
+            .limit(limit)
+        )
+    ).all()
+
+    large_rows = (
+        await db.exec(
+            select(
+                ToriiPointTransaction.user_id,
+                User.username,
+                ToriiPointTransaction.amount,
+                ToriiPointTransaction.reason,
+                ToriiPointTransaction.ref,
+                ToriiPointTransaction.created_at,
+            )
+            .join(User, col(User.id) == col(ToriiPointTransaction.user_id))
+            .where(ToriiPointTransaction.amount >= 200, ToriiPointTransaction.created_at >= cutoff)
+            .order_by(col(ToriiPointTransaction.created_at).desc())
+            .limit(limit)
+        )
+    ).all()
+
+    return {
+        "days": days,
+        "top_earners": [
+            {"user_id": r[0], "username": r[1], "earned": int(r[2] or 0), "balance": int(r[3] or 0)}
+            for r in top_rows
+        ],
+        "recent_large": [
+            {"user_id": r[0], "username": r[1], "amount": r[2], "reason": r[3], "ref": r[4], "created_at": r[5]}
+            for r in large_rows
+        ],
     }
