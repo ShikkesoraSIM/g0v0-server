@@ -31,10 +31,9 @@ class PointReason(StrEnum):
 
 # ── Earn values ──────────────────────────────────────────────────────────────
 
-# A new top play (a score that becomes your new PP-best on a map). Only earns
-# once you already have TOP_PLAY_MIN_EXISTING top plays, so brand-new accounts
-# grinding their first scores don't farm it.
-POINTS_TOP_PLAY = 100
+# A new top play (a new PP-best on a map) is rewarded by a scaled formula, see
+# top_play_breakdown() below: base + veteran bonus + the pp this play added,
+# tiered by how many top plays you already have so fresh accounts can't farm it.
 
 # Small bonus for your first ranked play of the day (the "play daily" nudge).
 # Kept low on purpose — the bulk of points come from top plays.
@@ -50,13 +49,32 @@ POINTS_DAILY_CHALLENGE = 30
 POINTS_MEDAL = 10
 
 
-# ── Gates / caps (anti-farm) ─────────────────────────────────────────────────
+# ── Top-play scaling (anti-farm) ─────────────────────────────────────────────
 
-# Need at least this many top plays before new ones start earning.
-TOP_PLAY_MIN_EXISTING = 50
-# Max top-play awards counted per UTC day (a real player rarely sets more than
-# a few genuine new top plays a day; this bounds any edge-case farming).
-TOP_PLAY_DAILY_CAP = 5
+# Hard ceiling on top-play points per UTC day. Bounds even a big day of genuine
+# new bests and makes grinding a fresh account pointless.
+TOP_PLAY_DAILY_POINTS_CAP = 400
+
+
+def top_play_breakdown(existing_top_plays: int, pp_gained: int) -> tuple[int, int, int]:
+    """Points for a new top play as (base, veteran_bonus, pp_bonus); total = sum.
+
+    Scales with how established you are (your existing top-play count) plus the pp
+    this play added to your best on the map. New accounts earn only a small flat
+    base with no pp bonus, so spinning up a fresh account on a private server
+    (where early plays are free PBs) can't farm points. The satisfying pp reward
+    unlocks once you have a real history.
+    """
+    pp_gained = max(0, pp_gained)
+    if existing_top_plays < 50:
+        base, veteran, pp_cap = 8, 0, 0
+    elif existing_top_plays < 500:
+        base, veteran, pp_cap = 40, 0, 60
+    elif existing_top_plays < 2000:
+        base, veteran, pp_cap = 100, 50, 250
+    else:
+        base, veteran, pp_cap = 100, 75, 250
+    return base, veteran, min(pp_gained, pp_cap)
 
 
 # ── One-time milestones ──────────────────────────────────────────────────────

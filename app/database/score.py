@@ -1413,26 +1413,11 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
         # fresh accounts can't farm it (need a real top-play history first) and
         # capped per day. These adds are committed by process_user's commit.
         try:
-            from app.models.torii_points import (
-                POINTS_TOP_PLAY,
-                TOP_PLAY_DAILY_CAP,
-                TOP_PLAY_MIN_EXISTING,
-                PointReason,
-            )
-            from app.service.points_service import award, count_today_awards
+            from app.service.points_service import award_top_play
 
-            if (
-                existing_top_plays >= TOP_PLAY_MIN_EXISTING
-                and await count_today_awards(session, user_id, PointReason.TOP_PLAY) < TOP_PLAY_DAILY_CAP
-            ):
-                await award(
-                    session,
-                    user_id,
-                    POINTS_TOP_PLAY,
-                    PointReason.TOP_PLAY,
-                    ref=str(score.id),
-                    idempotency_key=f"top_play:{score.id}",
-                )
+            prev_pp = previous_pp_best.pp if previous_pp_best is not None else 0.0
+            pp_gained = int(round(score.pp - prev_pp))
+            await award_top_play(session, user_id, existing_top_plays, pp_gained, score.id)
         except Exception as _pts_err:
             logger.warning("Top-play points award failed for score {}: {}", score.id, _pts_err)
 

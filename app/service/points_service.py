@@ -167,6 +167,54 @@ async def count_today_awards(session: AsyncSession, user_id: int, reason: str | 
     ).one()
 
 
+async def sum_today_awards(session: AsyncSession, user_id: int, reason: str | PointReason) -> int:
+    """Total positive points of ``reason`` the user earned today (UTC). Used for
+    per-day point ceilings (e.g. the top-play cap)."""
+    start = _start_of_utc_day()
+    total = (
+        await session.exec(
+            select(func.coalesce(func.sum(ToriiPointTransaction.amount), 0)).where(
+                ToriiPointTransaction.user_id == user_id,
+                ToriiPointTransaction.reason == str(reason),
+                ToriiPointTransaction.amount > 0,
+                ToriiPointTransaction.created_at >= start,
+            )
+        )
+    ).one()
+    return int(total or 0)
+
+
+async def award_top_play(
+    session: AsyncSession,
+    user_id: int,
+    existing_top_plays: int,
+    pp_gained: int,
+    score_id: int,
+) -> bool:
+    """Award a scaled new-top-play reward: base + veteran bonus + the pp this play
+    added, tiered by your existing top-play count and capped per day. The
+    breakdown is stored in the ledger ref (``score:ID|b:..|v:..|pp:..``) so the
+    client can show the calc in its toast."""
+    from app.models.torii_points import TOP_PLAY_DAILY_POINTS_CAP, top_play_breakdown
+
+    if await sum_today_awards(session, user_id, PointReason.TOP_PLAY) >= TOP_PLAY_DAILY_POINTS_CAP:
+        return False
+
+    base, veteran, pp_bonus = top_play_breakdown(existing_top_plays, pp_gained)
+    total = base + veteran + pp_bonus
+    if total <= 0:
+        return False
+
+    return await award(
+        session,
+        user_id,
+        total,
+        PointReason.TOP_PLAY,
+        ref=f"score:{score_id}|b:{base}|v:{veteran}|pp:{pp_bonus}",
+        idempotency_key=f"top_play:{score_id}",
+    )
+
+
 async def award_daily_play(session: AsyncSession, user_id: int) -> bool:
     """First ranked play of the (UTC) day: base + consecutive-day streak bonus.
 
