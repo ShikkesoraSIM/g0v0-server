@@ -5,8 +5,8 @@ One row per gift; claimed_at guards against double-claim.
 
 Idempotent so a re-run / interrupted migration is safe.
 
-Revision ID: e5f6a7b8c9d0
-Revises: d4e5f6a7b8c9
+Revision ID: 91f7ac0de5b0
+Revises: acc0de9a1b2c
 Create Date: 2026-06-09 00:00:00.000000
 
 """
@@ -17,8 +17,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "e5f6a7b8c9d0"
-down_revision: str | Sequence[str] | None = "d4e5f6a7b8c9"
+revision: str = "91f7ac0de5b0"
+down_revision: str | Sequence[str] | None = "acc0de9a1b2c"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

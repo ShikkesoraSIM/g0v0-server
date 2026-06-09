@@ -6,7 +6,7 @@ torii_access_codes.grant_cosmetics column. Null/empty = points only.
 
 Idempotent so a re-run / interrupted migration is safe.
 
-Revision ID: d4e5f6a7b8c9
+Revision ID: acc0de9a1b2c
 Revises: c3d4e5f6a7b8
 Create Date: 2026-06-09 00:00:00.000000
 
@@ -18,7 +18,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "d4e5f6a7b8c9"
+revision: str = "acc0de9a1b2c"
 down_revision: str | Sequence[str] | None = "c3d4e5f6a7b8"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
