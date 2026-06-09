@@ -14,6 +14,7 @@ payouts). Spending happens in the cosmetics store (separate, later).
 
 from __future__ import annotations
 
+import json
 import secrets
 from datetime import datetime
 from typing import Annotated, Any
@@ -52,6 +53,17 @@ def _require_admin(user: User) -> None:
 
 def _generate_code() -> str:
     return "TORII-" + "".join(secrets.choice(_CODE_ALPHABET) for _ in range(6))
+
+
+def _parse_cosmetics(raw: str | None) -> list[str]:
+    """Decode a code's grant_cosmetics JSON list into a clean list of ids."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [str(x) for x in data if str(x).strip()] if isinstance(data, list) else []
 
 
 def _naive(dt: datetime | None) -> datetime | None:
@@ -173,17 +185,26 @@ async def redeem_code(
         await db.rollback()
         raise HTTPException(status_code=400, detail="You already redeemed this code")
 
+    granted = _parse_cosmetics(code.grant_cosmetics)
+
     logger.info(
-        "User {user_id} redeemed code {code} for {amount} points",
+        "User {user_id} redeemed code {code} for {amount} points + {n} cosmetic(s)",
         user_id=current_user.id,
         code=code_str,
         amount=code.amount,
+        n=len(granted),
     )
-    return {"awarded": code.amount, "balance": await get_balance(db, current_user.id)}
+    return {
+        "awarded": code.amount,
+        "balance": await get_balance(db, current_user.id),
+        "granted_cosmetics": granted,
+    }
 
 
 class CreateCodeRequest(BaseModel):
-    amount: int = PydanticField(ge=1, le=1_000_000)
+    # 0 is allowed so a code can grant ONLY a cosmetic (no points).
+    amount: int = PydanticField(default=0, ge=0, le=1_000_000)
+    grant_cosmetics: list[str] | None = None
     note: str | None = None
     code: str | None = None
     max_uses: int = PydanticField(default=1, ge=1, le=1_000_000)
@@ -211,9 +232,14 @@ async def create_access_code(
     if existing is not None:
         raise HTTPException(status_code=409, detail="That code already exists")
 
+    grant = [str(x).strip() for x in (body.grant_cosmetics or []) if str(x).strip()]
+    if body.amount <= 0 and not grant:
+        raise HTTPException(status_code=400, detail="A code must grant points, a cosmetic, or both")
+
     code = ToriiAccessCode(
         code=code_str,
         amount=body.amount,
+        grant_cosmetics=json.dumps(grant) if grant else None,
         note=body.note,
         max_uses=body.max_uses,
         expires_at=body.expires_at,
@@ -233,6 +259,7 @@ async def create_access_code(
     return {
         "code": code.code,
         "amount": code.amount,
+        "grant_cosmetics": _parse_cosmetics(code.grant_cosmetics),
         "max_uses": code.max_uses,
         "note": code.note,
         "expires_at": code.expires_at,

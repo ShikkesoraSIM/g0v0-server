@@ -73,6 +73,10 @@ class ToriiAccessCode(SQLModel, table=True):
     id: int | None = Field(default=None, sa_column=Column(BigInteger, primary_key=True, autoincrement=True))
     code: str = Field(sa_column=Column(String(64), unique=True, index=True, nullable=False))
     amount: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
+    # Optional cosmetic reward: a JSON array of catalog ids (trail / name-colour
+    # / aura ids) the code unlocks on redeem, on top of any points. Null/empty =
+    # points only. The reward shape can grow further (supporter days, etc.).
+    grant_cosmetics: str | None = Field(default=None, sa_column=Column(String(1024), nullable=True))
     # Why this code exists, shown nowhere public — e.g. "bug report: thumbnails".
     note: str | None = Field(default=None, sa_column=Column(String(256), nullable=True))
     max_uses: int = Field(default=1, sa_column=Column(Integer, nullable=False, default=1))
