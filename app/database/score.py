@@ -1412,26 +1412,29 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
         # Torii points: reward a new top play (new PP-best on this map). Gated so
         # fresh accounts can't farm it (need a real top-play history first) and
         # capped per day. These adds are committed by process_user's commit.
-        from app.models.torii_points import (
-            POINTS_TOP_PLAY,
-            TOP_PLAY_DAILY_CAP,
-            TOP_PLAY_MIN_EXISTING,
-            PointReason,
-        )
-        from app.service.points_service import award, count_today_awards
-
-        if (
-            existing_top_plays >= TOP_PLAY_MIN_EXISTING
-            and await count_today_awards(session, user_id, PointReason.TOP_PLAY) < TOP_PLAY_DAILY_CAP
-        ):
-            await award(
-                session,
-                user_id,
+        try:
+            from app.models.torii_points import (
                 POINTS_TOP_PLAY,
-                PointReason.TOP_PLAY,
-                ref=str(score.id),
-                idempotency_key=f"top_play:{score.id}",
+                TOP_PLAY_DAILY_CAP,
+                TOP_PLAY_MIN_EXISTING,
+                PointReason,
             )
+            from app.service.points_service import award, count_today_awards
+
+            if (
+                existing_top_plays >= TOP_PLAY_MIN_EXISTING
+                and await count_today_awards(session, user_id, PointReason.TOP_PLAY) < TOP_PLAY_DAILY_CAP
+            ):
+                await award(
+                    session,
+                    user_id,
+                    POINTS_TOP_PLAY,
+                    PointReason.TOP_PLAY,
+                    ref=str(score.id),
+                    idempotency_key=f"top_play:{score.id}",
+                )
+        except Exception as _pts_err:
+            logger.warning("Top-play points award failed for score {}: {}", score.id, _pts_err)
 
 
 
@@ -2362,9 +2365,12 @@ async def process_user(
     # plus a consecutive-day streak. Idempotent per day inside the service;
     # persisted by the critical-path commit below.
     if score.passed:
-        from app.service.points_service import award_daily_play
+        try:
+            from app.service.points_service import award_daily_play
 
-        await award_daily_play(session, user_id)
+            await award_daily_play(session, user_id)
+        except Exception as _pts_err:
+            logger.warning("Daily-play points award failed for score {}: {}", score.id, _pts_err)
 
     # ---- Critical path (must be done before response) ----
     _pp_zero_reason = await _process_score_pp(score, session, redis, fetcher)
