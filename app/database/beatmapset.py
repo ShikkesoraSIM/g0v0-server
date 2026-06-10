@@ -376,11 +376,19 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
     ) -> list["BeatmapDict"]:
         from .beatmap import BeatmapModel
 
+        beatmaps_list = await beatmapset.awaitable_attrs.beatmaps
+        sub_includes = (includes or []) + BeatmapModel.BEATMAP_TRANSFORMER_INCLUDES
+
+        # Batch-prefetch the per-difficulty data (current-user playcount / tag
+        # votes / top tags) in one query each, instead of one query per
+        # difficulty inside transform — that N+1 dominated /beatmapsets/{id}
+        # latency on multi-difficulty sets. Passed via context; the per-beatmap
+        # resolvers fall back to their own query when a key is absent.
+        batch_ctx = await BeatmapModel.prefetch_batch(_session, beatmaps_list, sub_includes, user)
+
         return [
-            await BeatmapModel.transform(
-                beatmap, includes=(includes or []) + BeatmapModel.BEATMAP_TRANSFORMER_INCLUDES, user=user
-            )
-            for beatmap in await beatmapset.awaitable_attrs.beatmaps
+            await BeatmapModel.transform(beatmap, includes=sub_includes, user=user, **batch_ctx)
+            for beatmap in beatmaps_list
         ]
 
     # @ondemand

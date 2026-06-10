@@ -156,7 +156,14 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
 
     @ondemand
     @staticmethod
-    async def current_user_playcount(_session: AsyncSession, beatmap: "Beatmap", user: "User") -> int:
+    async def current_user_playcount(
+        _session: AsyncSession,
+        beatmap: "Beatmap",
+        user: "User",
+        batch_user_playcount: "dict[int, int] | None" = None,
+    ) -> int:
+        if batch_user_playcount is not None:
+            return int(batch_user_playcount.get(beatmap.id, 0) or 0)
         playcount = (
             await _session.exec(
                 select(BeatmapPlaycounts.playcount).where(
@@ -168,9 +175,16 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
 
     @ondemand
     @staticmethod
-    async def current_user_tag_ids(_session: AsyncSession, beatmap: "Beatmap", user: "User | None" = None) -> list[int]:
+    async def current_user_tag_ids(
+        _session: AsyncSession,
+        beatmap: "Beatmap",
+        user: "User | None" = None,
+        batch_user_tag_ids: "dict[int, list[int]] | None" = None,
+    ) -> list[int]:
         if user is None:
             return []
+        if batch_user_tag_ids is not None:
+            return list(batch_user_tag_ids.get(beatmap.id, []))
         tag_ids = (
             await _session.exec(
                 select(BeatmapTagVote.tag_id).where(
@@ -190,7 +204,13 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
 
     @ondemand
     @staticmethod
-    async def top_tag_ids(_session: AsyncSession, beatmap: "Beatmap") -> list[dict[str, int]]:
+    async def top_tag_ids(
+        _session: AsyncSession,
+        beatmap: "Beatmap",
+        batch_top_tag_ids: "dict[int, list[dict[str, int]]] | None" = None,
+    ) -> list[dict[str, int]]:
+        if batch_top_tag_ids is not None:
+            return list(batch_top_tag_ids.get(beatmap.id, []))
         all_votes = (
             await _session.exec(
                 select(BeatmapTagVote.tag_id, func.count().label("vote_count"))
@@ -204,6 +224,72 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
             top_tag_ids.append({"tag_id": id, "count": votes})
         top_tag_ids.sort(key=lambda x: x["count"], reverse=True)
         return top_tag_ids
+
+    @classmethod
+    async def prefetch_batch(
+        cls,
+        session: AsyncSession,
+        beatmaps: "list[Beatmap]",
+        includes: list[str],
+        user: "User | None",
+    ) -> dict:
+        """Batch-load the per-difficulty data that current_user_playcount /
+        current_user_tag_ids / top_tag_ids would otherwise fetch one query per
+        difficulty (the N+1 that dominated /beatmapsets/{id} latency). Returns a
+        context dict consumed by those resolvers; an absent key makes a resolver
+        fall back to its own per-beatmap query, so single-beatmap transforms
+        elsewhere keep working unchanged."""
+        ctx: dict = {}
+        if not beatmaps:
+            return ctx
+        ids = [b.id for b in beatmaps]
+
+        if user is not None and "current_user_playcount" in includes:
+            rows = (
+                await session.exec(
+                    select(BeatmapPlaycounts.beatmap_id, BeatmapPlaycounts.playcount).where(
+                        col(BeatmapPlaycounts.beatmap_id).in_(ids),
+                        BeatmapPlaycounts.user_id == user.id,
+                    )
+                )
+            ).all()
+            ctx["batch_user_playcount"] = {bid: pc for bid, pc in rows}
+
+        if user is not None and "current_user_tag_ids" in includes:
+            rows = (
+                await session.exec(
+                    select(BeatmapTagVote.beatmap_id, BeatmapTagVote.tag_id).where(
+                        col(BeatmapTagVote.beatmap_id).in_(ids),
+                        BeatmapTagVote.user_id == user.id,
+                    )
+                )
+            ).all()
+            user_tags: dict[int, list[int]] = {}
+            for bid, tid in rows:
+                user_tags.setdefault(bid, []).append(tid)
+            ctx["batch_user_tag_ids"] = user_tags
+
+        if "top_tag_ids" in includes:
+            rows = (
+                await session.exec(
+                    select(
+                        BeatmapTagVote.beatmap_id,
+                        BeatmapTagVote.tag_id,
+                        func.count().label("vote_count"),
+                    )
+                    .where(col(BeatmapTagVote.beatmap_id).in_(ids))
+                    .group_by(col(BeatmapTagVote.beatmap_id), col(BeatmapTagVote.tag_id))
+                    .having(func.count() > settings.beatmap_tag_top_count)
+                )
+            ).all()
+            top_tags: dict[int, list[dict[str, int]]] = {}
+            for bid, tid, votes in rows:
+                top_tags.setdefault(bid, []).append({"tag_id": tid, "count": votes})
+            for bid in top_tags:
+                top_tags[bid].sort(key=lambda x: x["count"], reverse=True)
+            ctx["batch_top_tag_ids"] = top_tags
+
+        return ctx
 
     @ondemand
     @staticmethod
