@@ -1,6 +1,7 @@
 from datetime import timedelta
 import math
 from typing import TYPE_CHECKING, ClassVar, NotRequired, TypedDict
+from weakref import WeakKeyDictionary
 
 from app.models.score import GameMode
 from app.utils import utcnow
@@ -198,8 +199,27 @@ class UserStatistics(AsyncAttrs, UserStatisticsModel, table=True):
     user: "User" = Relationship(back_populates="statistics")
 
 
+# Per-request memo for get_rank(). A single profile transform resolves the same
+# global rank from several fields (global_rank, global_rank_percent,
+# rank_change_since_30_days) and each one used to re-run the full ROW_NUMBER scan.
+# Keyed weakly by the request's AsyncSession (so it clears when the session is
+# dropped), then by (user_id, mode, country).
+_rank_memo: "WeakKeyDictionary[AsyncSession, dict]" = WeakKeyDictionary()
+
+
 async def get_rank(session: AsyncSession, statistics: UserStatistics, country: str | None = None) -> int | None:
     from .user import User
+
+    cache_key = (statistics.user_id, statistics.mode, country)
+    try:
+        memo = _rank_memo.get(session)
+        if memo is None:
+            memo = _rank_memo[session] = {}
+    except TypeError:
+        # Session not weakly referenceable for some reason; just skip the memo.
+        memo = None
+    if memo is not None and cache_key in memo:
+        return memo[cache_key]
 
     query = select(
         UserStatistics.user_id,
@@ -220,6 +240,8 @@ async def get_rank(session: AsyncSession, statistics: UserStatistics, country: s
 
     rank = result.first()
     if rank is None:
+        if memo is not None:
+            memo[cache_key] = None
         return None
 
     if country is None:
@@ -250,4 +272,6 @@ async def get_rank(session: AsyncSession, statistics: UserStatistics, country: s
                     rank=rank,
                 )
             )
+    if memo is not None:
+        memo[cache_key] = rank
     return rank
