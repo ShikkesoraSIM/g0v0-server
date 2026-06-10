@@ -1415,17 +1415,9 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
             pp=score.pp,
         )
 
-        # Torii points: reward a new top play (new PP-best on this map). Gated so
-        # fresh accounts can't farm it (need a real top-play history first) and
-        # capped per day. These adds are committed by process_user's commit.
-        try:
-            from app.service.points_service import award_top_play
-
-            prev_pp = previous_pp_best.pp if previous_pp_best is not None else 0.0
-            pp_gained = int(round(score.pp - prev_pp))
-            await award_top_play(session, user_id, existing_top_plays, pp_gained, score.id)
-        except Exception as _pts_err:
-            logger.warning("Top-play points award failed for score {}: {}", score.id, _pts_err)
+        # Torii top-play points are awarded later in _process_statistics, once the
+        # account-pp delta is known — the reward scales by the play's RANK in the
+        # user's tops + the pp it added to their account total, not by raw pp here.
 
 
 
@@ -1766,6 +1758,51 @@ async def _process_statistics(
                 await award_pp_milestones(session, statistics.user_id, score.gamemode, float(statistics.pp))
         except Exception as _ms_err:
             logger.warning("PP milestone award failed for user {}: {}", statistics.user_id, _ms_err)
+
+        # Torii points: reward a new top play, scaled by where it ranks in the
+        # user's best plays + how much it added to their account pp. The trigger is
+        # this score having become the user's best on its map (a new PB), detected
+        # by a BestScore row pointing at it; a random low PB ranks far down and
+        # pays ~nothing. account_pp_delta (the pp this play added to the total) is
+        # known here, so this is the right place — not _process_score_pp.
+        try:
+            from app.service.points_service import award_top_play
+
+            is_new_best = (
+                await session.exec(select(BestScore.id).where(BestScore.score_id == score.id))
+            ).first() is not None
+            if is_new_best:
+                better = (
+                    await session.exec(
+                        select(func.count())
+                        .select_from(BestScore)
+                        .where(
+                            BestScore.user_id == statistics.user_id,
+                            BestScore.gamemode == score.gamemode,
+                            BestScore.pp > score.pp,
+                        )
+                    )
+                ).one()
+                total_tops = (
+                    await session.exec(
+                        select(func.count())
+                        .select_from(BestScore)
+                        .where(
+                            BestScore.user_id == statistics.user_id,
+                            BestScore.gamemode == score.gamemode,
+                        )
+                    )
+                ).one()
+                await award_top_play(
+                    session,
+                    statistics.user_id,
+                    better + 1,
+                    total_tops,
+                    int(round(score.account_pp_delta or 0.0)),
+                    score.id,
+                )
+        except Exception as _tp_err:
+            logger.warning("Top-play points award failed for user {}: {}", statistics.user_id, _tp_err)
 
     if add_to_db:
         session.add(mouthly_playcount)

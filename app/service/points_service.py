@@ -194,15 +194,16 @@ async def _lock_user(session: AsyncSession, user_id: int):
 async def award_top_play(
     session: AsyncSession,
     user_id: int,
+    rank: int,
     existing_top_plays: int,
-    pp_gained: int,
+    account_pp_delta: int,
     score_id: int,
 ) -> bool:
-    """Award a scaled new-top-play reward: base + veteran bonus + the pp this play
-    added, tiered by your existing top-play count and capped per day. The
-    breakdown is stored in the ledger ref (``score:ID|b:..|v:..|pp:..``) so the
-    client can show the calc in its toast."""
-    from app.models.torii_points import TOP_PLAY_DAILY_POINTS_CAP, top_play_breakdown
+    """Award a new-top-play reward scaled by the play's RANK among the user's best
+    plays + their tenure, plus the pp it added to the account total. The breakdown
+    is stored in the ledger ref (``score:ID|rank:R|b:..|pp:..``) so the client can
+    show the calc + the rank in its summary."""
+    from app.models.torii_points import TOP_PLAY_DAILY_POINTS_CAP, top_play_award
 
     # Hold the user row lock across the cap check + award so concurrent top plays
     # can't both pass the daily cap and overshoot it.
@@ -211,8 +212,8 @@ async def award_top_play(
     if await sum_today_awards(session, user_id, PointReason.TOP_PLAY) >= TOP_PLAY_DAILY_POINTS_CAP:
         return False
 
-    base, veteran, pp_bonus = top_play_breakdown(existing_top_plays, pp_gained)
-    total = base + veteran + pp_bonus
+    base, pp_bonus = top_play_award(rank, existing_top_plays, account_pp_delta)
+    total = base + pp_bonus
     if total <= 0:
         return False
 
@@ -221,7 +222,7 @@ async def award_top_play(
         user_id,
         total,
         PointReason.TOP_PLAY,
-        ref=f"score:{score_id}|b:{base}|v:{veteran}|pp:{pp_bonus}",
+        ref=f"score:{score_id}|rank:{rank}|b:{base}|pp:{pp_bonus}",
         idempotency_key=f"top_play:{score_id}",
     )
 
