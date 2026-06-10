@@ -1800,6 +1800,7 @@ async def _process_statistics(
                     total_tops,
                     int(round(score.account_pp_delta or 0.0)),
                     score.id,
+                    score.gamemode,
                 )
         except Exception as _tp_err:
             logger.warning("Top-play points award failed for user {}: {}", statistics.user_id, _tp_err)
@@ -2401,14 +2402,18 @@ async def process_user(
         beatmap_id=score.beatmap_id,
     )
 
-    # Torii points: first passed play of the (UTC) day pays a small daily bonus
-    # plus a consecutive-day streak. Idempotent per day inside the service;
-    # persisted by the critical-path commit below.
-    if score.passed:
+    # Torii points: first GENUINE ranked play of the (UTC) day pays a small daily
+    # bonus + streak. Gated on a real ranked score (NOT a client-asserted "passed"
+    # with no score, nor an unranked / loved / graveyard map) so the daily bonus
+    # can't be farmed by fake/zero-effort submissions. Idempotent per day inside
+    # the service; reduced for relax/autopilot via the gamemode.
+    from app.models.torii_points import DAILY_PLAY_MIN_TOTAL_SCORE
+
+    if score.passed and score.ranked and (score.total_score or 0) >= DAILY_PLAY_MIN_TOTAL_SCORE:
         try:
             from app.service.points_service import award_daily_play
 
-            await award_daily_play(session, user_id)
+            await award_daily_play(session, user_id, score.gamemode)
         except Exception as _pts_err:
             logger.warning("Daily-play points award failed for score {}: {}", score.id, _pts_err)
 

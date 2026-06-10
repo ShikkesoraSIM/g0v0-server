@@ -72,11 +72,17 @@ async def award(
         if user is None:
             return False
         if idempotency_key is not None:
+            # LOCKING read (FOR UPDATE), not a plain select: under MySQL REPEATABLE
+            # READ a plain read uses the transaction's stale snapshot, so two
+            # concurrent same-key awards (serialised by the user-row lock above)
+            # could BOTH miss each other's committed row and double-pay. A locking
+            # read always sees the latest committed row, so the second one is
+            # correctly skipped.
             seen = (
                 await session.exec(
-                    select(ToriiPointTransaction.id).where(
-                        ToriiPointTransaction.idempotency_key == idempotency_key
-                    )
+                    select(ToriiPointTransaction.id)
+                    .where(ToriiPointTransaction.idempotency_key == idempotency_key)
+                    .with_for_update()
                 )
             ).first()
             if seen is not None:
@@ -198,30 +204,50 @@ async def award_top_play(
     existing_top_plays: int,
     account_pp_delta: int,
     score_id: int,
+    gamemode=None,
 ) -> bool:
     """Award a new-top-play reward scaled by the play's RANK among the user's best
-    plays + their tenure, plus the pp it added to the account total. The breakdown
-    is stored in the ledger ref (``score:ID|rank:R|b:..|pp:..``) so the client can
-    show the calc + the rank in its summary."""
-    from app.models.torii_points import TOP_PLAY_DAILY_POINTS_CAP, top_play_award
+    plays + their tenure, plus the pp it added to the account total, reduced for
+    relax/autopilot modes. The breakdown is stored in the ledger ref
+    (``score:ID|rank:R|b:..|pp:..``) so the client can show the calc + the rank."""
+    from app.models.torii_points import (
+        TOP_PLAY_DAILY_HARD_CAP,
+        TOP_PLAY_DAILY_POINTS_CAP,
+        earn_multiplier,
+        top_play_award,
+    )
 
     # Hold the user row lock across the cap check + award so concurrent top plays
     # serialise and read a consistent daily total.
     if await _lock_user(session, user_id) is None:
         return False
 
+    today = await sum_today_awards(session, user_id, PointReason.TOP_PLAY)
+
+    # Absolute daily ceiling: nothing more today (closes the soft-cap pp tail).
+    if today >= TOP_PLAY_DAILY_HARD_CAP:
+        return False
+
     base, pp_bonus = top_play_award(rank, existing_top_plays, account_pp_delta)
 
-    # Soft cap: once past the daily ceiling, keep paying the pp this play added to
-    # your account (a genuine top play is never a flat zero) but drop the rank/base
-    # bonus. Mark it (capped:1) so the client can show "you hit today's limit".
-    capped = await sum_today_awards(session, user_id, PointReason.TOP_PLAY) >= TOP_PLAY_DAILY_POINTS_CAP
+    # Relax/autopilot inflate pp cheaply, so scale the components down (kept on the
+    # components, not just the total, so the ref/toast breakdown stays honest).
+    mult = earn_multiplier(gamemode)
+    base = int(round(base * mult))
+    pp_bonus = int(round(pp_bonus * mult))
+
+    # Soft cap: once past it, keep paying the pp this play added (never a flat zero)
+    # but drop the rank/base bonus. Mark it (capped:1) so the client can show
+    # "you hit today's limit".
+    capped = today >= TOP_PLAY_DAILY_POINTS_CAP
     if capped:
         base = 0
         total = pp_bonus
     else:
         total = base + pp_bonus
 
+    # Never overshoot the hard ceiling.
+    total = min(total, TOP_PLAY_DAILY_HARD_CAP - today)
     if total <= 0:
         return False
 
@@ -243,7 +269,7 @@ async def award_pp_milestones(session: AsyncSession, user_id: int, mode, total_p
     """One-time pp milestones. Each threshold pays once ever (idempotency-keyed
     without mode, so it fires on your first time reaching it in any mode), gated
     by >=500 best plays in the reaching mode so fresh accounts can't trip them."""
-    from app.models.torii_points import PP_MILESTONES
+    from app.models.torii_points import PP_MILESTONES, earn_multiplier
 
     reached = [thr for thr in PP_MILESTONES if total_pp >= thr]
     if not reached:
@@ -262,18 +288,19 @@ async def award_pp_milestones(session: AsyncSession, user_id: int, mode, total_p
     if best_count < 500:
         return
 
+    mult = earn_multiplier(mode)
     for thr in reached:
         await award(
             session,
             user_id,
-            PP_MILESTONES[thr],
+            max(1, int(round(PP_MILESTONES[thr] * mult))),
             PointReason.MILESTONE,
             ref=f"pp:{thr}",
             idempotency_key=f"pp_milestone:{user_id}:{thr}",
         )
 
 
-async def award_daily_play(session: AsyncSession, user_id: int) -> bool:
+async def award_daily_play(session: AsyncSession, user_id: int, gamemode=None) -> bool:
     """First ranked play of the (UTC) day: base + consecutive-day streak bonus.
 
     The streak length lives in the previous day's ledger row ``ref`` as
@@ -304,10 +331,15 @@ async def award_daily_play(session: AsyncSession, user_id: int) -> bool:
             streak = 1
 
     bonus = min((streak - 1) * POINTS_DAILY_STREAK_STEP, POINTS_DAILY_STREAK_MAX)
+
+    # Relax/autopilot earn less.
+    from app.models.torii_points import earn_multiplier
+
+    amount = max(1, int(round((POINTS_DAILY_PLAY + bonus) * earn_multiplier(gamemode))))
     return await award(
         session,
         user_id,
-        POINTS_DAILY_PLAY + bonus,
+        amount,
         PointReason.DAILY_PLAY,
         ref=f"streak:{streak}",
         idempotency_key=today_key,

@@ -58,9 +58,35 @@ POINTS_MEDAL = 10
 # "capped:1") so it can show "you hit today's top-play limit".
 TOP_PLAY_DAILY_POINTS_CAP = 500
 
+# Absolute daily ceiling. Between the soft cap and this, only the pp-bonus pays
+# (no base); past this, top plays pay zero for the rest of the UTC day. Stops the
+# "soft cap leaks pp_bonus forever" tail.
+TOP_PLAY_DAILY_HARD_CAP = 800
+
 # Need a real top-play history before top plays pay out at all (a fresh account
 # on a private server gets free PBs early; this stops farming them).
 TOP_PLAY_MIN_TOPS = 50
+
+# A new PB that adds less than this to your weighted account pp pays NO rank base
+# (only the ~0 pp bonus). Kills "beat your own #1 by +0.01pp" base re-farming —
+# the base is the reward for a play that genuinely moved your profile.
+TOP_PLAY_MIN_ACCOUNT_PP_FOR_BASE = 1
+
+# Daily-play needs a real ranked play: a minimum total score so a 0-score "passed"
+# submission (fake play) can't farm the daily bonus.
+DAILY_PLAY_MIN_TOTAL_SCORE = 5_000
+
+# Relax / Autopilot modes inflate pp very cheaply, so EVERY point earn in them is
+# scaled down. 1.0 = vanilla. Tune the multiplier freely.
+REDUCED_EARN_MODE_VALUES = {"osurx", "osuap", "taikorx", "fruitsrx"}
+REDUCED_EARN_MULTIPLIER = 0.4
+
+
+def earn_multiplier(gamemode) -> float:
+    """Point multiplier for a gamemode: reduced for relax/autopilot (cheap pp),
+    full otherwise. Accepts a GameMode enum or its string value."""
+    value = str(getattr(gamemode, "value", gamemode)).lower()
+    return REDUCED_EARN_MULTIPLIER if value in REDUCED_EARN_MODE_VALUES else 1.0
 
 
 def top_play_award(rank: int, existing_top_plays: int, account_pp_delta: int) -> tuple[int, int]:
@@ -104,6 +130,11 @@ def top_play_award(rank: int, existing_top_plays: int, account_pp_delta: int) ->
     elif rank <= 100:
         base = 5 if developing else 8
     else:
+        base = 0
+
+    # A PB that barely moved your weighted total (e.g. re-beating your own #1 by
+    # +0.01pp) pays no base — only genuine improvements earn the rank reward.
+    if account_pp_delta < TOP_PLAY_MIN_ACCOUNT_PP_FOR_BASE:
         base = 0
 
     if base <= 0:
