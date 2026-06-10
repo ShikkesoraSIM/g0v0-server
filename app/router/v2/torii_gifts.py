@@ -164,10 +164,12 @@ async def claim_gift(
 ) -> dict[str, Any]:
     gift = (
         await db.exec(
-            select(ToriiGift).where(
+            select(ToriiGift)
+            .where(
                 ToriiGift.id == body.gift_id,
                 ToriiGift.recipient_id == current_user.id,
             )
+            .with_for_update()
         )
     ).first()
     if gift is None:

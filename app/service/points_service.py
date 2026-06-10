@@ -62,10 +62,14 @@ async def award(
     """Credit ``amount`` points. Returns True if applied, False if skipped
     (non-positive amount, unknown user, or this idempotency_key already seen).
     Adds to the session only; the caller commits."""
-    from app.database.user import User
-
     try:
         if amount <= 0:
+            return False
+        # Lock the user row first so concurrent award / spend for the same user
+        # serialise; the idempotency pre-check below then reliably sees a prior
+        # award's committed row instead of racing it (the key index is non-unique).
+        user = await _lock_user(session, user_id)
+        if user is None:
             return False
         if idempotency_key is not None:
             seen = (
@@ -77,9 +81,6 @@ async def award(
             ).first()
             if seen is not None:
                 return False
-        user = await session.get(User, user_id)
-        if user is None:
-            return False
         new_balance = (user.points or 0) + amount
         user.points = new_balance
         session.add(
@@ -121,11 +122,9 @@ async def spend(
     """Debit ``amount`` points if the balance covers it. Returns True on
     success, False if insufficient balance / unknown user / bad amount. Adds to
     the session only; the caller commits."""
-    from app.database.user import User
-
     if amount <= 0:
         return False
-    user = await session.get(User, user_id)
+    user = await _lock_user(session, user_id)
     if user is None or (user.points or 0) < amount:
         return False
     new_balance = (user.points or 0) - amount
@@ -184,6 +183,14 @@ async def sum_today_awards(session: AsyncSession, user_id: int, reason: str | Po
     return int(total or 0)
 
 
+async def _lock_user(session: AsyncSession, user_id: int):
+    """Row-lock the user (SELECT ... FOR UPDATE) so concurrent award / spend for
+    the same user serialise within their transactions. Returns the user or None."""
+    from app.database.user import User
+
+    return (await session.exec(select(User).where(User.id == user_id).with_for_update())).first()
+
+
 async def award_top_play(
     session: AsyncSession,
     user_id: int,
@@ -197,6 +204,10 @@ async def award_top_play(
     client can show the calc in its toast."""
     from app.models.torii_points import TOP_PLAY_DAILY_POINTS_CAP, top_play_breakdown
 
+    # Hold the user row lock across the cap check + award so concurrent top plays
+    # can't both pass the daily cap and overshoot it.
+    if await _lock_user(session, user_id) is None:
+        return False
     if await sum_today_awards(session, user_id, PointReason.TOP_PLAY) >= TOP_PLAY_DAILY_POINTS_CAP:
         return False
 
