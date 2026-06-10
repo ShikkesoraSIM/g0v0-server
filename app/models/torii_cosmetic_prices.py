@@ -76,7 +76,8 @@ COSMETIC_PRICES: dict[str, int] = {
     # ── Auras on sale ─────────────────────────────────────────────────────────
     "summer-2026": 3000,
     # ── Account-wide customisation unlock (length / density / size sliders) ────
-    "customisation-unlock": 250,
+    # Cheap, one-time tweak unlock — keep in sync with CosmeticEconomy.AdjustableLengthUnlock.
+    "customisation-unlock": 100,
 }
 
 
