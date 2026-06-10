@@ -18,6 +18,7 @@ from typing import Annotated
 
 from fastapi import HTTPException, Security
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.database import User
@@ -25,6 +26,7 @@ from app.database.torii_store import ToriiOwnedCosmetic, ToriiStoreConfig, recor
 from app.dependencies.database import Database
 from app.dependencies.user import get_current_user
 from app.log import log
+from app.models.torii_cosmetic_prices import price_for
 from app.models.torii_points import PointReason
 from app.service.points_service import get_balance, spend
 from app.utils import utcnow
@@ -152,12 +154,29 @@ async def purchase(
     cid = body.cosmetic_id.strip()
     if not cid:
         raise HTTPException(status_code=400, detail="Missing cosmetic")
-    # NOTE: the price still comes from the client (the catalog lives client-side).
-    # It's bounded here; moving the price table server-side is the proper hardening.
-    if body.price < 0 or body.price > 100_000:
-        raise HTTPException(status_code=400, detail="Invalid price")
     if cid in await _read_disabled(db):
         raise HTTPException(status_code=400, detail="That cosmetic isn't available")
+
+    # Authoritative price: the SERVER owns the price; the client's claim is ignored.
+    # An id with no server price is not for sale.
+    price = price_for(cid)
+    if price is None:
+        raise HTTPException(status_code=400, detail="That cosmetic isn't for sale")
+    if body.price != price:
+        logger.warning(
+            "Purchase price mismatch for user {uid} on {cid}: client said {cp}, server charges {sp}",
+            uid=current_user.id,
+            cid=cid,
+            cp=body.price,
+            sp=price,
+        )
+
+    # Lock the user row so this user's purchases serialise, then re-check ownership
+    # UNDER the lock. Stops a concurrent double-buy (double charge) and the unique
+    # (user_id, cosmetic_id) collision that would otherwise surface as a 500.
+    locked = (await db.exec(select(User).where(User.id == current_user.id).with_for_update())).first()
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Unknown user")
 
     already = (
         await db.exec(
@@ -170,18 +189,24 @@ async def purchase(
     if already is not None:
         return {"owned": True, "already_owned": True, "balance": await get_balance(db, current_user.id)}
 
-    if body.price > 0 and not await spend(
-        db, current_user.id, body.price, PointReason.STORE_PURCHASE, ref=f"cosmetic:{cid}"
+    if price > 0 and not await spend(
+        db, current_user.id, price, PointReason.STORE_PURCHASE, ref=f"cosmetic:{cid}"
     ):
         raise HTTPException(status_code=400, detail="Not enough points")
 
     await record_owned_cosmetics(db, current_user.id, [cid], "store")
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Lost a race to own this exact cosmetic; treat as already owned (the
+        # rolled-back transaction means no points were charged).
+        await db.rollback()
+        return {"owned": True, "already_owned": True, "balance": await get_balance(db, current_user.id)}
 
     logger.info(
         "User {uid} bought cosmetic {cid} for {price} points",
         uid=current_user.id,
         cid=cid,
-        price=body.price,
+        price=price,
     )
     return {"owned": True, "balance": await get_balance(db, current_user.id)}
