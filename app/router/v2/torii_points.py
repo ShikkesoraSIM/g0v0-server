@@ -31,9 +31,11 @@ from app.database.torii_points import (
     ToriiAccessCodeRedemption,
     ToriiPointTransaction,
 )
+from app.database.torii_store import record_owned_cosmetics
 from app.dependencies.database import Database
 from app.dependencies.user import get_current_user
 from app.log import log
+from app.models.torii_cosmetic_prices import clean_cosmetic_ids
 from app.models.torii_points import PointReason
 from app.service.points_service import award, get_balance
 from app.utils import utcnow
@@ -203,7 +205,7 @@ async def redeem_code(
     if not code_str:
         raise HTTPException(status_code=400, detail="Enter a code")
 
-    code = (await db.exec(select(ToriiAccessCode).where(ToriiAccessCode.code == code_str))).first()
+    code = (await db.exec(select(ToriiAccessCode).where(ToriiAccessCode.code == code_str).with_for_update())).first()
     if code is None:
         raise HTTPException(status_code=404, detail="Invalid code")
     if code.expires_at is not None and _naive(code.expires_at) < _naive(utcnow()):
@@ -232,14 +234,14 @@ async def redeem_code(
         ref=f"code:{code.id}",
         idempotency_key=f"access_code:{code.id}:{current_user.id}",
     )
+    granted = _parse_cosmetics(code.grant_cosmetics)
+    await record_owned_cosmetics(db, current_user.id, granted, "code")
     try:
         await db.commit()
     except IntegrityError:
         # Lost the race on the (code_id, user_id) unique constraint.
         await db.rollback()
         raise HTTPException(status_code=400, detail="You already redeemed this code")
-
-    granted = _parse_cosmetics(code.grant_cosmetics)
 
     logger.info(
         "User {user_id} redeemed code {code} for {amount} points + {n} cosmetic(s)",
@@ -286,7 +288,7 @@ async def create_access_code(
     if existing is not None:
         raise HTTPException(status_code=409, detail="That code already exists")
 
-    grant = [str(x).strip() for x in (body.grant_cosmetics or []) if str(x).strip()]
+    grant = clean_cosmetic_ids(body.grant_cosmetics)
     if body.amount <= 0 and not grant:
         raise HTTPException(status_code=400, detail="A code must grant points, a cosmetic, or both")
 

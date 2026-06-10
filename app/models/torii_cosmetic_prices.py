@@ -17,6 +17,8 @@ rather than a hardcoded mirror.)
 
 from __future__ import annotations
 
+import re
+
 COSMETIC_PRICES: dict[str, int] = {
     # ── Cursor trails: solid colours ──────────────────────────────────────────
     "trail-pearl": 300,
@@ -81,3 +83,12 @@ COSMETIC_PRICES: dict[str, int] = {
 def price_for(cosmetic_id: str) -> int | None:
     """Authoritative price for a sellable cosmetic id, or None if it's not for sale."""
     return COSMETIC_PRICES.get(cosmetic_id)
+
+
+_VALID_COSMETIC_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def clean_cosmetic_ids(ids) -> list[str]:
+    """Filter a list to well-formed cosmetic ids (alphanumeric, dash/underscore, up to
+    128 chars). Used to sanitise admin-supplied grant lists before storing them."""
+    return [s for s in (str(x).strip() for x in (ids or [])) if _VALID_COSMETIC_ID.fullmatch(s)]

@@ -21,9 +21,11 @@ from sqlmodel import select
 
 from app.database import User
 from app.database.torii_gifts import ToriiGift
+from app.database.torii_store import record_owned_cosmetics
 from app.dependencies.database import Database
 from app.dependencies.user import get_current_user
 from app.log import log
+from app.models.torii_cosmetic_prices import clean_cosmetic_ids
 from app.models.torii_points import PointReason
 from app.service.points_service import award, get_balance
 from app.utils import utcnow
@@ -82,7 +84,7 @@ async def create_gift(
     if recipient is None:
         raise HTTPException(status_code=404, detail="No such user")
 
-    grant = [str(x).strip() for x in (body.grant_cosmetics or []) if str(x).strip()]
+    grant = clean_cosmetic_ids(body.grant_cosmetics)
     if body.points <= 0 and not grant:
         raise HTTPException(status_code=400, detail="A gift must include points, a cosmetic, or both")
 
@@ -187,9 +189,9 @@ async def claim_gift(
             ref=f"gift:{gift.id}",
             idempotency_key=f"gift:{gift.id}",
         )
-    await db.commit()
-
     granted = _parse_cosmetics(gift.grant_cosmetics)
+    await record_owned_cosmetics(db, current_user.id, granted, "gift")
+    await db.commit()
     logger.info(
         "User {user_id} claimed gift {gift_id}: {points} pts + {n} cosmetic(s)",
         user_id=current_user.id,
