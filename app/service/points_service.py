@@ -154,6 +154,60 @@ async def spend(
     return True
 
 
+async def reverse_score_points(session: AsyncSession, score_id: int) -> None:
+    """Claw back any top-play points a (now-deleted) score granted, so deleting a
+    score and re-landing the same play (which mints a new score_id = a fresh award
+    key) can't re-earn. Idempotent per score (a reversal row guards against double
+    clawback); the clawback is floored so a balance never goes negative. The caller
+    commits."""
+    granted = (
+        await session.exec(
+            select(ToriiPointTransaction)
+            .where(
+                ToriiPointTransaction.idempotency_key == f"top_play:{score_id}",
+                ToriiPointTransaction.amount > 0,
+            )
+            .with_for_update()
+        )
+    ).first()
+    if granted is None:
+        return
+
+    rev_key = f"top_play_reversal:{score_id}"
+    already = (
+        await session.exec(select(ToriiPointTransaction.id).where(ToriiPointTransaction.idempotency_key == rev_key))
+    ).first()
+    if already is not None:
+        return
+
+    user = await _lock_user(session, granted.user_id)
+    if user is None:
+        return
+
+    decrement = min(int(granted.amount), int(user.points or 0))
+    if decrement <= 0:
+        return
+
+    new_balance = (user.points or 0) - decrement
+    user.points = new_balance
+    session.add(
+        ToriiPointTransaction(
+            user_id=granted.user_id,
+            amount=-decrement,
+            reason="refund",
+            ref=f"reverse:score:{score_id}",
+            idempotency_key=rev_key,
+            balance_after=new_balance,
+        )
+    )
+    logger.info(
+        "Reversed {amt} top-play points for deleted score {sid} (user {uid})",
+        amt=decrement,
+        sid=score_id,
+        uid=granted.user_id,
+    )
+
+
 async def count_today_awards(session: AsyncSession, user_id: int, reason: str | PointReason) -> int:
     """How many positive awards of ``reason`` the user already earned today
     (UTC). Used for per-day caps (e.g. top plays)."""

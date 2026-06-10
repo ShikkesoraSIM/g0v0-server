@@ -2098,6 +2098,8 @@ async def ban_beatmapset(
         raise HTTPException(status_code=404, detail="Beatmapset not found")
 
     # Delete all scores for these beatmaps
+    from app.service.points_service import reverse_score_points
+
     for beatmap in beatmaps:
         scores = (
             await session.exec(
@@ -2105,6 +2107,9 @@ async def ban_beatmapset(
             )
         ).all()
         for score in scores:
+            # Claw back any top-play points the score granted before deleting it,
+            # so a re-landed play can't re-earn for the same content.
+            await reverse_score_points(session, score.id)
             await session.delete(score)
 
     # Add all beatmaps to blacklist
@@ -2166,8 +2171,13 @@ async def wipe_user_stats(
         )
     ).all()
 
+    from app.service.points_service import reverse_score_points
+
     deleted_count = 0
     for score in scores:
+        # Claw back any top-play points before deleting so a re-wipe + resubmit
+        # can't re-earn for the same play.
+        await reverse_score_points(session, score.id)
         await session.delete(score)
         deleted_count += 1
 
