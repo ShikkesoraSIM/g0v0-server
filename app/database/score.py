@@ -1769,7 +1769,7 @@ async def _process_statistics(
             from app.service.points_service import award_top_play
 
             is_new_best = (
-                await session.exec(select(BestScore.id).where(BestScore.score_id == score.id))
+                await session.exec(select(BestScore.score_id).where(BestScore.score_id == score.id))
             ).first() is not None
             if is_new_best:
                 better = (
