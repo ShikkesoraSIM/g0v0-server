@@ -826,6 +826,11 @@ async def get_leaderboard(
     while limit > 0:
         query = (
             select(TotalScoreBestScore)
+            # Eager-load the linked score + its beatmap so the per-row to_resp()
+            # doesn't lazy-load them one query at a time (N+1 on the leaderboard:
+            # ~3 queries per entry x 50 = 150+). Score.user is already
+            # lazy="joined". One query (joins) instead.
+            .options(joinedload(TotalScoreBestScore.score).joinedload(Score.beatmap))
             .where(*wheres, TotalScoreBestScore.total_score < max_score)
             .limit(limit)
             .order_by(col(TotalScoreBestScore.total_score).desc())
@@ -848,6 +853,7 @@ async def get_leaderboard(
     if user:
         self_query = (
             select(TotalScoreBestScore)
+            .options(joinedload(TotalScoreBestScore.score).joinedload(Score.beatmap))
             .where(TotalScoreBestScore.user_id == user.id)
             .where(col(TotalScoreBestScore.beatmap_id) == beatmap)
             .order_by(col(TotalScoreBestScore.total_score).desc())
