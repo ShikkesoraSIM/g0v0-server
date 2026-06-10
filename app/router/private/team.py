@@ -638,16 +638,38 @@ async def handle_request(
     accepted = req.method == "POST"
 
     if accepted:
-        if (await session.exec(select(exists()).where(TeamMember.user_id == user_id))).first():
-            raise HTTPException(status_code=409, detail="User is already a member of a team")
-
-        session.add(TeamMember(user_id=user_id, team_id=team_id, joined_at=utcnow()))
+        existing = (
+            await session.exec(select(TeamMember).where(TeamMember.user_id == user_id))
+        ).first()
+        if existing is None:
+            session.add(TeamMember(user_id=user_id, team_id=team_id, joined_at=utcnow()))
+        elif existing.team_id != team_id:
+            # Switching teams: repoint the existing membership row (user_id is the
+            # primary key, so update it rather than inserting a duplicate). Don't
+            # let a leader silently abandon the team they currently run.
+            old_team = await session.get(Team, existing.team_id)
+            if old_team is not None and old_team.leader_id == user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This user leads another team; they must disband or transfer it first.",
+                )
+            existing.team_id = team_id
+            existing.joined_at = utcnow()
+            session.add(existing)
+        # else: already a member of this team, just clear the pending request.
         await server.new_private_notification(TeamApplicationAccept.init(team_request))
     else:
         await server.new_private_notification(TeamApplicationReject.init(team_request))
 
     await session.delete(team_request)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Could not accept the request, please try again.",
+        )
 
     if accepted:
         cache_service = get_ranking_cache_service(redis)
