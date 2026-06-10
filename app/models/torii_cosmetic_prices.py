@@ -78,6 +78,7 @@ COSMETIC_PRICES: dict[str, int] = {
     # ── Account-wide customisation unlock (length / density / size sliders) ────
     # Cheap, one-time tweak unlock — keep in sync with CosmeticEconomy.AdjustableLengthUnlock.
     "customisation-unlock": 100,
+    "accent-hue-unlock": 5000,
 }
 
 
