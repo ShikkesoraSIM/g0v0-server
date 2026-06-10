@@ -109,11 +109,16 @@ async def set_store_config(
         row.updated_by = current_user.id
         row.updated_at = utcnow()
 
+    # Snapshot before commit: commit expires every ORM row (expire_on_commit is on),
+    # and reading an expired attribute in async SQLAlchemy does implicit IO with no
+    # greenlet -> MissingGreenlet (500). current_user.id is the only ORM read left.
+    admin_id = current_user.id
+
     await db.commit()
 
     logger.info(
         "Admin {admin_id} set store disabled list ({n} items)",
-        admin_id=current_user.id,
+        admin_id=admin_id,
         n=len(cleaned),
     )
     return StoreConfigResp(disabled=cleaned)
@@ -151,6 +156,12 @@ async def purchase(
     db: Database,
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
 ) -> dict:
+    # current_user is bound to this request's session, so any db.commit()/db.rollback()
+    # below expires it; reading current_user.id afterwards would do implicit IO with no
+    # greenlet -> MissingGreenlet (500). Capture the id as a plain int up front and use
+    # that everywhere, so the whole handler is immune to the expire-on-commit trap.
+    uid = current_user.id
+
     cid = body.cosmetic_id.strip()
     if not cid:
         raise HTTPException(status_code=400, detail="Missing cosmetic")
@@ -165,7 +176,7 @@ async def purchase(
     if body.price != price:
         logger.warning(
             "Purchase price mismatch for user {uid} on {cid}: client said {cp}, server charges {sp}",
-            uid=current_user.id,
+            uid=uid,
             cid=cid,
             cp=body.price,
             sp=price,
@@ -174,39 +185,39 @@ async def purchase(
     # Lock the user row so this user's purchases serialise, then re-check ownership
     # UNDER the lock. Stops a concurrent double-buy (double charge) and the unique
     # (user_id, cosmetic_id) collision that would otherwise surface as a 500.
-    locked = (await db.exec(select(User).where(User.id == current_user.id).with_for_update())).first()
+    locked = (await db.exec(select(User).where(User.id == uid).with_for_update())).first()
     if locked is None:
         raise HTTPException(status_code=404, detail="Unknown user")
 
     already = (
         await db.exec(
             select(ToriiOwnedCosmetic.id).where(
-                ToriiOwnedCosmetic.user_id == current_user.id,
+                ToriiOwnedCosmetic.user_id == uid,
                 ToriiOwnedCosmetic.cosmetic_id == cid,
             )
         )
     ).first()
     if already is not None:
-        return {"owned": True, "already_owned": True, "balance": await get_balance(db, current_user.id)}
+        return {"owned": True, "already_owned": True, "balance": await get_balance(db, uid)}
 
     if price > 0 and not await spend(
-        db, current_user.id, price, PointReason.STORE_PURCHASE, ref=f"cosmetic:{cid}"
+        db, uid, price, PointReason.STORE_PURCHASE, ref=f"cosmetic:{cid}"
     ):
         raise HTTPException(status_code=400, detail="Not enough points")
 
-    await record_owned_cosmetics(db, current_user.id, [cid], "store")
+    await record_owned_cosmetics(db, uid, [cid], "store")
     try:
         await db.commit()
     except IntegrityError:
         # Lost a race to own this exact cosmetic; treat as already owned (the
         # rolled-back transaction means no points were charged).
         await db.rollback()
-        return {"owned": True, "already_owned": True, "balance": await get_balance(db, current_user.id)}
+        return {"owned": True, "already_owned": True, "balance": await get_balance(db, uid)}
 
     logger.info(
         "User {uid} bought cosmetic {cid} for {price} points",
-        uid=current_user.id,
+        uid=uid,
         cid=cid,
         price=price,
     )
-    return {"owned": True, "balance": await get_balance(db, current_user.id)}
+    return {"owned": True, "balance": await get_balance(db, uid)}

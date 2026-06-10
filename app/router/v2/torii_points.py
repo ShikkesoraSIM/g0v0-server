@@ -236,6 +236,13 @@ async def redeem_code(
     )
     granted = _parse_cosmetics(code.grant_cosmetics)
     await record_owned_cosmetics(db, current_user.id, granted, "code")
+
+    # Snapshot before commit: commit/rollback expires the ORM rows (current_user, code),
+    # and reading an expired attribute in async SQLAlchemy does implicit IO with no
+    # greenlet -> MissingGreenlet (500). Keep only plain values past this point.
+    uid = current_user.id
+    code_amount = code.amount
+
     try:
         await db.commit()
     except IntegrityError:
@@ -245,14 +252,14 @@ async def redeem_code(
 
     logger.info(
         "User {user_id} redeemed code {code} for {amount} points + {n} cosmetic(s)",
-        user_id=current_user.id,
+        user_id=uid,
         code=code_str,
-        amount=code.amount,
+        amount=code_amount,
         n=len(granted),
     )
     return {
-        "awarded": code.amount,
-        "balance": await get_balance(db, current_user.id),
+        "awarded": code_amount,
+        "balance": await get_balance(db, uid),
         "granted_cosmetics": granted,
     }
 
@@ -302,12 +309,18 @@ async def create_access_code(
         created_by=current_user.id,
     )
     db.add(code)
+
+    # Snapshot before commit: commit expires current_user (it shares this session),
+    # and reading current_user.id afterwards does implicit IO with no greenlet ->
+    # MissingGreenlet (500). code is re-populated by the refresh below, so it is fine.
+    admin_id = current_user.id
+
     await db.commit()
     await db.refresh(code)
 
     logger.info(
         "Admin {admin_id} minted code {code} worth {amount} ({max_uses} uses)",
-        admin_id=current_user.id,
+        admin_id=admin_id,
         code=code.code,
         amount=code.amount,
         max_uses=code.max_uses,

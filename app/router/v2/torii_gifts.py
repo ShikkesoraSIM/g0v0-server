@@ -97,17 +97,25 @@ async def create_gift(
         created_by=current_user.id,
     )
     db.add(gift)
+
+    # Snapshot before commit: commit expires the ORM rows (current_user, recipient),
+    # and reading an expired attribute in async SQLAlchemy does implicit IO with no
+    # greenlet -> MissingGreenlet (500). Capture the ids we still need afterwards.
+    admin_id = current_user.id
+    recipient_id = recipient.id
+
     await db.commit()
     await db.refresh(gift)
+    gift_id = gift.id
 
     logger.info(
         "Admin {admin_id} gifted user {recipient_id}: {points} pts + {n} cosmetic(s)",
-        admin_id=current_user.id,
-        recipient_id=recipient.id,
+        admin_id=admin_id,
+        recipient_id=recipient_id,
         points=body.points,
         n=len(grant),
     )
-    return {"id": gift.id, "recipient_id": recipient.id}
+    return {"id": gift_id, "recipient_id": recipient_id}
 
 
 class GiftResp(BaseModel):
@@ -191,18 +199,29 @@ async def claim_gift(
         )
     granted = _parse_cosmetics(gift.grant_cosmetics)
     await record_owned_cosmetics(db, current_user.id, granted, "gift")
+
+    # Snapshot before commit: commit expires gift + current_user, and reading an
+    # expired attribute in async SQLAlchemy does implicit IO with no greenlet ->
+    # MissingGreenlet (500). get_balance runs after commit, but on a plain int.
+    user_id = current_user.id
+    gift_id = gift.id
+    gift_points = gift.points
+    gift_message = gift.message
+    gift_sender = gift.sender
+
     await db.commit()
+
     logger.info(
         "User {user_id} claimed gift {gift_id}: {points} pts + {n} cosmetic(s)",
-        user_id=current_user.id,
-        gift_id=gift.id,
-        points=gift.points,
+        user_id=user_id,
+        gift_id=gift_id,
+        points=gift_points,
         n=len(granted),
     )
     return {
-        "points": gift.points,
+        "points": gift_points,
         "granted_cosmetics": granted,
-        "balance": await get_balance(db, current_user.id),
-        "message": gift.message,
-        "sender": gift.sender,
+        "balance": await get_balance(db, user_id),
+        "message": gift_message,
+        "sender": gift_sender,
     }
