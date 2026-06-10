@@ -137,6 +137,10 @@ class UserDict(TypedDict):
     # opted out. The raw stored value (incl. sentinels) is exposed
     # separately as `equipped_aura_setting` on /me responses only.
     equipped_aura: NotRequired[str | None]
+    # Bought name-colour cosmetic id (e.g. "name-crimson") the user has equipped,
+    # or None. Broadcast so any client can paint the username; resolution into an
+    # actual colour happens client-side from its name-colour catalog.
+    equipped_name_colour: NotRequired[str | None]
     active_tournament_banners: NotRequired[list[dict]]
     graveyard_beatmapset_count: NotRequired[int]
     loved_beatmapset_count: NotRequired[int]
@@ -251,6 +255,9 @@ class UserModel(DatabaseModel[UserDict]):
         # this user's name knows which particle preset to attach. Cheap to
         # compute (pure CPU on already-loaded fields) — no extra query.
         "equipped_aura",
+        # Bought name-colour cosmetic id, same idea: ships on every card so
+        # any client can paint the username with the colour the user bought.
+        "equipped_name_colour",
         "team",
     ]
     LIST_INCLUDES: ClassVar[list[str]] = [
@@ -305,6 +312,7 @@ class UserModel(DatabaseModel[UserDict]):
         # Resolved aura also exposed on the profile-header path so the big
         # username on /users/{id} renders with it without an extra include.
         "equipped_aura",
+        "equipped_name_colour",
         "mapping_follower_count",
         "previous_usernames",
         "support_level",
@@ -439,6 +447,17 @@ class UserModel(DatabaseModel[UserDict]):
         if resolved == "supporter-aura" and not is_currently_supporting(obj):
             return None
         return resolved
+
+    @ondemand
+    @staticmethod
+    async def equipped_name_colour(_session: AsyncSession, obj: "User") -> str | None:
+        # Raw stored bought-name-colour cosmetic id (e.g. "name-crimson"), or
+        # None. No sentinel/resolution dance like the aura — the value is either
+        # a concrete owned cosmetic id or NULL. Ownership is validated when the
+        # user equips it (PATCH /me/equipped-name-colour), so whatever is stored
+        # is always something they own; clients resolve it into a colour from
+        # their own name-colour catalog.
+        return getattr(obj, "equipped_name_colour", None)
 
     # NB: we deliberately do NOT register `is_supporter` / `support_level`
     # as @included/@ondemand resolver methods on this class — they share a
@@ -947,6 +966,12 @@ class User(AsyncAttrs, UserModel, table=True):
     # aura is done by torii_auras.resolve_effective_aura_id so consumers
     # don't have to repeat the sentinel logic.
     equipped_aura: str | None = Field(default=None, max_length=64, nullable=True)
+    # Bought name-colour cosmetic id the user has equipped (e.g. "name-crimson"),
+    # broadcast to every client so others see it on their username. NULL = none
+    # equipped → fall back to the group/role colour. Validated against ownership
+    # when set (PATCH /me/equipped-name-colour), so the stored value is always a
+    # cosmetic the user actually owns.
+    equipped_name_colour: str | None = Field(default=None, max_length=64, nullable=True)
     # Cumulative months of Torii-supporter time this user has bought via
     # any donation provider. Stored as a permanent counter — never
     # decremented even after donor_end_at lapses. Used as a "thank-you"

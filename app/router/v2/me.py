@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from app.database import FavouriteBeatmapset, User
+from app.database.torii_store import ToriiOwnedCosmetic
 from app.database.user import UserModel
 from app.dependencies.database import Database, get_redis
 from app.dependencies.fetcher import get_fetcher
@@ -15,6 +16,7 @@ from app.models.torii_auras import (
     is_aura_allowed_for_user,
     resolve_effective_aura_id,
 )
+from app.models.torii_cosmetic_prices import clean_cosmetic_ids
 from app.service.pp_variant_service import apply_pp_variant_to_user_response, normalize_pp_variant
 from app.service.user_update_publisher import publish_user_updated
 from app.utils import api_doc
@@ -181,6 +183,82 @@ async def update_equipped_aura(
         current_setting=current_user.equipped_aura,
         effective_aura_id=resolve_effective_aura_id(current_user, current_user.equipped_aura),
     )
+
+
+# ---------------------------------------------------------------------------
+# Name-colour cosmetic — pick which BOUGHT colour paints the user's name
+# everywhere it appears. Mirrors the aura endpoint: validate, persist, fan out.
+# Role-based name colours (admin/dev/supporter/...) are resolved client-side
+# from the user's groups and are NOT stored here; this field is only the
+# colour the user bought from the cosmetics store.
+#
+# MUST be declared before `/me/{ruleset}` below (FastAPI matches in
+# registration order, the wildcard would otherwise swallow this path).
+# ---------------------------------------------------------------------------
+
+
+class UpdateEquippedNameColourBody(BaseModel):
+    # A name-colour cosmetic id the user owns (e.g. "name-crimson"), or
+    # null / "" / "none" to clear it (fall back to the role colour).
+    name_colour: str | None = None
+
+
+class EquippedNameColourResponse(BaseModel):
+    equipped_name_colour: str | None
+
+
+@router.patch(
+    "/me/equipped-name-colour",
+    response_model=EquippedNameColourResponse,
+    name="Update equipped name colour",
+    description=(
+        "Set the current user's equipped bought name colour so every client paints "
+        "their username with it. Body: `{name_colour: <string|null>}`. Pass a "
+        "name-colour cosmetic id the user owns, or null / 'none' to clear it. The id "
+        "is validated against the user's owned cosmetics."
+    ),
+    tags=["user", "cosmetics"],
+)
+async def update_equipped_name_colour(
+    session: Database,
+    body: UpdateEquippedNameColourBody,
+    current_user: Annotated[User, Security(get_current_user, scopes=["identify"])],
+):
+    raw = (body.name_colour or "").strip()
+    new_value: str | None = raw or None
+
+    # Explicit clear sentinel.
+    if new_value is not None and new_value.lower() == "none":
+        new_value = None
+
+    if new_value is not None:
+        # Well-formed id that looks like a name colour (catalog convention is
+        # `name-*`), so a trail / aura id can't be smuggled into this field.
+        if not clean_cosmetic_ids([new_value]) or not new_value.startswith("name-"):
+            raise HTTPException(status_code=400, detail=f"Not a name-colour id: {new_value!r}")
+
+        # Must be owned — only BOUGHT colours live in this field.
+        owns = (
+            await session.exec(
+                select(ToriiOwnedCosmetic.id).where(
+                    ToriiOwnedCosmetic.user_id == current_user.id,
+                    ToriiOwnedCosmetic.cosmetic_id == new_value,
+                )
+            )
+        ).first()
+        if owns is None:
+            raise HTTPException(status_code=403, detail="You don't own that name colour.")
+
+    current_user.equipped_name_colour = new_value
+    session.add(current_user)
+    await session.commit()
+    await session.refresh(current_user)
+
+    # Fan out a UserUpdated so every connected client re-fetches this user's
+    # payload and re-paints their username with the new colour. Best-effort.
+    await publish_user_updated(current_user.id)
+
+    return EquippedNameColourResponse(equipped_name_colour=current_user.equipped_name_colour)
 
 
 @router.get(
