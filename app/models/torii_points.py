@@ -51,9 +51,12 @@ POINTS_MEDAL = 10
 
 # ── Top-play scaling (rank + tenure, anti-farm) ──────────────────────────────
 
-# Hard ceiling on top-play points per UTC day. Bounds even a big day of genuine
-# new bests and makes grinding pointless.
-TOP_PLAY_DAILY_POINTS_CAP = 400
+# Soft ceiling on top-play points per UTC day. Below it, top plays pay the full
+# rank+pp reward. Once you cross it, further top plays still pay the pp they added
+# to your account (so a genuine top play is never a flat zero) but drop the
+# rank/base bonus — see award_top_play(). The client is told (ledger ref carries
+# "capped:1") so it can show "you hit today's top-play limit".
+TOP_PLAY_DAILY_POINTS_CAP = 500
 
 # Need a real top-play history before top plays pay out at all (a fresh account
 # on a private server gets free PBs early; this stops farming them).

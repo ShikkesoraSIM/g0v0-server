@@ -206,23 +206,35 @@ async def award_top_play(
     from app.models.torii_points import TOP_PLAY_DAILY_POINTS_CAP, top_play_award
 
     # Hold the user row lock across the cap check + award so concurrent top plays
-    # can't both pass the daily cap and overshoot it.
+    # serialise and read a consistent daily total.
     if await _lock_user(session, user_id) is None:
-        return False
-    if await sum_today_awards(session, user_id, PointReason.TOP_PLAY) >= TOP_PLAY_DAILY_POINTS_CAP:
         return False
 
     base, pp_bonus = top_play_award(rank, existing_top_plays, account_pp_delta)
-    total = base + pp_bonus
+
+    # Soft cap: once past the daily ceiling, keep paying the pp this play added to
+    # your account (a genuine top play is never a flat zero) but drop the rank/base
+    # bonus. Mark it (capped:1) so the client can show "you hit today's limit".
+    capped = await sum_today_awards(session, user_id, PointReason.TOP_PLAY) >= TOP_PLAY_DAILY_POINTS_CAP
+    if capped:
+        base = 0
+        total = pp_bonus
+    else:
+        total = base + pp_bonus
+
     if total <= 0:
         return False
+
+    ref = f"score:{score_id}|rank:{rank}|b:{base}|pp:{pp_bonus}"
+    if capped:
+        ref += "|capped:1"
 
     return await award(
         session,
         user_id,
         total,
         PointReason.TOP_PLAY,
-        ref=f"score:{score_id}|rank:{rank}|b:{base}|pp:{pp_bonus}",
+        ref=ref,
         idempotency_key=f"top_play:{score_id}",
     )
 
