@@ -1747,15 +1747,20 @@ async def _process_statistics(
         new_delta = max(0.0, float(statistics.pp) - pp_before)
         score.account_pp_delta = max(float(score.account_pp_delta or 0.0), new_delta)
 
-        # Torii points: one-time pp milestones. Only look past the lowest threshold
-        # so the gate query doesn't run on every score.
+        # Los milestones se pagan al cruzarlos, no por ya estar arriba.
         try:
             from app.models.torii_points import PP_MILESTONES
 
-            if float(statistics.pp) >= min(PP_MILESTONES):
+            if pp_before < float(statistics.pp) and float(statistics.pp) >= min(PP_MILESTONES):
                 from app.service.points_service import award_pp_milestones
 
-                await award_pp_milestones(session, statistics.user_id, score.gamemode, float(statistics.pp))
+                await award_pp_milestones(
+                    session,
+                    statistics.user_id,
+                    score.gamemode,
+                    pp_before,
+                    float(statistics.pp),
+                )
         except Exception as _ms_err:
             logger.warning("PP milestone award failed for user {}: {}", statistics.user_id, _ms_err)
 

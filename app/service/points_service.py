@@ -319,14 +319,20 @@ async def award_top_play(
     )
 
 
-async def award_pp_milestones(session: AsyncSession, user_id: int, mode, total_pp: float) -> None:
-    """One-time pp milestones. Each threshold pays once ever (idempotency-keyed
-    without mode, so it fires on your first time reaching it in any mode), gated
-    by >=500 best plays in the reaching mode so fresh accounts can't trip them."""
+async def award_pp_milestones(
+    session: AsyncSession,
+    user_id: int,
+    mode,
+    previous_pp: float,
+    total_pp: float,
+) -> None:
+    """One-time pp milestones crossed by this score. Each threshold pays once
+    ever (idempotency-keyed without mode), gated by >=500 best plays in the
+    reaching mode so fresh accounts can't trip them."""
     from app.models.torii_points import PP_MILESTONES, earn_multiplier
 
-    reached = [thr for thr in PP_MILESTONES if total_pp >= thr]
-    if not reached:
+    crossed = [thr for thr in PP_MILESTONES if previous_pp < thr <= total_pp]
+    if not crossed:
         return
 
     from app.database.score import BestScore
@@ -343,7 +349,7 @@ async def award_pp_milestones(session: AsyncSession, user_id: int, mode, total_p
         return
 
     mult = earn_multiplier(mode)
-    for thr in reached:
+    for thr in crossed:
         await award(
             session,
             user_id,
