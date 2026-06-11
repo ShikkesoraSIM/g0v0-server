@@ -42,6 +42,16 @@ AURA_SENTINEL_DEFAULT: str = "default"
 AURA_SENTINEL_NONE: str = "none"
 
 
+# User ids entitled to EVERY aura regardless of group. The server owner /
+# founder flex. This is COSMETIC-ONLY: it does not grant any privilege, it
+# just unlocks every aura in the picker for these accounts. Keep it tiny.
+AURA_OWNER_USER_IDS: frozenset[int] = frozenset({3})  # Shikkesora
+
+
+def _is_aura_owner(user: object) -> bool:
+    return getattr(user, "id", None) in AURA_OWNER_USER_IDS
+
+
 @dataclass(frozen=True)
 class AuraDefinition:
     """A single aura entry in the catalog. Frozen so consumers can hash /
@@ -135,6 +145,105 @@ TORII_AURAS: dict[str, AuraDefinition] = {
         owning_groups=("bug-finder",),
         default_priority=80,
     ),
+    # Founder (early-adopter cohort). The "founder" group is not currently
+    # emitted by build_groups (founder status was id-based in the client and
+    # never wired server-side), so in practice only the owner override grants
+    # this. Kept here so the id is KNOWN/equippable and future founder-group
+    # wiring just works.
+    "founder-torii": AuraDefinition(
+        aura_id="founder-torii",
+        display_name="Founder Torii",
+        description="Vermillion embers with the occasional torii gate, for the earliest Torii players.",
+        owning_groups=("founder",),
+        default_priority=70,
+    ),
+    # Mode Consul auras, one per ruleset advisor. Gated by the per-mode advisor
+    # group keys (advisor-osu / advisor-taiko / advisor-catch / advisor-mania)
+    # which build_groups emits from torii_titles. Adding these also lets an
+    # advisor actually EQUIP their Consul aura (previously not a known id).
+    "osu-consul": AuraDefinition(
+        aura_id="osu-consul",
+        display_name="osu! Consul",
+        description="Advisor aura for osu!.",
+        owning_groups=("advisor-osu",),
+        default_priority=35,
+    ),
+    "taiko-consul": AuraDefinition(
+        aura_id="taiko-consul",
+        display_name="Taiko Consul",
+        description="Advisor aura for osu!taiko.",
+        owning_groups=("advisor-taiko",),
+        default_priority=35,
+    ),
+    "catch-consul": AuraDefinition(
+        aura_id="catch-consul",
+        display_name="Catch Consul",
+        description="Advisor aura for osu!catch.",
+        owning_groups=("advisor-catch",),
+        default_priority=35,
+    ),
+    "mania-consul": AuraDefinition(
+        aura_id="mania-consul",
+        display_name="Mania Consul",
+        description="Advisor aura for osu!mania.",
+        owning_groups=("advisor-mania",),
+        default_priority=35,
+    ),
+    # Recognition / seasonal. Their groups are not wired into build_groups yet,
+    # so today only the owner override reaches them; the ids stay known so the
+    # group wiring can land later without a client change.
+    "feature-architect-2026-06": AuraDefinition(
+        aura_id="feature-architect-2026-06",
+        display_name="Feature Architect",
+        description="For community members whose feature requests shipped (May to June 2026 cohort).",
+        owning_groups=("feature-architect-2026-06",),
+        default_priority=75,
+    ),
+    "summer-2026": AuraDefinition(
+        aura_id="summer-2026",
+        display_name="Summer 2026",
+        description="Seasonal aura from the Summer 2026 event.",
+        owning_groups=("summer-2026",),
+        default_priority=85,
+    ),
+    # Founder design variants. No owning group, so no normal user ever sees
+    # them; registered only so they are KNOWN ids the owner override can equip
+    # while picking the final founder design.
+    "founder-variant-imperial-gold": AuraDefinition(
+        aura_id="founder-variant-imperial-gold",
+        display_name="Founder Variant: Imperial Gold",
+        description="Founder design variant.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "founder-variant-sakura-garden": AuraDefinition(
+        aura_id="founder-variant-sakura-garden",
+        display_name="Founder Variant: Sakura Garden",
+        description="Founder design variant.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "founder-variant-lacquered-box": AuraDefinition(
+        aura_id="founder-variant-lacquered-box",
+        display_name="Founder Variant: Lacquered Box",
+        description="Founder design variant.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "founder-variant-sunrise-pillar": AuraDefinition(
+        aura_id="founder-variant-sunrise-pillar",
+        display_name="Founder Variant: Sunrise Pillar",
+        description="Founder design variant.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "founder-variant-crest-of-honor": AuraDefinition(
+        aura_id="founder-variant-crest-of-honor",
+        display_name="Founder Variant: Crest of Honor",
+        description="Founder design variant.",
+        owning_groups=(),
+        default_priority=200,
+    ),
 }
 
 
@@ -190,6 +299,9 @@ def is_aura_allowed_for_user(user: object, aura_id: str | None) -> bool:
     aura = TORII_AURAS.get(aura_id)
     if aura is None:
         return False
+    # Owner flex: id 3 (Shikkesora) may equip any known aura.
+    if _is_aura_owner(user):
+        return True
     user_keys = user_group_keys(user)
     return any(g in user_keys for g in aura.owning_groups)
 
@@ -198,6 +310,9 @@ def available_auras_for_user(user: object) -> list[AuraDefinition]:
     """All auras the user is entitled to equip, ordered by `default_priority`
     ascending then by catalog insertion order. Returned in the order the
     settings picker should display them."""
+    # Owner flex: id 3 (Shikkesora) is entitled to every aura in the catalog.
+    if _is_aura_owner(user):
+        return sorted(TORII_AURAS.values(), key=lambda a: a.default_priority)
     user_keys = user_group_keys(user)
     eligible = [a for a in TORII_AURAS.values() if any(g in user_keys for g in a.owning_groups)]
     eligible.sort(key=lambda a: a.default_priority)
