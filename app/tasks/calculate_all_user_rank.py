@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from app.database import RankHistory, UserStatistics
 from app.database.rank_history import RankTop
+from app.database.statistics import active_cutoff
 from app.dependencies.database import with_db
 from app.dependencies.scheduler import get_scheduler
 from app.log import logger
@@ -29,6 +30,9 @@ async def calculate_user_rank(is_today: bool = False):
                     UserStatistics.mode == gamemode,
                     UserStatistics.pp > 0,
                     col(UserStatistics.is_ranked).is_(True),
+                    # Active-only ranking: finalize rank_history densely over
+                    # active players only, matching the live get_rank() path.
+                    col(UserStatistics.last_played) >= active_cutoff(),
                 )
                 .order_by(
                     col(UserStatistics.pp).desc(),

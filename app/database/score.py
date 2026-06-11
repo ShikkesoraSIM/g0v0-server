@@ -1686,6 +1686,15 @@ async def _process_statistics(
                 )
 
     playtime, is_valid = calculate_playtime(score, beatmap_length)
+
+    # Active-only ranking: a PASSED score keeps the user ranked + active in this
+    # mode for the next 30 days (independent of pp / playtime validity, matching
+    # the migration backfill's passed=1). This is atomic with the rest of the
+    # stats update committed by process_user, so a player returning from 30d+
+    # inactivity re-enters the dense ranking on this very submit.
+    if score.passed:
+        statistics.last_played = score.ended_at
+
     if is_valid:
         await redis.xadd(f"score:existed_time:{score_token}", {"time": playtime})
         statistics.play_count += 1

@@ -14,6 +14,7 @@ from app.calculator import (
 from app.database import User, UserStatistics
 from app.database.best_scores import BestScore
 from app.database.score import LegacyScoreResp, Score, _RELAX_AP_MODES
+from app.database.statistics import active_cutoff
 from app.log import log
 from app.models.mods import mods_can_get_pp
 from app.models.score import GameMode
@@ -327,6 +328,9 @@ async def get_pp_dev_ranking_snapshot(
                 col(UserStatistics.mode) == ruleset,
                 col(UserStatistics.is_ranked).is_(True),
                 ~User.is_restricted_query(col(UserStatistics.user_id)),
+                # Active-only ranking: 30d+ inactive drop out of the pp_dev
+                # snapshot so the array-index rank renumbers densely.
+                col(UserStatistics.last_played) >= active_cutoff(),
             )
         )
     ).all()

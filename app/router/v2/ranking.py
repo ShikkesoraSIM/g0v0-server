@@ -3,7 +3,7 @@ from typing import Annotated, Any, Literal
 from app.config import settings
 from app.database import Team, TeamMember, User, UserStatistics
 from app.database.user import UserModel
-from app.database.statistics import UserStatisticsModel
+from app.database.statistics import UserStatisticsModel, active_cutoff
 from app.dependencies.database import Database, get_redis
 from app.dependencies.fetcher import get_fetcher
 from app.dependencies.user import get_current_user
@@ -567,6 +567,10 @@ async def get_user_ranking(
         col(UserStatistics.is_ranked),
         col(UserStatistics.user).has(is_active=True),
         ~User.is_restricted_query(col(UserStatistics.user_id)),
+        # Active-only ranking: 30d+ inactive drop off the board entirely (this
+        # filters both total_count and the page slice). Page rank numbers come
+        # from get_rank() which applies the same cutoff, so they agree.
+        col(UserStatistics.last_played) >= active_cutoff(),
     ]
     include = UserStatistics.RANKING_INCLUDES.copy()
     if sort == "performance":

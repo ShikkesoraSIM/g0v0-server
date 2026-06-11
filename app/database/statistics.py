@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 import math
 from typing import TYPE_CHECKING, ClassVar, NotRequired, TypedDict
 from weakref import WeakKeyDictionary
@@ -10,6 +10,7 @@ from ._base import DatabaseModel, included, ondemand
 from .rank_history import RankHistory
 
 from pydantic import field_validator
+from sqlalchemy import DateTime, Index
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlmodel import (
     BigInteger,
@@ -49,6 +50,7 @@ class UserStatisticsDict(TypedDict):
     grade_counts: NotRequired[dict[str, int]]
     rank_change_since_30_days: NotRequired[int]
     country_rank: NotRequired[int | None]
+    is_inactive: NotRequired[bool]
     user: NotRequired["UserDict"]
 
 
@@ -102,6 +104,22 @@ class UserStatisticsModel(DatabaseModel[UserStatisticsDict]):
     async def global_rank(session: AsyncSession, statistics: "UserStatistics") -> int | None:
         return await get_rank(session, statistics)
 
+    @included
+    @staticmethod
+    async def is_inactive(_session: AsyncSession, statistics: "UserStatistics") -> bool:
+        # True only for the 15-30d "greyed" window: still ranked, but clients
+        # dim the row. 30d+ are already unranked (global_rank None) and dropped
+        # from the board, so they never reach a client to grey. Reads the cached
+        # last_played column only (no scores query).
+        from datetime import timezone
+
+        last = statistics.last_played
+        if last is None:
+            return False
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return active_cutoff() <= last < grey_cutoff()
+
     # Minimum virtual population for global_rank_percent so that
     # rank-tier colours spread out on small servers instead of
     # everyone landing in the same tier.
@@ -123,6 +141,9 @@ class UserStatisticsModel(DatabaseModel[UserStatisticsDict]):
                     col(UserStatistics.is_ranked).is_(True),
                     col(UserStatistics.user).has(is_active=True),
                     ~User.is_restricted_query(col(UserStatistics.user_id)),
+                    # Same active-only population as get_rank, so the percentile
+                    # denominator matches the rank numerator.
+                    col(UserStatistics.last_played) >= active_cutoff(),
                 )
             )
         ).one()
@@ -196,6 +217,19 @@ class UserStatistics(AsyncAttrs, UserStatisticsModel, table=True):
 
     level_current: float = Field(default=1)
 
+    # Cached MAX(scores.ended_at) of a passed play in this mode. Drives the
+    # active-only leaderboard: within 30d = ranked, 15-30d = greyed, 30d+ =
+    # unranked. Stamped on score submit; backfilled by the add-last-played
+    # migration. NULL = never passed a score in this mode (treated as unranked).
+    last_played: datetime | None = Field(
+        default=None,
+        sa_column=Column("last_played", DateTime(timezone=True), nullable=True),
+    )
+
+    # Serves the active-filter predicate (mode == X AND last_played >= cutoff)
+    # as an index range, so get_rank() never has to touch the scores table.
+    __table_args__ = (Index("idx_user_stats_mode_lastplayed", "mode", "last_played"),)
+
     user: "User" = Relationship(back_populates="statistics")
 
 
@@ -205,6 +239,25 @@ class UserStatistics(AsyncAttrs, UserStatisticsModel, table=True):
 # Keyed weakly by the request's AsyncSession (so it clears when the session is
 # dropped), then by (user_id, mode, country).
 _rank_memo: "WeakKeyDictionary[AsyncSession, dict]" = WeakKeyDictionary()
+
+
+# Active-only ranking windows (osu-style, shorter threshold). A player whose
+# last passed play in a mode is older than ACTIVE_DAYS is dropped from that
+# mode's ranking entirely (dense renumber, those below move up) until they play
+# again; 15-30d is still ranked but flagged inactive so clients grey the row.
+# These are the single source of truth for the thresholds.
+ACTIVE_DAYS = 30
+GREY_DAYS = 15
+
+
+def active_cutoff() -> datetime:
+    """last_played on/after this is still ranked; older drops out."""
+    return utcnow() - timedelta(days=ACTIVE_DAYS)
+
+
+def grey_cutoff() -> datetime:
+    """last_played before this (but still active) is greyed."""
+    return utcnow() - timedelta(days=GREY_DAYS)
 
 
 async def get_rank(session: AsyncSession, statistics: UserStatistics, country: str | None = None) -> int | None:
@@ -230,6 +283,12 @@ async def get_rank(session: AsyncSession, statistics: UserStatistics, country: s
         col(UserStatistics.is_ranked).is_(True),
         col(UserStatistics.user).has(is_active=True),
         ~User.is_restricted_query(col(UserStatistics.user_id)),
+        # Active-only ranking: drop players with no play in this mode within
+        # ACTIVE_DAYS. row_number() above then renumbers densely over the
+        # remaining set, so a 30d+ inactive returns None here (unranked) and
+        # everyone below them moves up. They re-enter when their next play
+        # stamps last_played. NULL last_played (never played) is also excluded.
+        col(UserStatistics.last_played) >= active_cutoff(),
     )
 
     if country is not None:

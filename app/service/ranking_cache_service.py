@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from app.config import settings
 from app.const import NEW_SCORE_FORMAT_VER
-from app.database.statistics import UserStatistics, UserStatisticsModel
+from app.database.statistics import UserStatistics, UserStatisticsModel, active_cutoff
 from app.helpers.asset_proxy_helper import replace_asset_urls
 from app.log import logger
 from app.models.score import GameMode
@@ -402,6 +402,9 @@ class RankingCacheService:
 		col(UserStatistics.user).has(is_active=True),
 		~col(UserStatistics.user_id).in_(restricted_users_subq),
                 col(UserStatistics.is_ranked).is_(True),
+                # Active-only ranking: keep the cached pages in sync with the
+                # live get_rank() population (30d+ inactive excluded).
+                col(UserStatistics.last_played) >= active_cutoff(),
             ]
             include = UserStatistics.RANKING_INCLUDES.copy()
 
