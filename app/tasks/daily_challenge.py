@@ -149,9 +149,9 @@ async def process_daily_challenge_top():
                 if stats is None:  # not execute
                     continue
                 if stats.last_update is None or stats.last_update.replace(tzinfo=UTC).date() != now.date():
-                    if total_score_count < 10 or ceil(i + 1 / total_score_count) <= 0.1:
+                    if total_score_count < 10 or (i + 1) / total_score_count <= 0.1:
                         stats.top_10p_placements += 1
-                    if total_score_count < 2 or ceil(i + 1 / total_score_count) <= 0.5:
+                    if total_score_count < 2 or (i + 1) / total_score_count <= 0.5:
                         stats.top_50p_placements += 1
                 s.append(s)
                 participated_users.append(score.user_id)
