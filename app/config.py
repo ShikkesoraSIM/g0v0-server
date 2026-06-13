@@ -516,6 +516,18 @@ CALCULATOR_CONFIG='{}'
         ),
         "æ¸¸æˆè®¾ç½®",
     ]
+    server_authoritative_total_score: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Recompute total_score = round(total_score_without_mods * server mod multiplier) "
+                "at submission instead of trusting the client. Makes the mod-multiplier rebalance "
+                "apply uniformly across client versions and flags inflated/tampered totals."
+            ),
+        ),
+        "游戏设置",
+    ]
     enable_supporter_for_all_users: Annotated[
         bool,
         Field(default=False, description="å¯ç”¨æ‰€æœ‰æ–°æ³¨å†Œç”¨æˆ·çš„æ”¯æŒè€…çŠ¶æ€"),

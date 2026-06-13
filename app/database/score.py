@@ -6,6 +6,7 @@ import sys
 from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 import asyncio
 from app.database.beatmap import calculate_beatmap_attributes
+from app.calculators.score_multiplier import recompute_total_score
 from app.dependencies.database import engine as db_engine
 
 from app.calculator import (
@@ -1172,13 +1173,35 @@ async def process_score(
     is_multiplayer = score_token.room_id is not None or score_token.playlist_item_id is not None
     preserve = True if is_multiplayer else bool(info.passed)
 
+    # Server-authoritative total score (mod-multiplier rebalance). Recompute from the
+    # raw, mod-free score so the new multipliers apply uniformly regardless of client
+    # version, and a tampered/stale-client total can't inflate the leaderboard. Gated by
+    # config so it can be switched on once the recalc has validated the multiplier values.
+    total_score_value = info.total_score
+    if settings.server_authoritative_total_score and info.total_score_without_mods is not None:
+        bm = score_token.beatmap
+        base_cs = float(getattr(bm, "cs", None) or 5.0)
+        base_od = float(getattr(bm, "accuracy", None) or 5.0)
+        total_score_value = recompute_total_score(
+            info.ruleset_id, info.mods, info.total_score_without_mods, base_cs, base_od
+        )
+        if info.total_score and abs(total_score_value - info.total_score) > max(1000, 0.02 * total_score_value):
+            logger.warning(
+                "total_score mismatch user={user_id} beatmap={beatmap_id}: client={client} server={server} mods={mods}",
+                user_id=user.id,
+                beatmap_id=beatmap_id,
+                client=info.total_score,
+                server=total_score_value,
+                mods=info.mods,
+            )
+
     score = Score(
         accuracy=info.accuracy,
         max_combo=info.max_combo,
         mods=info.mods,
         passed=info.passed,
         rank=info.rank,
-        total_score=info.total_score,
+        total_score=total_score_value,
         total_score_without_mods=info.total_score_without_mods,
         beatmap_id=beatmap_id,
         client_version=score_token.client_version,
