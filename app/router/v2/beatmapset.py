@@ -497,6 +497,36 @@ async def _race_mirror_pair(
     return winner, winner_label
 
 
+_bg_register_tasks: set[asyncio.Task] = set()
+
+
+def ensure_beatmaps_registered_in_background(beatmapset_id: int, fetcher: Fetcher) -> None:
+    """Fire-and-forget: make sure a downloaded set's beatmaps land in our DB.
+
+    Runs concurrently with the (much slower) .osz download so the client's follow-up
+    online-metadata / leaderboard lookup is a fast DB hit returning the correct status,
+    instead of a slow on-demand mirror fetch that resolves too late and leaves the
+    leaderboard reading "not available" until the user switches maps and back. This is
+    server side on purpose: it also fixes the official lazer client + injector, which we
+    cannot patch client-side.
+    """
+
+    async def _run():
+        try:
+            async with with_db() as db:
+                if await db.get(Beatmapset, beatmapset_id) is not None:
+                    return  # already registered, and its beatmaps come with it
+                await Beatmapset.get_or_fetch(db, fetcher, beatmapset_id)
+                await db.commit()
+                logger.info(f"[beatmap dl] pre-registered set {beatmapset_id} for metadata/leaderboard lookup")
+        except Exception as e:
+            logger.warning(f"[beatmap dl] background beatmap registration for {beatmapset_id} failed: {e}")
+
+    task = asyncio.create_task(_run())
+    _bg_register_tasks.add(task)
+    task.add_done_callback(_bg_register_tasks.discard)
+
+
 @router.get("/beatmapsets/{beatmapset_id}/download", tags=["谱面集"])
 async def download_beatmapset(
     storage: StorageService,
@@ -504,9 +534,17 @@ async def download_beatmapset(
     client_ip: IPAddress,
     beatmapset_id: Annotated[int, Path(..., description="谱面集 ID")],
     download_service: DownloadService,
+    fetcher: Fetcher,
     no_video: Annotated[bool, Query(alias="noVideo")] = True,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
+    # Register this set's beatmaps in the background now, so that by the time the client
+    # finishes downloading + importing it and asks for online metadata / the leaderboard,
+    # the beatmaps are already in our DB (fast, correct status) rather than triggering a
+    # slow mirror fetch that lands too late (the "not available until you switch maps and
+    # back" bug). Helps the official client + injector too.
+    ensure_beatmaps_registered_in_background(beatmapset_id, fetcher)
+
     # ── Layer 0: locally-hosted maps (admin-uploaded) — direct redirect.
     async with with_db() as db:
         local_beatmapset = await db.get(Beatmapset, beatmapset_id)
