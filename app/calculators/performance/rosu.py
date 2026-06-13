@@ -3,6 +3,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, ClassVar
 
 from app.calculator import clamp
+from app.calculators.low_stat_pp import low_cs_od_pp_factor
 from app.models.mods import APIMod
 from app.models.performance import (
     DifficultyAttributes,
@@ -173,7 +174,15 @@ class RosuPerformanceCalculator(BasePerformanceCalculator):
                 misses=score.nmiss,
             )
             attr = await get_event_loop().run_in_executor(None, perf.calculate, map)
-            return self._perf_attr_to_model(attr, score.gamemode.to_base_ruleset())
+            model = self._perf_attr_to_model(attr, score.gamemode.to_base_ruleset())
+
+            # Torii: nerf degenerate low CS/OD osu! standard plays (e.g. relax CS0/OD0 farming).
+            # Uses the unmodded beatmap CS/OD; Easy plays and non-osu rulesets are untouched.
+            factor = low_cs_od_pp_factor(int(score.gamemode.to_base_ruleset()), mods, map.cs, map.od)
+            if factor != 1.0:
+                model.pp *= factor
+
+            return model
         except rosu.ParseError as e:  # pyright: ignore[reportAttributeAccessIssue]
             raise PerformanceError(f"Beatmap parse error: {e}")
         except Exception as e:
