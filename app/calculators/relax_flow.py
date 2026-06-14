@@ -20,6 +20,7 @@ beatmap. Easy plays and non-relax scores never reach here.
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 
@@ -270,3 +271,71 @@ def jump_sections(beatmap_raw: str) -> list[JumpSection]:
 
     flush()
     return sections
+
+
+# --- Capa B: replay confirmation (did THIS player actually wash it?) -----------
+
+HIT_WINDOW_MS = 100.0   # search this far around each object time for closest cursor approach
+OFFSET_LO = 0.35        # closest approach (in radii) below this = aimed (centre)
+OFFSET_HI = 0.85        # above this = washed (rim graze / outside)
+SPEED_LO = 0.30         # px/ms at closest approach below this = dwell (aimed)
+SPEED_HI = 1.20         # above this = fast pass-through (washed)
+
+
+def wash_confidence(
+    sections: list[JumpSection],
+    frames: list[tuple[float, float, float]],
+    effective_cs: float,
+    touch_device: bool = False,
+) -> float:
+    """How much the player actually washed the washable jump sections, in [0, 1].
+
+    For each object in a section we find the cursor's closest approach within the
+    hit window and how fast it was moving there. Washing grazes the rim at speed
+    (high); aiming lands near centre and slows (low). Aggregated per section and
+    weighted by section importance. Returns 0 when there is nothing washable or no
+    replay, so honest aimers and missing replays are never nerfed.
+    """
+    if not sections or len(frames) < 2:
+        return 0.0
+
+    cr = max(54.4 - 4.48 * effective_cs, 4.0)
+    ts = [f[0] for f in frames]
+
+    total_w = 0.0
+    total_c = 0.0
+    for sec in sections:
+        signals: list[float] = []
+        for (ot, ox, oy) in sec.objects:
+            lo = bisect.bisect_left(ts, ot - HIT_WINDOW_MS)
+            hi = bisect.bisect_right(ts, ot + HIT_WINDOW_MS)
+            best_d = None
+            best_k = None
+            for k in range(max(0, lo - 1), min(len(frames), hi + 1)):
+                d = math.hypot(frames[k][1] - ox, frames[k][2] - oy)
+                if best_d is None or d < best_d:
+                    best_d = d
+                    best_k = k
+            if best_d is None or best_k is None:
+                continue
+
+            min_offset = best_d / cr
+            vel = 0.0
+            if 0 < best_k < len(frames):
+                dt = max(frames[best_k][0] - frames[best_k - 1][0], 1.0)
+                dd = math.hypot(
+                    frames[best_k][1] - frames[best_k - 1][1],
+                    frames[best_k][2] - frames[best_k - 1][2],
+                )
+                vel = dd / dt
+
+            offset_sig = _smoothstep(OFFSET_LO, OFFSET_HI, min_offset)
+            # Touch replays have unreliable frame velocity, so lean on offset only.
+            speed_sig = 1.0 if touch_device else _smoothstep(SPEED_LO, SPEED_HI, vel)
+            signals.append(offset_sig * (0.7 + 0.3 * speed_sig))
+
+        if signals:
+            total_w += sec.weight
+            total_c += sec.weight * (sum(signals) / len(signals))
+
+    return (total_c / total_w) if total_w > 0 else 0.0
