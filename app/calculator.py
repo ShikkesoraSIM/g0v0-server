@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from app.calculators.performance import PerformanceCalculator
 from app.calculators.performance.sunny_mania import calculate_sunny_mania_pp
+from app.calculators.low_stat_pp import low_cs_od_pp_factor
 from app.config import settings
 from app.const import MAX_SCORE
 from app.dependencies.storage import get_storage_service
@@ -130,6 +131,34 @@ def calculate_pp_for_no_calculator(score: "Score", star_rating: float) -> float:
         return pmax * (b + (1 - b) * exp_part)
 
 
+def _beatmap_cs_od_from_raw(raw: str) -> tuple[float, float]:
+    """Read base CircleSize / OverallDifficulty straight from the .osu text.
+
+    Parsing the raw map avoids the DB beatmap's lazy OnDemand fields and is always
+    available wherever pp is computed. Defaults to 5/5 if a value is missing.
+    """
+    cs = od = 5.0
+    in_diff = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            in_diff = line == "[Difficulty]"
+            continue
+        if not in_diff:
+            continue
+        if line.startswith("CircleSize:"):
+            try:
+                cs = float(line.split(":", 1)[1])
+            except ValueError:
+                pass
+        elif line.startswith("OverallDifficulty:"):
+            try:
+                od = float(line.split(":", 1)[1])
+            except ValueError:
+                pass
+    return cs, od
+
+
 async def calculate_pp(
     score: "Score",
     beatmap: str,
@@ -191,6 +220,17 @@ async def calculate_pp(
     else:
         attrs = await calculator.calculate_performance(beatmap, score)
         pp = attrs.pp
+
+    # Torii: low CS/OD pp nerf, applied here (calculator-agnostic) so it works no
+    # matter which calculator produced the pp (rosu or the performance server).
+    # osu! ruleset family only; relax widens the band; Easy + non-osu return 1.0.
+    if base_mode == GameMode.OSU and pp > 0:
+        cs, od = _beatmap_cs_od_from_raw(beatmap)
+        factor = low_cs_od_pp_factor(
+            0, score.mods, cs, od, is_relax=score.gamemode == GameMode.OSURX
+        )
+        if factor != 1.0:
+            pp *= factor
 
     if settings.suspicious_score_check and not is_local_beatmap and (pp > 3000):
         logger.warning(
