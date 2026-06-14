@@ -21,17 +21,28 @@ if TYPE_CHECKING:
     from app.models.mods import APIMod
 
 # Knobs. Penalty starts ramping below these and bottoms out at the per-stat floor.
+# Standard osu! only cares about the genuinely degenerate CS0/OD0 farm.
 CS_THRESHOLD = 2.5
 OD_THRESHOLD = 4.0
-STAT_FLOOR = 0.524  # per-stat min; CS0*OD0 ~= STAT_FLOOR**2 ~= 0.275
+
+# Relax extends the ramp upward. With no tapping skill, lower CS (bigger targets,
+# trivial to "washing machine" with a circular sweep) and lower OD (wider hit
+# windows) are far easier to abuse, so a CS2.7/OD4.1 map sits comfortably above
+# the standard thresholds yet still farms hard. Relax therefore penalises a wider
+# band. Same floor as standard so the extreme CS0/OD0 case is unchanged.
+CS_THRESHOLD_RX = 4.0
+OD_THRESHOLD_RX = 6.0
+
+STAT_FLOOR = 0.524     # standard per-stat min; CS0*OD0 ~= STAT_FLOOR**2 ~= 0.275
+STAT_FLOOR_RX = 0.45   # relax bottoms out harder; CS0*OD0 ~= 0.45**2 ~= 0.20
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def _stat_factor(value: float, threshold: float) -> float:
-    return STAT_FLOOR + (1.0 - STAT_FLOOR) * _clamp(value / threshold, 0.0, 1.0)
+def _stat_factor(value: float, threshold: float, floor: float = STAT_FLOOR) -> float:
+    return floor + (1.0 - floor) * _clamp(value / threshold, 0.0, 1.0)
 
 
 def _effective_cs_od(mods: "list[APIMod]", base_cs: float, base_od: float) -> tuple[float, float]:
@@ -64,11 +75,13 @@ def low_cs_od_pp_factor(
     mods: "list[APIMod]",
     base_cs: float,
     base_od: float,
+    is_relax: bool = False,
 ) -> float:
     """PP multiplier in [~0.275, 1.0] for low effective CS/OD; 1.0 when not applicable.
 
     ``base_ruleset_id`` is the base ruleset (0 for osu! / osu!relax / osu!autopilot).
     ``base_cs`` / ``base_od`` are the unmodded beatmap circle size / overall difficulty.
+    ``is_relax`` widens the penalty band (see CS_THRESHOLD_RX / OD_THRESHOLD_RX).
     """
     if base_ruleset_id != 0:
         return 1.0
@@ -76,4 +89,7 @@ def low_cs_od_pp_factor(
         return 1.0
 
     cs, od = _effective_cs_od(mods, base_cs, base_od)
-    return _stat_factor(cs, CS_THRESHOLD) * _stat_factor(od, OD_THRESHOLD)
+    cs_threshold = CS_THRESHOLD_RX if is_relax else CS_THRESHOLD
+    od_threshold = OD_THRESHOLD_RX if is_relax else OD_THRESHOLD
+    floor = STAT_FLOOR_RX if is_relax else STAT_FLOOR
+    return _stat_factor(cs, cs_threshold, floor) * _stat_factor(od, od_threshold, floor)

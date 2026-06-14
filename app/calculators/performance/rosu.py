@@ -178,9 +178,16 @@ class RosuPerformanceCalculator(BasePerformanceCalculator):
 
             # Torii: nerf degenerate low CS/OD osu! standard plays (e.g. relax CS0/OD0 farming).
             # Uses the unmodded beatmap CS/OD; Easy plays and non-osu rulesets are untouched.
-            factor = low_cs_od_pp_factor(int(score.gamemode.to_base_ruleset()), mods, map.cs, map.od)
+            # Relax widens the penalty band (no tapping -> low CS/OD is far easier to abuse).
+            is_relax = score.gamemode == GameMode.OSURX
+            factor = low_cs_od_pp_factor(int(score.gamemode.to_base_ruleset()), mods, map.cs, map.od, is_relax)
             if factor != 1.0:
                 model.pp *= factor
+
+            # NOTE: the relax "washing machine" flow nerf is gated behind replay
+            # confirmation (per-score wash_confidence), wired in separately. Pure
+            # geometry alone is not applied here because it would penalise honest
+            # flow-aimers on washable maps.
 
             return model
         except rosu.ParseError as e:  # pyright: ignore[reportAttributeAccessIssue]
