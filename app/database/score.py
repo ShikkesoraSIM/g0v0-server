@@ -262,6 +262,10 @@ class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
             stats[HitResult.SMALL_TICK_HIT] = score.nsmall_tick_hit
         if score.nlarge_tick_hit is not None:
             stats[HitResult.LARGE_TICK_HIT] = score.nlarge_tick_hit
+        if score.nlarge_bonus is not None:
+            stats[HitResult.LARGE_BONUS] = score.nlarge_bonus
+        if score.nsmall_bonus is not None:
+            stats[HitResult.SMALL_BONUS] = score.nsmall_bonus
         return stats
 
     @ondemand
@@ -519,6 +523,8 @@ class Score(ScoreModel, table=True):
     nlarge_tick_hit: int | None = Field(default=None, exclude=True)
     nslider_tail_hit: int | None = Field(default=None, exclude=True)
     nsmall_tick_hit: int | None = Field(default=None, exclude=True)
+    nlarge_bonus: int | None = Field(default=None, exclude=True)  # spinner bonus
+    nsmall_bonus: int | None = Field(default=None, exclude=True)  # spinner spin
     gamemode: GameMode = Field(index=True)
     pinned_order: int = Field(default=0, exclude=True)
     map_md5: str | None = Field(default=None, max_length=32, index=True, exclude=True)
@@ -1223,6 +1229,8 @@ async def process_score(
         nsmall_tick_hit=info.statistics.get(HitResult.SMALL_TICK_HIT, 0),
         nlarge_tick_hit=info.statistics.get(HitResult.LARGE_TICK_HIT, 0),
         nslider_tail_hit=info.statistics.get(HitResult.SLIDER_TAIL_HIT, 0),
+        nlarge_bonus=info.statistics.get(HitResult.LARGE_BONUS, 0),
+        nsmall_bonus=info.statistics.get(HitResult.SMALL_BONUS, 0),
         playlist_item_id=score_token.playlist_item_id,
         room_id=score_token.room_id,
         maximum_statistics=info.maximum_statistics,
