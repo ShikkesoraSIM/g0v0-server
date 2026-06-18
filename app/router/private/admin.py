@@ -3674,7 +3674,10 @@ async def approve_username_change_request(
 
     old_username = user.username
     previous = list(await user.awaitable_attrs.previous_usernames)
-    previous.append(old_username)
+    # Dedup: don't pile up the same old name twice (this is what produced the
+    # duplicated "Torii User 297" entries some profiles accumulated).
+    if old_username not in previous:
+        previous.append(old_username)
     user.username = new_name
     user.previous_usernames = previous
 
@@ -3761,6 +3764,117 @@ async def reject_username_change_request(
         logger.debug(f"Failed to notify user {request.user_id} about rejected rename: {e}")
 
     return _ucr_to_admin_resp(request, user.username if user else None, user.avatar_url if user else None)
+
+
+# ========== Previous Usernames (admin edit) ==========
+
+
+class PreviousUsernamesResp(BaseModel):
+    user_id: int
+    username: str
+    avatar_url: str | None
+    previous_usernames: list[str]
+
+
+class RemovePreviousUsernamesReq(BaseModel):
+    names: list[str]
+
+
+@router.get(
+    "/admin/users/{user_id}/previous-usernames",
+    name="获取用户曾用名",
+    tags=["管理", "g0v0 API"],
+    response_model=PreviousUsernamesResp,
+)
+async def get_previous_usernames(
+    session: Database,
+    user_id: int,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+):
+    """List a user's stored previous usernames (the profile 'formerly known as'). Admin only."""
+    await require_admin(session, user_and_token)
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    names = list(await user.awaitable_attrs.previous_usernames)
+    return PreviousUsernamesResp(
+        user_id=user.id,
+        username=user.username,
+        avatar_url=user.avatar_url,
+        previous_usernames=names,
+    )
+
+
+@router.post(
+    "/admin/users/{user_id}/previous-usernames/remove",
+    name="移除用户曾用名",
+    tags=["管理", "g0v0 API"],
+    response_model=PreviousUsernamesResp,
+)
+async def remove_previous_usernames(
+    session: Database,
+    user_id: int,
+    req: RemovePreviousUsernamesReq,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    cache_service: UserCacheService,
+):
+    """Remove one or more specific names from a user's previous-usernames list. Admin only.
+
+    Missing names are ignored, so the call is idempotent. Removing a name that
+    appears more than once (e.g. a duplicated default name) drops every copy.
+    """
+    await require_admin(session, user_and_token)
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Read the loaded columns before commit; expire_on_commit would expire them.
+    username = user.username
+    avatar_url = user.avatar_url
+    to_remove = set(req.names)
+    updated = [n for n in list(await user.awaitable_attrs.previous_usernames) if n not in to_remove]
+    user.previous_usernames = updated
+    session.add(user)
+    # previous_usernames is part of the cached profile payload, so the edit
+    # won't show until the user's profile cache is dropped.
+    await cache_service.invalidate_user_cache(user_id)
+    await session.commit()
+    return PreviousUsernamesResp(
+        user_id=user_id,
+        username=username,
+        avatar_url=avatar_url,
+        previous_usernames=updated,
+    )
+
+
+@router.delete(
+    "/admin/users/{user_id}/previous-usernames",
+    name="清空用户曾用名",
+    tags=["管理", "g0v0 API"],
+    response_model=PreviousUsernamesResp,
+)
+async def clear_previous_usernames(
+    session: Database,
+    user_id: int,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    cache_service: UserCacheService,
+):
+    """Clear ALL of a user's previous usernames (wipes the 'formerly known as'). Admin only."""
+    await require_admin(session, user_and_token)
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    username = user.username
+    avatar_url = user.avatar_url
+    user.previous_usernames = []
+    session.add(user)
+    await cache_service.invalidate_user_cache(user_id)
+    await session.commit()
+    return PreviousUsernamesResp(
+        user_id=user_id,
+        username=username,
+        avatar_url=avatar_url,
+        previous_usernames=[],
+    )
 
 
 # ========== NSFW Profile Media Review ==========
