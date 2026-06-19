@@ -58,10 +58,6 @@ def validate_username(username: str) -> list[str]:
     elif "  " in username:
         errors.append("Username cannot contain consecutive spaces")
 
-    # 检查是否以数字开头
-    if username[0].isdigit():
-        errors.append("Username cannot start with a number")
-
     if username.lower() in settings.banned_name:
         errors.append("This username is not allowed")
 
