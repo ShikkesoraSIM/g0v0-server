@@ -582,10 +582,12 @@ async def _compute_mixed_recent_plays(
         # substitute the default avatar URL when avatar_nsfw is true. The
         # username stays visible — it's not the photo, the photo is what
         # the uploader chose to flag.
-        if user is not None and getattr(user, "avatar_nsfw", False):
-            avatar_url_resolved = UserModel.DEFAULT_AVATAR_URL
+        raw_avatar = getattr(user, "avatar_url", "") if user is not None else ""
+        if (user is not None and getattr(user, "avatar_nsfw", False)) or not raw_avatar or raw_avatar == UserModel.DEFAULT_AVATAR_URL:
+            # NSFW mask, or no uploaded avatar -> Torii default set (by id).
+            avatar_url_resolved = UserModel.torii_default_avatar_url(int(user_id))
         else:
-            avatar_url_resolved = getattr(user, "avatar_url", "") if user is not None else ""
+            avatar_url_resolved = raw_avatar
 
         # Common skeleton; status-specific fields filled below.
         entry: dict[str, Any] = {

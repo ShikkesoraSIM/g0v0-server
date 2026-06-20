@@ -119,7 +119,11 @@ class ChannelMessageBase(NotificationDetail):
         channel_type: "ChannelType",
     ) -> Self:
         try:
-            avatar_url = user.avatar_url or "https://lazer-data.g0v0.top/default.jpg"
+            from app.database.user import UserModel  # late import: avoids the user<->notification cycle
+
+            avatar_url = user.avatar_url
+            if not avatar_url or avatar_url == UserModel.DEFAULT_AVATAR_URL:
+                avatar_url = UserModel.torii_default_avatar_url(user.id)
         except Exception:
             avatar_url = "https://lazer-data.g0v0.top/default.jpg"
         instance = cls(

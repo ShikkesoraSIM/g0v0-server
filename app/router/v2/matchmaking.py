@@ -124,9 +124,9 @@ async def _hydrate_users_minimal(session: Database, user_ids: set[int]) -> dict[
             "id": uid,
             "username": uname or "",
             "avatar_url": (
-                UserModel.DEFAULT_AVATAR_URL
-                if avatar_nsfw
-                else (avatar_url or UserModel.DEFAULT_AVATAR_URL)
+                avatar_url
+                if avatar_url and not avatar_nsfw and avatar_url != UserModel.DEFAULT_AVATAR_URL
+                else UserModel.torii_default_avatar_url(uid)
             ),
         }
         for uid, uname, avatar_url, avatar_nsfw in rows
