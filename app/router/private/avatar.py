@@ -2,6 +2,7 @@ import hashlib
 from typing import Annotated
 
 from app.database.profile_media_review import MEDIA_AVATAR
+from app.database.user import User
 from app.dependencies.cache import UserCacheService
 from app.dependencies.database import Database
 from app.dependencies.storage import StorageService
@@ -88,3 +89,32 @@ async def upload_avatar(
         "is_nsfw": is_nsfw,
         "filehash": filehash,
     }
+
+
+@router.delete("/avatar", name="删除头像", tags=["用户", "g0v0 API"], status_code=204)
+async def delete_avatar(
+    session: Database,
+    current_user: ClientUser,
+    storage: StorageService,
+    cache_service: UserCacheService,
+):
+    """Delete the user's uploaded avatar and fall back to the default.
+
+    Operates on the stored column value (never the emit-time default-N.png URL),
+    so it only ever deletes a real custom upload, never a shared default image.
+    """
+    if await current_user.is_restricted(session):
+        raise HTTPException(status_code=403, detail="Your account is restricted and cannot perform this action.")
+
+    url = current_user.avatar_url
+    if url:
+        path = storage.get_file_name_by_url(url)
+        if path:
+            await storage.delete_file(path)
+
+    # Back to the "no custom avatar" sentinel; the transform resolver then hands
+    # out a default (the AI set, or the plain logo if the user opted out).
+    current_user.avatar_url = User.DEFAULT_AVATAR_URL
+    current_user.avatar_nsfw = False
+    await cache_service.invalidate_user_cache(current_user.id)
+    await session.commit()
