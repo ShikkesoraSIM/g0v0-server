@@ -197,6 +197,12 @@ class UserModel(DatabaseModel[UserDict]):
         return f"{settings.server_url}file/avatars/default-{n}.png"
 
     @classmethod
+    def torii_logo_avatar_url(cls) -> str:
+        # Opt-out default: the plain Torii logo, for users who turned the
+        # AI-made default-avatar set off in their settings.
+        return f"{settings.server_url}file/avatars/default-halo.png"
+
+    @classmethod
     def _masked_cover(cls, current_cover: dict | None = None) -> UserProfileCover:
         masked: UserProfileCover = UserProfileCover(url=cls.DEFAULT_COVER_URL)
         if isinstance(current_cover, dict):
@@ -249,9 +255,16 @@ class UserModel(DatabaseModel[UserDict]):
         if "support_level" in user_resp:
             user_resp["support_level"] = 1 if live_supporter else 0
 
-        # No uploaded avatar -> show one of the Torii default set (varied by id).
+        # No uploaded avatar -> show a Torii default. Users who opted out of the
+        # AI-made set in their settings get the plain Torii logo; everyone else
+        # gets a stable pick from the set (varied by id).
         if not user_resp.get("avatar_url") or user_resp["avatar_url"] == cls.DEFAULT_AVATAR_URL:
-            user_resp["avatar_url"] = cls.torii_default_avatar_url(db_instance.id)
+            await db_instance.awaitable_attrs.user_preference
+            pref = db_instance.user_preference
+            if pref and (pref.extra or {}).get("default_avatar_use_logo"):
+                user_resp["avatar_url"] = cls.torii_logo_avatar_url()
+            else:
+                user_resp["avatar_url"] = cls.torii_default_avatar_url(db_instance.id)
 
         if show_nsfw_media:
             return user_resp
