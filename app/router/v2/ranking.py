@@ -122,7 +122,10 @@ async def _apply_nsfw_policy_to_rankings(
                 user["cover"] = UserModel._masked_cover(user.get("cover"))
                 user["cover_nsfw"] = True
 
-        row["user"] = user if show_nsfw_media else UserModel.apply_nsfw_media_policy(user, show_nsfw_media)
+        # Always route through the policy so the Torii default-avatar swap runs
+        # for every viewer (apply_nsfw_media_policy no-ops the masking when
+        # show_nsfw_media is true).
+        row["user"] = UserModel.apply_nsfw_media_policy(user, show_nsfw_media)
 
     return ranking_rows
 

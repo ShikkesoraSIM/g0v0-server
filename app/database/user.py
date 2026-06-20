@@ -184,6 +184,18 @@ class UserModel(DatabaseModel[UserDict]):
     DEFAULT_AVATAR_URL: ClassVar[str] = "https://lazer-data.g0v0.top/default.jpg"
     DEFAULT_COVER_URL: ClassVar[str] = "https://assets.ppy.sh/user-profile-covers/default.jpeg"
 
+    # Torii ships its own default avatar set (storage/avatars/default-1..N.png).
+    # A user without an uploaded avatar gets a stable pick from the set: varied
+    # across users, but the same one each time for a given user. The stored
+    # avatar_url stays DEFAULT_AVATAR_URL as the "no custom avatar" sentinel; we
+    # only swap what the client is shown.
+    DEFAULT_AVATAR_COUNT: ClassVar[int] = 20
+
+    @classmethod
+    def torii_default_avatar_url(cls, user_id: int) -> str:
+        n = (int(user_id) % cls.DEFAULT_AVATAR_COUNT) + 1
+        return f"{settings.server_url}file/avatars/default-{n}.png"
+
     @classmethod
     def _masked_cover(cls, current_cover: dict | None = None) -> UserProfileCover:
         masked: UserProfileCover = UserProfileCover(url=cls.DEFAULT_COVER_URL)
@@ -237,10 +249,14 @@ class UserModel(DatabaseModel[UserDict]):
         if "support_level" in user_resp:
             user_resp["support_level"] = 1 if live_supporter else 0
 
+        # No uploaded avatar -> show one of the Torii default set (varied by id).
+        if not user_resp.get("avatar_url") or user_resp["avatar_url"] == cls.DEFAULT_AVATAR_URL:
+            user_resp["avatar_url"] = cls.torii_default_avatar_url(db_instance.id)
+
         if show_nsfw_media:
             return user_resp
         if db_instance.avatar_nsfw:
-            user_resp["avatar_url"] = cls.DEFAULT_AVATAR_URL
+            user_resp["avatar_url"] = cls.torii_default_avatar_url(db_instance.id)
         if db_instance.cover_nsfw:
             user_resp["cover_url"] = cls.DEFAULT_COVER_URL
             user_resp["cover"] = cls._masked_cover(user_resp.get("cover"))
@@ -751,10 +767,15 @@ class UserModel(DatabaseModel[UserDict]):
 
     @classmethod
     def apply_nsfw_media_policy(cls, user_resp: "UserDict", show_nsfw_media: bool) -> "UserDict":
+        # Default avatar -> Torii default set. Runs for every viewer and covers
+        # cached/canonical payloads that still hold the g0v0 default sentinel.
+        uid = user_resp.get("id")
+        if uid is not None and (not user_resp.get("avatar_url") or user_resp["avatar_url"] == cls.DEFAULT_AVATAR_URL):
+            user_resp["avatar_url"] = cls.torii_default_avatar_url(uid)
         if show_nsfw_media:
             return user_resp
         if user_resp.get("avatar_nsfw"):
-            user_resp["avatar_url"] = cls.DEFAULT_AVATAR_URL
+            user_resp["avatar_url"] = cls.torii_default_avatar_url(uid) if uid is not None else cls.DEFAULT_AVATAR_URL
         if user_resp.get("cover_nsfw"):
             user_resp["cover_url"] = cls.DEFAULT_COVER_URL
             user_resp["cover"] = cls._masked_cover(user_resp.get("cover"))
