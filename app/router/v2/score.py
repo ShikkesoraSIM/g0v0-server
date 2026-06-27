@@ -190,9 +190,18 @@ async def _process_user(score_id: int, user_id: int, redis: Redis, fetcher: Fetc
     # greenlet when accessed. Disabling expiration keeps the in-memory
     # attributes valid after commit and avoids the unnecessary refetch.
     from app.dependencies.database import engine as _engine
+    from app.dependencies.database import release_session as _release_session
     from sqlmodel.ext.asyncio.session import AsyncSession as _AsyncSession
 
-    async with _AsyncSession(_engine, expire_on_commit=False) as session:
+    # Explicit try/finally instead of `async with`. _process_user is awaited INLINE
+    # in the submit-score request (and also scheduled as a background task). If the
+    # osu! client disconnects while a slow pp calc runs the task gets cancelled, and
+    # a bare `async with` would have its __aexit__ close() cancelled too, leaking the
+    # connection idle-in-transaction with its row locks held. That is exactly what
+    # produced the 2026-06 "Lock wait timeout" that blocked admin bans. release_session
+    # shields rollback+close so the connection is always returned to the pool.
+    session = _AsyncSession(_engine, expire_on_commit=False)
+    try:
         user = await session.get(User, user_id)
         if not user:
             logger.warning(
@@ -227,6 +236,8 @@ async def _process_user(score_id: int, user_id: int, redis: Redis, fetcher: Fetc
             )
             return
         await process_user(session, redis, fetcher, user, score, score_token, beatmap[0], BeatmapRankStatus(beatmap[1]))
+    finally:
+        await _release_session(session)
 
 
 async def _process_user_background(score_id: int, user_id: int, redis: Redis, fetcher: Fetcher):

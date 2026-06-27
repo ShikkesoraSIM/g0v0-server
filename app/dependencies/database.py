@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -59,6 +60,37 @@ redis_rate_limit_client = redis.from_url(settings.redis_url, decode_responses=Tr
 db_session_context: ContextVar[AsyncSession | None] = ContextVar("db_session_context", default=None)
 
 
+async def _release_session(session: AsyncSession) -> None:
+    """Roll back and close a session so its pooled connection is always reset.
+
+    Kept as one coroutine so callers can wrap it in asyncio.shield: if the owning
+    task is cancelled mid-flight (e.g. the osu! client disconnects during a slow
+    score submit) a bare `await session.close()` would itself be cancelled and the
+    connection would stay checked out idle-in-transaction, holding row locks that
+    later block writes such as admin bans (MySQL 1205 "Lock wait timeout").
+    Shielding lets rollback + close finish even while the task unwinds.
+    """
+    try:
+        await session.rollback()
+    except Exception:
+        pass
+    try:
+        await session.close()
+    except Exception:
+        pass
+
+
+async def release_session(session: AsyncSession) -> None:
+    """Cancellation-safe rollback+close. Use this from a finally instead of a bare
+    `await session.close()` so a cancelled task can never leak a pooled connection."""
+    try:
+        await asyncio.shield(_release_session(session))
+    except asyncio.CancelledError:
+        # The shielded cleanup keeps running to completion on the loop, so the
+        # connection is still released; honor the cancellation.
+        raise
+
+
 async def get_db():
     session = db_session_context.get()
     if session is None:
@@ -67,19 +99,19 @@ async def get_db():
         try:
             yield session
         finally:
-            await session.close()
             db_session_context.set(None)
+            await release_session(session)
     else:
         yield session
 
 
 @asynccontextmanager
 async def with_db():
-    async with AsyncSession(engine) as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+    session = AsyncSession(engine)
+    try:
+        yield session
+    finally:
+        await release_session(session)
 
 
 DBFactory = Callable[[], AsyncIterator[AsyncSession]]
