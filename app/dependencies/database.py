@@ -60,35 +60,28 @@ redis_rate_limit_client = redis.from_url(settings.redis_url, decode_responses=Tr
 db_session_context: ContextVar[AsyncSession | None] = ContextVar("db_session_context", default=None)
 
 
-async def _release_session(session: AsyncSession) -> None:
-    """Roll back and close a session so its pooled connection is always reset.
+async def release_session(session: AsyncSession) -> None:
+    """Cancellation-safe `session.close()`. Use this from a finally instead of a
+    bare `await session.close()`: under task cancellation (e.g. the osu! client
+    disconnects mid score-submit) a bare close() is itself cancelled and the
+    connection stays checked out idle-in-transaction, holding row locks that later
+    block writes such as admin bans (MySQL 1205 "Lock wait timeout"). Shielding lets
+    the close finish so the connection is always returned to the pool.
 
-    Kept as one coroutine so callers can wrap it in asyncio.shield: if the owning
-    task is cancelled mid-flight (e.g. the osu! client disconnects during a slow
-    score submit) a bare `await session.close()` would itself be cancelled and the
-    connection would stay checked out idle-in-transaction, holding row locks that
-    later block writes such as admin bans (MySQL 1205 "Lock wait timeout").
-    Shielding lets rollback + close finish even while the task unwinds.
+    close() only, never an extra session.rollback() here: the pool already rolls
+    back any open transaction on return, and an explicit rollback would expire the
+    loaded ORM instances that callers still read after the session is released
+    (e.g. create_playlist_room returns a refreshed Room and the caller reads room.id,
+    which a rollback would turn into a DetachedInstanceError).
     """
     try:
-        await session.rollback()
-    except Exception:
-        pass
-    try:
-        await session.close()
-    except Exception:
-        pass
-
-
-async def release_session(session: AsyncSession) -> None:
-    """Cancellation-safe rollback+close. Use this from a finally instead of a bare
-    `await session.close()` so a cancelled task can never leak a pooled connection."""
-    try:
-        await asyncio.shield(_release_session(session))
+        await asyncio.shield(session.close())
     except asyncio.CancelledError:
-        # The shielded cleanup keeps running to completion on the loop, so the
+        # The shielded close keeps running to completion on the loop, so the
         # connection is still released; honor the cancellation.
         raise
+    except Exception:
+        pass
 
 
 async def get_db():
