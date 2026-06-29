@@ -38,6 +38,80 @@ class AvailableRulesetResp(TypedDict):
     loaded_rulesets: list[str]
 
 
+# ── Torii: Relax reading cap ──────────────────────────────────────────────
+# Relax already zeroes the speed and accuracy values. The only thing a Relax
+# player actually does is move the cursor (aim), so the reading (cognition) skill
+# is only meaningful in proportion to that movement: you can only be rewarded for
+# "reading" a map you are actually navigating. On real plays reading is a tiny
+# fraction of aim (measured at most ~0.08x across a sample of live RX scores);
+# only zero/near-zero movement spam maps blow it up. A fully stacked 506-note map
+# at HD + 2x rate scores aim 0, reading ~290 -> 325pp despite just needing you to
+# hold the cursor in one spot. Cap reading at a fraction of aim so those degenerate
+# maps collapse to ~0 while every genuine play (reading already far under the cap)
+# is left untouched. Total is recomputed from the breakdown with the same Norm
+# aggregation; the base multiplier cancels in the ratio so we never need it.
+_RELAX_READING_AIM_CAP = 0.5
+_PERFORMANCE_NORM_EXPONENT = 1.1
+
+
+def _perf_norm(p: float, *values: float) -> float:
+    return sum(v ** p for v in values) ** (1.0 / p)
+
+
+def _sum_cognition(reading: float, flashlight: float) -> float:
+    # mirrors OsuDifficultyCalculator.SumCognitionDifficulty
+    if reading <= 0:
+        return flashlight
+    if flashlight <= 0:
+        return reading
+    return _perf_norm(_PERFORMANCE_NORM_EXPONENT, reading, flashlight * min(max(flashlight / reading, 0.25), 1.0))
+
+
+def _mods_have_relax(mods) -> bool:
+    for m in mods or []:
+        acronym = m.get("acronym") if isinstance(m, dict) else getattr(m, "acronym", None)
+        if acronym == "RX":
+            return True
+    return False
+
+
+def _apply_relax_reading_cap(payload: dict, mods) -> dict:
+    """For Relax osu scores, cap reading at a fraction of aim and recompute total.
+
+    No-op for non-Relax scores and for any play whose reading is already under the
+    cap (i.e. every genuine play). Pure post-process over the perf-server output,
+    so the .NET calculator stays untouched.
+    """
+    if not isinstance(payload, dict) or not _mods_have_relax(mods):
+        return payload
+    try:
+        aim = float(payload.get("aim") or 0.0)
+        speed = float(payload.get("speed") or 0.0)
+        accuracy = float(payload.get("accuracy") or 0.0)
+        flashlight = float(payload.get("flashlight") or 0.0)
+        reading = float(payload.get("reading") or 0.0)
+        total = float(payload.get("pp") or 0.0)
+    except (TypeError, ValueError):
+        return payload
+
+    capped_reading = min(reading, aim * _RELAX_READING_AIM_CAP)
+    if capped_reading >= reading:
+        return payload  # genuine play, leave it exactly as the calculator returned it
+
+    cognition_old = _sum_cognition(reading, flashlight)
+    base_old = _perf_norm(_PERFORMANCE_NORM_EXPONENT, aim, speed, accuracy, cognition_old)
+    if base_old <= 0:
+        return payload
+    multiplier = total / base_old
+    cognition_new = _sum_cognition(capped_reading, flashlight)
+    new_total = _perf_norm(_PERFORMANCE_NORM_EXPONENT, aim, speed, accuracy, cognition_new) * multiplier
+
+    payload = dict(payload)
+    payload["reading"] = capped_reading
+    payload["pp"] = new_total
+    return payload
+
+
 class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
     def __init__(self, server_url: str = "http://localhost:5225", **kwargs) -> None:  # noqa: ARG002
         self.server_url = server_url
@@ -136,6 +210,7 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
                 payload = resp.json()
                 base_mode = score.gamemode.to_base_ruleset()
                 if base_mode == GameMode.OSU:
+                    payload = _apply_relax_reading_cap(payload, score.mods)
                     try:
                         return TypeAdapter(OsuPerformanceAttributes).validate_python(payload)
                     except Exception:
