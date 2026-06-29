@@ -6,8 +6,14 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 # the shared osu.Game DLLs ship to the client untouched.
 ARG PERF_SERVER_REPO=https://github.com/ShikkesoraSIM/torii-performance-server.git
 ARG PERF_SERVER_REF=601d057
-ARG OSU_REPO=https://github.com/vernonlim/osu.git
-ARG OSU_REF=c2f5ac34625264846a4379e313b96fc4debd06ac
+# osu! difficulty/pp source: ppy's pp-dev rework branch (Reading skill etc.).
+# Pinned to a SHA for reproducible builds. The old vernonlim ref was the Sunny
+# MANIA rework and did NOT match what was actually deployed (no Reading skill);
+# this is the real source the perf server runs as of 2026-06-29. The Torii RX
+# policies (reading cap, CS/OD) live server-side in g0v0, not here, so this stays
+# vanilla ppy. Bump this SHA to re-sync; rebuild + recreate performance-server.
+ARG OSU_REPO=https://github.com/ppy/osu.git
+ARG OSU_REF=34416814a220eb40024de2d397f8247b2fd2f8a4
 
 WORKDIR /src
 
