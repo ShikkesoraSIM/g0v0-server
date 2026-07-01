@@ -232,6 +232,14 @@ async def calculate_pp(
         if factor != 1.0:
             pp *= factor
 
+    # Torii: No Release (NR, mania) keeps its pp but takes a flat 30% haircut. NR strips
+    # hold-note release timing (strictly easier holds) while difficulty is still measured in
+    # full, so it over-rewards; a 0.70x reduction is the middle ground instead of a full ban.
+    if base_mode == GameMode.MANIA and pp > 0 and any(
+        (m.get("acronym") or "").upper() == "NR" for m in (score.mods or [])
+    ):
+        pp *= 0.70
+
     if settings.suspicious_score_check and not is_local_beatmap and (pp > 3000):
         logger.warning(
             f"User {score.user_id} played {score.beatmap_id} "
