@@ -296,6 +296,9 @@ class SoloScoreSubmissionInfo(BaseModel):
     mods: list[APIMod] = Field(default_factory=list)
     statistics: ScoreStatistics = Field(default_factory=dict)
     maximum_statistics: ScoreStatistics = Field(default_factory=dict)
+    # timestamps de cada pausa en medio de la play (los manda el cliente). los
+    # usamos para el conteo de pausas y el nerf de pp por pausar.
+    pauses: list[int] = Field(default_factory=list)
 
     @field_validator("mods", mode="after")
     @classmethod

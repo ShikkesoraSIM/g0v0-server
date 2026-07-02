@@ -190,6 +190,9 @@ class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
     # Kept separately from td_play_style so we can re-tune thresholds and
     # re-derive the verdict without re-parsing replays.
     td_classification_confidence: float | None = Field(default=None)
+    # cantidad de pausas en medio de la play (el cliente manda los timestamps).
+    # se usa para el nerf de pp por pausar. TINYINT alcanza de sobra.
+    pause_count: int = Field(default=0, sa_column=Column(SmallInteger, default=0))
     started_at: datetime = Field(sa_column=Column(DateTime))
     total_score: int = Field(default=0, sa_column=Column(BigInteger))
     maximum_statistics: ScoreStatistics = Field(sa_column=Column(JSON), default_factory=dict)
@@ -1207,6 +1210,7 @@ async def process_score(
         mods=info.mods,
         passed=info.passed,
         rank=info.rank,
+        pause_count=len(info.pauses),
         total_score=total_score_value,
         total_score_without_mods=info.total_score_without_mods,
         beatmap_id=beatmap_id,

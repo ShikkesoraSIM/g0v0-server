@@ -255,6 +255,13 @@ async def calculate_pp(
     ):
         pp *= 0.85
 
+    # Torii: nerf por pausar en medio de la play. pausar deja descansar en las
+    # partes dificiles, asi que cada pausa se come un 7% del pp (compuesto, sin
+    # gracia ni piso). aplica a todos los modos.
+    pause_count = getattr(score, "pause_count", 0) or 0
+    if pp > 0 and pause_count > 0:
+        pp *= 0.93 ** pause_count
+
     if settings.suspicious_score_check and not is_local_beatmap and (pp > 3000):
         logger.warning(
             f"User {score.user_id} played {score.beatmap_id} "
