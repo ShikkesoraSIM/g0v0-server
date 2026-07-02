@@ -591,6 +591,14 @@ CALCULATOR_CONFIG='{}'
         Field(default=False, description="å½“è®¡ç®—å™¨ä¸æ”¯æŒæŸä¸ªæ¨¡å¼æ—¶ï¼Œä½¿ç”¨ç®€åŒ–çš„ pp è®¡ç®—æ–¹æ³•ä½œä¸ºåŽå¤‡"),
         "è¡¨çŽ°è®¡ç®—è®¾ç½®",
     ]
+    mania_calculator_config: Annotated[
+        dict[str, Any],
+        Field(
+            default={},
+            description="perf-server aparte para la dificultad de mania (osu con Sunny). vacio = usa el principal",
+        ),
+        "Performance Settings",
+    ]
     mania_pp_rework: Annotated[
         Literal["off", "sunny_wip"],
         Field(default="off", description="osu!mania pp rework mode"),

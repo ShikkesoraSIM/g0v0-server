@@ -31,15 +31,22 @@ if TYPE_CHECKING:
 logger = log("Calculator")
 
 CALCULATOR: PerformanceCalculator | None = None
+# calculador aparte solo para la dificultad de mania: apunta a un perf-server
+# con el osu del Sunny rework (el mismo que corre el cliente). el perf-server
+# principal (ppdev, con reading) queda para std/rx.
+MANIA_CALCULATOR: PerformanceCalculator | None = None
 
 
 async def init_calculator():
-    global CALCULATOR
+    global CALCULATOR, MANIA_CALCULATOR
     try:
         module = importlib.import_module(f"app.calculators.performance.{settings.calculator}")
         CALCULATOR = module.PerformanceCalculator(**settings.calculator_config)
         if CALCULATOR is not None:
             await CALCULATOR.init()
+        if settings.mania_calculator_config:
+            MANIA_CALCULATOR = module.PerformanceCalculator(**settings.mania_calculator_config)
+            await MANIA_CALCULATOR.init()
     except (ImportError, AttributeError) as e:
         raise ImportError(f"Failed to import performance calculator for {settings.calculator}") from e
     return CALCULATOR
@@ -49,6 +56,10 @@ def get_calculator() -> PerformanceCalculator:
     if CALCULATOR is None:
         raise RuntimeError("Performance calculator is not initialized")
     return CALCULATOR
+
+
+def get_mania_calculator() -> PerformanceCalculator | None:
+    return MANIA_CALCULATOR
 
 
 def clamp[T: int | float](n: T, min_value: T, max_value: T) -> T:
@@ -192,11 +203,14 @@ async def calculate_pp(
     calculator = calculator_override or get_calculator()
     base_mode = score.gamemode.to_base_ruleset()
     if settings.mania_pp_rework == "sunny_wip" and base_mode == GameMode.MANIA:
+        # la dificultad de mania la saca del perf-server con Sunny (el mismo osu
+        # que corre el cliente); el principal (ppdev/reading) queda para std/rx.
+        mania_calc = calculator_override or get_mania_calculator() or calculator
         star_rating = -1.0
         diff_attrs = None
-        if await calculator.can_calculate_difficulty(score.gamemode):
+        if await mania_calc.can_calculate_difficulty(score.gamemode):
             try:
-                diff_attrs = await calculator.calculate_difficulty(beatmap, score.mods, score.gamemode)
+                diff_attrs = await mania_calc.calculate_difficulty(beatmap, score.mods, score.gamemode)
                 star_rating = diff_attrs.star_rating
             except Exception:
                 logger.exception(f"Failed to calculate difficulty for sunny mania pp ({score.id=}, {score.beatmap_id=})")
@@ -232,13 +246,14 @@ async def calculate_pp(
         if factor != 1.0:
             pp *= factor
 
-    # Torii: No Release (NR, mania) keeps its pp but takes a flat 30% haircut. NR strips
-    # hold-note release timing (strictly easier holds) while difficulty is still measured in
-    # full, so it over-rewards; a 0.70x reduction is the middle ground instead of a full ban.
+    # Torii: No Release (NR, mania) queda ranked con un haircut suave del 15%.
+    # NR saca el timing de release de los LN (holds mas faciles), pero con el
+    # Sunny rework la dificultad ya se mide bien, asi que un 15% alcanza (antes
+    # era 30% cuando la SR estaba rota e inflaba todo).
     if base_mode == GameMode.MANIA and pp > 0 and any(
         (m.get("acronym") or "").upper() == "NR" for m in (score.mods or [])
     ):
-        pp *= 0.70
+        pp *= 0.85
 
     if settings.suspicious_score_check and not is_local_beatmap and (pp > 3000):
         logger.warning(
