@@ -386,7 +386,11 @@ class UserCacheService:
     async def _cache_single_user(self, user: User):
         """ç¼“å­˜å•ä¸ªç”¨æˆ·"""
         try:
-            user_resp = await UserModel.transform(user, includes=User.USER_INCLUDES)
+            # el cache guarda SIEMPRE el payload canonico (urls reales); la censura nsfw la aplica cada
+            # lector con apply_nsfw_media_policy segun la preferencia del que mira. si transformamos sin
+            # show_nsfw_media=True cacheamos placeholders, y despues el perfil no puede des-censurar -> con
+            # nsfw ON igual no se ve foto/portada (el dashboard batch esquivaba el cache y si se veian).
+            user_resp = await UserModel.transform(user, includes=User.USER_INCLUDES, show_nsfw_media=True)
 
             # åº”ç”¨èµ„æºä»£ç†å¤„ç†
             if settings.enable_asset_proxy:
