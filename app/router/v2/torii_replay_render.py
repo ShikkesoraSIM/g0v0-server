@@ -133,6 +133,86 @@ async def get_replay_render_cooldown(
     return {"seconds_remaining": max(0, ttl if isinstance(ttl, int) else 0)}
 
 
+# OJO orden de rutas: estas GET estaticas van ANTES de "/{render_id}" (que es un
+# int path param) o FastAPI intenta castear "skins"/"mine" a int y tira 422.
+@router.get(
+    "/torii/replay-render/skins",
+    tags=["Torii"],
+    name="Search o!rdr skins",
+    description="Proxy a la lista de skins de o!rdr para el selector del cliente (nombre + preview).",
+)
+async def search_ordr_skins(
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],  # noqa: ARG001
+    search: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"pageSize": 30, "page": page}
+    search = (search or "").strip()[:64]
+    if search:
+        params["search"] = search
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{_ORDR_BASE}/skins", params=params)
+        data = resp.json() if isinstance(resp.json(), dict) else {}
+    except Exception as e:
+        logger.warning(f"[ReplayRender] o!rdr skins fetch failed: {e}")
+        return {"skins": []}
+
+    skins = []
+    for s in (data.get("skins") or [])[:30]:
+        name = s.get("skin")
+        if not name:
+            continue
+        skins.append(
+            {
+                "skin": name,
+                "name": s.get("presentationName") or name,
+                "preview": s.get("gridPreview") or s.get("lowResPreview"),
+                "author": s.get("author") or "",
+                "times_used": s.get("timesUsed", 0),
+            }
+        )
+    return {"skins": skins}
+
+
+@router.get(
+    "/torii/replay-render/mine",
+    tags=["Torii"],
+    name="My recent replay renders",
+    description="Los ultimos renders del user (para verlos aunque no los haya compartido en discord).",
+)
+async def my_replay_renders(
+    db: Database,
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+    limit: int = Query(default=10, ge=1, le=30),
+) -> dict[str, Any]:
+    user_id = current_user.id
+    rows = (
+        await db.exec(
+            select(ToriiReplayRender)
+            .where(ToriiReplayRender.user_id == user_id)
+            .order_by(ToriiReplayRender.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "renders": [
+            {
+                "render_id": r.ordr_render_id,
+                "beatmap_title": r.beatmap_title,
+                "status": r.status,
+                "progress": r.progress,
+                "video_url": r.video_url,
+                "share": r.share,
+                "resolution": r.resolution,
+                "skin": r.skin,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.post(
     "/torii/replay-render/{score_id}",
     tags=["Torii"],
@@ -154,6 +234,13 @@ async def submit_replay_render(
     motion_blur: bool = Query(default=False),
     share: bool = Query(default=True, description="Post the finished video in the Torii Discord"),
 ) -> dict[str, Any]:
+    # snapshot de la identidad del user en locales ANTES de cualquier commit.
+    # expire_on_commit (default True) expira los objetos ORM de la sesion en el
+    # commit; acceder a current_user.id/username despues dispara un lazy-load
+    # sincronico que revienta en async (MissingGreenlet). con locales lo evitamos.
+    user_id = current_user.id
+    username = current_user.username
+
     score = (await db.exec(select(Score).where(Score.id == score_id))).first()
     if score is None:
         raise HTTPException(status_code=404, detail="Score not found")
@@ -174,7 +261,7 @@ async def submit_replay_render(
 
     # ── cooldown por user (1 cada 10 min, requisito de o!rdr). SET NX EX es
     # atomico: si la key ya existe, el user esta en cooldown.
-    cooldown_key = _COOLDOWN_KEY.format(user_id=current_user.id)
+    cooldown_key = _COOLDOWN_KEY.format(user_id=user_id)
     acquired = await redis.set(cooldown_key, "1", ex=_COOLDOWN_SECONDS, nx=True)
     if not acquired:
         ttl = await redis.ttl(cooldown_key)
@@ -228,9 +315,9 @@ async def submit_replay_render(
     try:
         record = ToriiReplayRender(
             ordr_render_id=int(render_id),
-            user_id=current_user.id,
+            user_id=user_id,
             score_id=score_id,
-            username=current_user.username,
+            username=username,
             beatmap_title=await _beatmap_title_for_score(db, score),
             resolution=resolution,
             skin=skin,
@@ -244,7 +331,7 @@ async def submit_replay_render(
         logger.warning(f"[ReplayRender] failed to record render {render_id}: {e}")
 
     logger.info(
-        f"[ReplayRender] user {current_user.id} queued render {render_id} "
+        f"[ReplayRender] user {user_id} queued render {render_id} "
         f"for score {score_id} ({resolution}, skin={skin!r}, share={share})"
     )
     return {
@@ -281,6 +368,9 @@ async def get_replay_render(
     result = {
         "render_id": r.get("renderID"),
         "progress": r.get("progress"),
+        # nombre del host que renderiza (o!rdr lo expone en "renderer"), para la
+        # notificacion tipo "Rendering 45% on <host>".
+        "renderer": r.get("renderer"),
         "video_url": _clean_video_url(r.get("videoUrl")),
         "removed": bool(r.get("removed", False)),
         "error_code": r.get("errorCode", 0),
