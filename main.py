@@ -45,6 +45,10 @@ from app.service.beatmap_download_service import download_service
 from app.service.beatmapset_update_service import init_beatmapset_update_service
 from app.service.client_verification_service import init_client_verification_service
 from app.service.email_queue import start_email_processor, stop_email_processor
+from app.service.replay_render_poll_service import (
+    start_replay_render_poller,
+    stop_replay_render_poller,
+)
 from app.service.redis_message_system import redis_message_system
 from app.service.subscribers.user_cache import user_online_subscriber
 from app.tasks import (
@@ -107,6 +111,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     # services
     await start_email_processor()
+    start_replay_render_poller()
     await download_service.start_health_check()
     from app.router.status import start_collector as _start_status_collector
     await _start_status_collector()
@@ -129,6 +134,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     stop_scheduler()
     await download_service.stop_health_check()
     await stop_email_processor()
+    stop_replay_render_poller()
 
     # close database & redis
     await engine.dispose()

@@ -11,6 +11,7 @@ from . import (  # noqa: F401
     donations,
     mod_alerts,
     oauth,
+    ordr_renders,
     password,
     relationship,
     score,
