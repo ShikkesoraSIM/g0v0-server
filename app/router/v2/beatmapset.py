@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 from typing import Annotated, Literal
 from urllib.parse import parse_qs
@@ -384,16 +385,16 @@ async def _attempt_mirror(
 
 
 async def _validate_osz_first_chunk(resp: httpx.Response):
-    """Peek at the first 64KB to confirm we're getting a real .osz (PK zip
-    signature) instead of an HTML error page some mirrors return as 200.
+    """Peek at the first chunk and require the PK zip signature NO MATTER what
+    Content-Type the mirror claims. Nerinyan (entre otros) a veces devuelve un
+    200 con body JSON/HTML pero content-type de zip/octet-stream; el atajo que
+    confiaba en el content-type dejaba pasar esa basura, se streameaba al
+    cliente Y quedaba cacheada como .osz envenenado permanente ("beatmap
+    import failed" para siempre). Los bytes no mienten: siempre miramos.
     Returns (is_valid, first_chunk, replacement_iterator). The iterator
     re-yields first_chunk before continuing the stream so the consumer
     doesn't lose those bytes.
     """
-    content_type = (resp.headers.get("Content-Type") or "").lower()
-    if "zip" in content_type or "octet-stream" in content_type or "osu-beatmap" in content_type:
-        return True, b"", resp.aiter_bytes(chunk_size=65536)
-
     stream_iter = resp.aiter_bytes(chunk_size=65536)
     first_chunk = await anext(stream_iter, b"")
     if not first_chunk.startswith(b"PK"):
@@ -405,6 +406,52 @@ async def _validate_osz_first_chunk(resp: httpx.Response):
             yield c
 
     return True, first_chunk, patched()
+
+
+# EOCD (end of central directory, PK\x05\x06) vive en los ultimos <=65557
+# bytes de todo zip valido. Un osz truncado a mitad de stream no lo tiene.
+_ZIP_EOCD_WINDOW = 66000
+
+
+def _payload_is_complete_osz(payload: bytes, content_length: str | None) -> bool:
+    """Valida que el payload completo sea un zip integro antes de cachearlo:
+    tamano == Content-Length del mirror (si lo declaro), magic PK al arranque,
+    y EOCD al final. Evita cachear streams cortados/bodies de error."""
+    if content_length:
+        try:
+            if len(payload) != int(content_length):
+                return False
+        except ValueError:
+            pass
+    if not payload.startswith(b"PK"):
+        return False
+    return b"PK\x05\x06" in payload[-_ZIP_EOCD_WINDOW:]
+
+
+async def _cached_osz_looks_valid(storage, cache_path: str) -> bool:
+    """Chequeo barato de integridad de un .osz cacheado antes de servirlo
+    (head PK + EOCD en la cola, sin leer el archivo entero en local storage).
+    Self-heal: los caches envenenados por bugs viejos (JSON/HTML/truncados)
+    se detectan aca, el caller los borra y re-fetchea de los mirrors."""
+    try:
+        get_path = getattr(storage, "_get_file_path", None)
+        if get_path is not None:
+            p = get_path(cache_path)
+            size = os.path.getsize(p)
+            if size < 1024:
+                return False
+            with open(p, "rb") as f:
+                head = f.read(4)
+                tail_len = min(size, _ZIP_EOCD_WINDOW)
+                f.seek(size - tail_len)
+                tail = f.read(tail_len)
+            return head.startswith(b"PK") and b"PK\x05\x06" in tail
+        data = await storage.read_file(cache_path)
+        return len(data) >= 1024 and data.startswith(b"PK") and b"PK\x05\x06" in data[-_ZIP_EOCD_WINDOW:]
+    except Exception as e:
+        logger.warning(f"[beatmap dl] cache validation error for {cache_path}: {e}")
+        # ante la duda no rompemos el camino rapido: servimos lo que hay
+        return True
 
 
 async def _close_response(resp: httpx.Response | None) -> None:
@@ -560,9 +607,20 @@ async def download_beatmapset(
     # ── Layer 1: opportunistic cache from a previous proxy success.
     cache_path = f"cache/beatmapsets/{beatmapset_id}.osz"
     if await storage.is_exists(cache_path):
-        cached_url = await storage.get_file_url(cache_path)
-        logger.info(f"[beatmap dl] cache hit {beatmapset_id} -> {cached_url}")
-        return RedirectResponse(url=cached_url, status_code=307)
+        if await _cached_osz_looks_valid(storage, cache_path):
+            cached_url = await storage.get_file_url(cache_path)
+            logger.info(f"[beatmap dl] cache hit {beatmapset_id} -> {cached_url}")
+            return RedirectResponse(url=cached_url, status_code=307)
+        # cache envenenado (JSON/HTML de error o zip truncado, herencia del bug
+        # de validacion): lo borramos y seguimos a la cadena de mirrors como si
+        # nunca hubiera existido. Self-heal automatico, sin intervencion manual.
+        logger.warning(
+            f"[beatmap dl] cached osz for {beatmapset_id} is invalid (poisoned); purging and refetching"
+        )
+        try:
+            await storage.delete_file(cache_path)
+        except Exception as e:
+            logger.warning(f"[beatmap dl] failed to purge poisoned cache {cache_path}: {e}")
 
     # ── Negative cache: avoid spamming mirrors when we already proved this
     # map is unavailable everywhere. The lazer client retries failed
@@ -762,6 +820,7 @@ async def download_beatmapset(
         buffer: list[bytes] = []
         total = 0
         too_big = False
+        completed = False
         try:
             async for chunk in stream_iter:
                 if not too_big:
@@ -772,6 +831,11 @@ async def download_beatmapset(
                     else:
                         buffer.append(chunk)
                 yield chunk
+            # solo llegamos aca si el stream del mirror TERMINO entero; si el
+            # mirror corto a mitad o el cliente cancelo (GeneratorExit), esto
+            # nunca se setea y el finally NO cachea el buffer parcial. Antes
+            # cacheabamos lo que hubiera -> .osz truncado servido para siempre.
+            completed = True
         finally:
             try:
                 await chosen_resp.aclose()
@@ -782,26 +846,33 @@ async def download_beatmapset(
                     await owned_client.aclose()
                 except Exception:
                     pass
-            if not too_big and buffer:
+            if completed and not too_big and buffer:
                 payload = b"".join(buffer)
                 buffer.clear()
 
-                async def _flush_cache():
-                    try:
-                        await storage.write_file(
-                            cache_path,
-                            payload,
-                            content_type="application/x-osu-beatmap-archive",
-                        )
-                        logger.info(
-                            f"[beatmap dl] cached {beatmapset_id} ({total} bytes) from {chosen_label}"
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            f"[beatmap dl] cache write failed for {beatmapset_id}: {exc}"
-                        )
+                if not _payload_is_complete_osz(payload, content_length):
+                    logger.warning(
+                        f"[beatmap dl] NOT caching {beatmapset_id} from {chosen_label}: "
+                        f"payload failed osz integrity check ({total} bytes, "
+                        f"content-length={content_length})"
+                    )
+                else:
+                    async def _flush_cache():
+                        try:
+                            await storage.write_file(
+                                cache_path,
+                                payload,
+                                content_type="application/x-osu-beatmap-archive",
+                            )
+                            logger.info(
+                                f"[beatmap dl] cached {beatmapset_id} ({total} bytes) from {chosen_label}"
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                f"[beatmap dl] cache write failed for {beatmapset_id}: {exc}"
+                            )
 
-                asyncio.create_task(_flush_cache())
+                    asyncio.create_task(_flush_cache())
 
     logger.info(f"[beatmap dl] streaming {beatmapset_id} from {chosen_label}")
     return StreamingResponse(stream_body(), status_code=200, headers=resp_headers)
