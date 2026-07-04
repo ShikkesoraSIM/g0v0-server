@@ -6,7 +6,7 @@ poller de estado del server y el anuncio de videos terminados en discord
 
 Idempotente: re-run / migracion interrumpida es seguro.
 
-Revision ID: e8f9a0b1c2d3
+Revision ID: 1502b70ae8f5
 Revises: d7e8f9a0b1c2
 Create Date: 2026-07-05 00:00:00.000000
 
@@ -18,7 +18,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "e8f9a0b1c2d3"
+revision: str = "1502b70ae8f5"
 down_revision: str | Sequence[str] | None = "d7e8f9a0b1c2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
