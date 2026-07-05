@@ -231,7 +231,9 @@ async def skin_preview(
         if resp.status_code != 200 or not resp.content:
             raise HTTPException(status_code=404, detail="Preview not available")
         img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-        img.thumbnail((640, 360))
+        # chico a proposito: el box del cliente es ~168px, no hace falta mas y asi
+        # la subida a GPU es liviana (evita hitches al mostrar la preview).
+        img.thumbnail((400, 225))
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         png = buf.getvalue()
