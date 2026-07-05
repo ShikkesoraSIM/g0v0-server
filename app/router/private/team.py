@@ -211,7 +211,25 @@ async def create_team(
         team.cover_url = await storage.get_file_url(cover_storage_path)
 
         session.add(TeamMember(user_id=current_user.id, team_id=team.id, joined_at=now))
+
+        # snapshot pre-commit para el #feed (expire_on_commit)
+        feed_creator = current_user.username
+        feed_creator_id = current_user.id
+
         await session.commit()
+
+        # evento al #feed de discord (best-effort)
+        try:
+            from app.service.discord_feed import notify_team_created
+
+            notify_team_created(
+                username=feed_creator,
+                user_id=feed_creator_id,
+                team_name=clean_name,
+                short_name=clean_short_name,
+            )
+        except Exception:
+            pass
     except HTTPException:
         await session.rollback()
         await _cleanup_team_assets(

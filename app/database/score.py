@@ -1526,6 +1526,26 @@ async def _process_score_events(score: "Score", session: AsyncSession):
         if displaced_score and displaced_score.user_id != score.user_id:
             username = (await session.exec(select(User.username).where(User.id == displaced_score.user_id))).one()
 
+            # evento al #feed de discord: nuevo #1 destronando a alguien (los #1 sin
+            # competencia previa no se anuncian, seria spam en mapas nuevos)
+            try:
+                from app.service.discord_feed import notify_new_number_one
+
+                notify_new_number_one(
+                    username=score.user.username,
+                    user_id=score.user_id,
+                    map_title=(
+                        f"{score.beatmap.beatmapset.artist} - {score.beatmap.beatmapset.title} "
+                        f"[{score.beatmap.version}]"
+                    ),
+                    beatmap_url=beatmap_url,
+                    pp=score.pp,
+                    accuracy=score.accuracy,
+                    dethroned_username=username,
+                )
+            except Exception:
+                pass
+
             rank_lost_event = Event(
                 created_at=utcnow(),
                 type=EventType.RANK_LOST,

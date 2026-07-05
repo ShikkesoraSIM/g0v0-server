@@ -179,10 +179,31 @@ async def upload_beatmapset_package(
     if beatmapset.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="You do not own this beatmapset")
 
+    # snapshot para el #feed antes de que el procesado comitee y expire los objetos
+    feed_artist = beatmapset.artist
+    feed_title = beatmapset.title
+    feed_mapper = current_user.username
+    feed_mapper_id = current_user.id
+
     content = await beatmapArchive.read()
     await storage.write_file(f"beatmapsets/{beatmapset_id}.osz", content)
 
     updated_ids = await BeatmapsetUploadService.process_beatmapset_package(db, storage, beatmapset_id)
+
+    # evento al #feed de discord, UNA vez por set (los PUT de updates no re-anuncian)
+    try:
+        from app.service.discord_feed import notify_beatmapset_uploaded
+
+        if await redis.set(f"feed:bss:{beatmapset_id}", "1", nx=True):
+            notify_beatmapset_uploaded(
+                username=feed_mapper,
+                user_id=feed_mapper_id,
+                artist=feed_artist,
+                title=feed_title,
+                beatmapset_id=beatmapset_id,
+            )
+    except Exception:
+        pass
 
     # Invalidate caches
     await cache_service.invalidate_beatmapset_cache(beatmapset_id)

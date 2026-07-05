@@ -938,6 +938,13 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="Discord webhook URL for admin title-grant feed (optional)"),
         "Donations",
     ]
+    # relay one-way del chat publico #osu a discord. webhook PROPIO (no el del
+    # feed: el chat lo inundaria). vacio = apagado.
+    discord_osu_chat_webhook_url: Annotated[
+        str,
+        Field(default="", description="Discord webhook URL for the #osu public chat relay (optional)"),
+        "Donations",
+    ]
 
     # å­˜å‚¨è®¾ç½®
     storage_service: Annotated[

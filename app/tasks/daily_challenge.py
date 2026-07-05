@@ -104,6 +104,29 @@ async def daily_challenge_job():
             duration=int((next_day - now - timedelta(minutes=2)).total_seconds() / 60),
         )
         logger.success(f"Added today's daily challenge: {beatmap=}, {ruleset_id=}, {required_mods=}")
+
+        # evento al #feed de discord con el mapa del dia (best-effort)
+        try:
+            from app.database.beatmap import Beatmap, Beatmapset
+            from app.service.discord_feed import notify_daily_challenge
+
+            async with with_db() as feed_session:
+                bm = await feed_session.get(Beatmap, beatmap_int)
+                bs = await feed_session.get(Beatmapset, bm.beatmapset_id) if bm else None
+                map_title = (
+                    f"{bs.artist} - {bs.title} [{bm.version}]" if bm and bs else f"beatmap {beatmap_int}"
+                )
+                mode = {0: "osu", 1: "taiko", 2: "fruits", 3: "mania"}.get(ruleset_id_int, "osu")
+                mods = "".join(m.get("acronym", "") for m in required_mods_list if isinstance(m, dict))
+                notify_daily_challenge(
+                    map_title=map_title,
+                    beatmapset_id=bs.id if bs else None,
+                    beatmap_id=beatmap_int,
+                    mode=mode,
+                    mods=mods,
+                )
+        except Exception as feed_err:
+            logger.warning(f"daily challenge feed event failed: {feed_err}")
         return
     except (ValueError, json.JSONDecodeError) as e:
         logger.warning(f"Error processing daily challenge data: {e} Will try again in 5 minutes.")

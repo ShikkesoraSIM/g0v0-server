@@ -149,6 +149,16 @@ async def send_message(
     is_bot_command = req.message.startswith("!")
     await server.send_message_to_channel(resp, is_bot_command and channel_type == ChannelType.PUBLIC)
 
+    # relay one-way del chat publico #osu a discord (webhook propio; apagado si
+    # la env no esta). los !comandos no se relayan.
+    if channel_type == ChannelType.PUBLIC and channel_name == "osu" and not is_bot_command:
+        try:
+            from app.service.discord_feed import relay_osu_chat
+
+            relay_osu_chat(username=current_user.username, content=req.message)
+        except Exception:
+            pass
+
     if is_bot_command:
         await bot.try_handle(current_user, db_channel, req.message, session)
 

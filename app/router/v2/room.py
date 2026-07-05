@@ -171,8 +171,34 @@ async def create_room(
         raise HTTPException(status_code=403, detail="Your account is restricted from multiplayer.")
     user_id = current_user.id
     db_room = await create_playlist_room_from_api(db, room, user_id)
+
+    # snapshot pre-commit para el #feed (expire_on_commit expira los objetos)
+    feed_room_name = db_room.name
+    feed_category = str(getattr(db_room.category, "value", db_room.category) or "")
+    feed_map_count = len(db_room.playlist or [])
+    feed_has_password = bool(db_room.password)
+    feed_host_name = current_user.username
+
     await _participate_room(db_room.id, user_id, db_room, db, redis)
     await db.commit()
+
+    # evento al #feed de discord: lobbies de multi y playlists creadas por users
+    # (los rooms de sistema tipo daily challenge/matchmaking no pasan por aca o
+    # quedan filtrados por categoria)
+    try:
+        from app.service.discord_feed import notify_room_created
+
+        if feed_category in ("NORMAL", "REALTIME"):
+            notify_room_created(
+                host_username=feed_host_name,
+                host_user_id=user_id,
+                room_name=feed_room_name,
+                is_realtime=feed_category == "REALTIME",
+                map_count=feed_map_count,
+                has_password=feed_has_password,
+            )
+    except Exception:
+        pass
     await db.refresh(db_room)
     show_nsfw_media = await UserModel.viewer_allows_nsfw_media(current_user)
     created_room = await RoomModel.transform(db_room, includes=Room.SHOW_RESPONSE_INCLUDES, show_nsfw_media=show_nsfw_media)

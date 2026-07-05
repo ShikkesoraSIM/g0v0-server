@@ -161,6 +161,7 @@ async def purchase(
     # greenlet -> MissingGreenlet (500). Capture the id as a plain int up front and use
     # that everywhere, so the whole handler is immune to the expire-on-commit trap.
     uid = current_user.id
+    buyer_name = current_user.username
 
     cid = body.cosmetic_id.strip()
     if not cid:
@@ -220,4 +221,12 @@ async def purchase(
         cid=cid,
         price=price,
     )
+
+    # evento al #feed de discord (best-effort, no bloquea la compra)
+    try:
+        from app.service.discord_feed import notify_cosmetic_purchase
+
+        notify_cosmetic_purchase(username=buyer_name, user_id=uid, cosmetic_id=cid, price=price)
+    except Exception:
+        pass
     return {"owned": True, "balance": await get_balance(db, uid)}
