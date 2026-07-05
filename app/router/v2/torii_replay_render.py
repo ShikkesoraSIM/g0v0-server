@@ -190,7 +190,8 @@ async def search_ordr_skins(
 
 
 def _proxied_preview_url(skin_name: str) -> str:
-    base = (settings.server_url or "").rstrip("/")
+    # settings.server_url es un HttpUrl de pydantic, no un str -> str() antes de rstrip.
+    base = str(settings.server_url or "").rstrip("/")
     return f"{base}/api/v2/torii/replay-render/skin-preview?skin={quote(skin_name)}"
 
 
