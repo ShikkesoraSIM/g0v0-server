@@ -24,9 +24,9 @@ from app.log import logger
 from app.utils import utcnow
 
 _ORDR_BASE = "https://apis.issou.best/ordr"
-# 12s: suficientemente seguido para que el status en vivo del bot (%/host) se
-# sienta fluido sin martillar o!rdr (solo poleamos los renders en curso).
-_POLL_INTERVAL_SECONDS = 12
+# 6s: para que el % del status en vivo se mueva fluido (10..20..40..). solo
+# poleamos los renders EN CURSO, asi no martilla o!rdr con volumen bajo.
+_POLL_INTERVAL_SECONDS = 6
 _STUCK_AFTER = timedelta(hours=2)
 
 _task: asyncio.Task | None = None
