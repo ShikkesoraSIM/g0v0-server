@@ -44,10 +44,15 @@ Surfaces
 
 from __future__ import annotations
 
+import base64
+import io
+import re
 from typing import Annotated, Any
+from urllib.parse import quote
 
 import httpx
-from fastapi import HTTPException, Query, Security
+from fastapi import HTTPException, Query, Response, Security
+from PIL import Image
 from sqlmodel import select
 
 from app.config import settings
@@ -64,6 +69,12 @@ from .router import router
 # o!rdr public API base. Render submission is multipart/form-data to /renders;
 # status is GET /renders?renderID=.
 _ORDR_BASE = "https://apis.issou.best/ordr"
+
+# plantilla del preview de una skin en o!rdr (webp). lo proxeamos+convertimos a PNG
+# porque el cliente solo puede cargar texturas de *.shikkesora.com / *.ppy.sh
+# (TrustedDomainOnlineStore bloquea dl.issou.best directo).
+_ORDR_SKIN_PREVIEW = "https://dl.issou.best/ordr/skinpreview/{skin}/low-res.webp"
+_SKIN_PREVIEW_CACHE = "ordr:skinpreview:{skin}"  # base64 del PNG en redis, 24h
 
 # Sender name attributed on o!rdr for every Torii-originated render.
 _ORDR_SENDER = "Torii"
@@ -146,7 +157,7 @@ async def search_ordr_skins(
     search: str = Query(default=""),
     page: int = Query(default=1, ge=1),
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"pageSize": 30, "page": page}
+    params: dict[str, Any] = {"pageSize": 60, "page": page}
     search = (search or "").strip()[:64]
     if search:
         params["search"] = search
@@ -159,7 +170,7 @@ async def search_ordr_skins(
         return {"skins": []}
 
     skins = []
-    for s in (data.get("skins") or [])[:30]:
+    for s in (data.get("skins") or [])[:60]:
         name = s.get("skin")
         if not name:
             continue
@@ -167,12 +178,74 @@ async def search_ordr_skins(
             {
                 "skin": name,
                 "name": s.get("presentationName") or name,
-                "preview": s.get("gridPreview") or s.get("lowResPreview"),
+                # preview que el cliente PUEDE cargar (proxeada por nosotros a PNG);
+                # high_res es el link crudo de o!rdr para abrir en el navegador (ojito).
+                "preview": _proxied_preview_url(name),
+                "high_res": s.get("highResPreview") or s.get("lowResPreview"),
                 "author": s.get("author") or "",
                 "times_used": s.get("timesUsed", 0),
             }
         )
     return {"skins": skins}
+
+
+def _proxied_preview_url(skin_name: str) -> str:
+    base = (settings.server_url or "").rstrip("/")
+    return f"{base}/api/v2/torii/replay-render/skin-preview?skin={quote(skin_name)}"
+
+
+@router.get(
+    "/torii/replay-render/skin-preview",
+    tags=["Torii"],
+    name="o!rdr skin preview image",
+    description="Proxy PNG del preview de una skin de o!rdr (sin auth: lo carga la texture store del cliente).",
+)
+async def skin_preview(
+    redis: Redis,
+    skin: str = Query(...),
+) -> Response:
+    # sin auth a proposito: la texture store del cliente hace un GET pelado sin token.
+    # el nombre se sanitiza (nada de path traversal) y solo pegamos al host fijo de o!rdr.
+    name = re.sub(r"[^A-Za-z0-9._\- ]", "", skin or "")[:120].strip()
+    if not name:
+        raise HTTPException(status_code=404, detail="No skin")
+
+    headers = {"Cache-Control": "public, max-age=86400"}
+    cache_key = _SKIN_PREVIEW_CACHE.format(skin=name)
+
+    try:
+        cached = await redis.get(cache_key)
+    except Exception:
+        cached = None
+    if cached:
+        try:
+            return Response(content=base64.b64decode(cached), media_type="image/png", headers=headers)
+        except Exception:
+            pass
+
+    url = _ORDR_SKIN_PREVIEW.format(skin=quote(name))
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200 or not resp.content:
+            raise HTTPException(status_code=404, detail="Preview not available")
+        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        img.thumbnail((640, 360))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        png = buf.getvalue()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"[ReplayRender] skin preview failed for {name!r}: {e}")
+        raise HTTPException(status_code=404, detail="Preview not available")
+
+    try:
+        await redis.set(cache_key, base64.b64encode(png), ex=86400)
+    except Exception:
+        pass
+
+    return Response(content=png, media_type="image/png", headers=headers)
 
 
 @router.get(
