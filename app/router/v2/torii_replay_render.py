@@ -488,10 +488,14 @@ async def apply_ordr_state_to_record(db, ordr_render: dict[str, Any]) -> None:
     video_url = _clean_video_url(ordr_render.get("videoUrl"))
     error_code = ordr_render.get("errorCode", 0) or 0
     progress = str(ordr_render.get("progress") or "")[:155]
+    renderer = str(ordr_render.get("renderer") or "")[:60] or None
+    if renderer:
+        record.renderer = renderer
 
     if video_url:
         record.status = "done"
         record.video_url = video_url
+        record.progress = progress or record.progress
         record.finished_at = utcnow()
     elif error_code not in (0, None) or ordr_render.get("removed"):
         record.status = "failed"

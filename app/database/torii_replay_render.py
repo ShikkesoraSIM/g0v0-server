@@ -45,9 +45,15 @@ class ToriiReplayRender(SQLModel, table=True):
     # queued / rendering / done / failed
     status: str = Field(default="queued", sa_column=Column(VARCHAR(16), nullable=False, index=True))
     progress: str = Field(default="", sa_column=Column(VARCHAR(160), nullable=False))
+    # nombre del host de o!rdr que renderiza (para el status en vivo del bot).
+    renderer: str | None = Field(default=None, sa_column=Column(VARCHAR(64), nullable=True))
     video_url: str | None = Field(default=None, sa_column=Column(VARCHAR(255), nullable=True))
     error_code: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     error_message: str | None = Field(default=None, sa_column=Column(VARCHAR(255), nullable=True))
+
+    # id del mensaje de discord que posteo ToriiHalo, para EDITARLO en vivo con el
+    # progreso (estilo yuna) en vez de postear uno nuevo por cada update.
+    discord_message_id: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
 
     created_at: datetime = Field(default_factory=utcnow, sa_column=Column(DateTime, nullable=False, index=True))
     finished_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
