@@ -195,6 +195,10 @@ async def upsert_score_note(
             pass
         note.has_image = False
 
+    # snapshot ANTES del commit: expire_on_commit expira el objeto y tocar
+    # note.has_image despues dispara un lazy-load sincronico (MissingGreenlet).
+    final_has_image = note.has_image
+
     db.add(note)
     await db.commit()
 
@@ -204,7 +208,7 @@ async def upsert_score_note(
         "user_id": user_id,
         "username": username,
         "text": text,
-        "has_image": bool(processed is not None or (note.has_image and not remove_image)),
+        "has_image": final_has_image,
     }
 
 
