@@ -31,9 +31,17 @@ class ToriiReplayRender(SQLModel, table=True):
     user_id: int = Field(sa_column=Column(BigInteger, nullable=False, index=True))
     score_id: int = Field(sa_column=Column(BigInteger, nullable=False, index=True))
 
-    # denormalizado al momento del submit para que el bot arme el embed sin joins
+    # denormalizado al momento del submit para que el bot arme el embed sin joins.
+    # username/user_id = QUIEN pidio el render (submitter). player_* = de QUIEN es la
+    # replay (dueño del score) — pueden diferir porque se pueden renderear plays ajenas.
     username: str = Field(sa_column=Column(VARCHAR(32), nullable=False))
+    player_username: str | None = Field(default=None, sa_column=Column(VARCHAR(32), nullable=True))
+    player_user_id: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     beatmap_title: str = Field(default="", sa_column=Column(VARCHAR(255), nullable=False))
+    # ids para armar el link al mapa en Torii (/beatmapsets/{set}#{mode}/{map}).
+    beatmap_online_id: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    beatmapset_id: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    gamemode: str | None = Field(default=None, sa_column=Column(VARCHAR(16), nullable=True))
 
     resolution: str = Field(sa_column=Column(VARCHAR(16), nullable=False))
     skin: str = Field(sa_column=Column(VARCHAR(128), nullable=False))

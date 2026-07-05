@@ -116,18 +116,44 @@ def _friendly_ordr_error(payload: dict[str, Any], status_code: int) -> str:
     return payload.get("message") or f"The render service rejected the replay (HTTP {status_code})"
 
 
-async def _beatmap_title_for_score(db, score: Score) -> str:
-    """Best-effort 'Artist - Title [Version]' para el embed del bot."""
+def _mode_str(value) -> str | None:
+    """Normaliza un GameMode enum a 'osu'/'taiko'/'fruits'/'mania' (para el link)."""
+    try:
+        s = str(getattr(value, "value", value) or "").lower()
+    except Exception:
+        return None
+    return s or None
+
+
+async def _render_meta_for_score(db, score: Score) -> dict[str, Any]:
+    """Denormaliza lo que el bot necesita para el mensaje: titulo, ids del mapa +
+    modo (para el link), y el username del jugador (dueño del score). Best-effort."""
+    meta: dict[str, Any] = {
+        "beatmap_title": "",
+        "beatmap_online_id": None,
+        "beatmapset_id": None,
+        "gamemode": _mode_str(getattr(score, "gamemode", None)),
+        "player_username": None,
+    }
     try:
         beatmap = await db.get(Beatmap, score.beatmap_id)
-        if beatmap is None:
-            return ""
-        beatmapset = await db.get(Beatmapset, beatmap.beatmapset_id)
-        if beatmapset is None:
-            return ""
-        return f"{beatmapset.artist} - {beatmapset.title} [{beatmap.version}]"[:250]
+        if beatmap is not None:
+            meta["beatmap_online_id"] = beatmap.id
+            meta["beatmapset_id"] = beatmap.beatmapset_id
+            # el modo del BEATMAP es el ruleset base del link (osu/taiko/fruits/mania),
+            # mejor que el gamemode del score que puede ser rx/ap.
+            bmode = _mode_str(getattr(beatmap, "mode", None))
+            if bmode:
+                meta["gamemode"] = bmode
+            beatmapset = await db.get(Beatmapset, beatmap.beatmapset_id)
+            if beatmapset is not None:
+                meta["beatmap_title"] = f"{beatmapset.artist} - {beatmapset.title} [{beatmap.version}]"[:250]
+        player = await db.get(User, score.user_id)
+        if player is not None:
+            meta["player_username"] = player.username
     except Exception:
-        return ""
+        pass
+    return meta
 
 
 @router.get(
@@ -388,13 +414,20 @@ async def submit_replay_render(
 
     # registro para el poller + el bot de discord. best-effort: si esto falla,
     # el render igual quedo encolado en o!rdr y el cliente puede pollear.
+    meta = await _render_meta_for_score(db, score)
+    player_user_id = score.user_id
     try:
         record = ToriiReplayRender(
             ordr_render_id=int(render_id),
             user_id=user_id,
             score_id=score_id,
             username=username,
-            beatmap_title=await _beatmap_title_for_score(db, score),
+            player_username=meta["player_username"],
+            player_user_id=player_user_id,
+            beatmap_title=meta["beatmap_title"],
+            beatmap_online_id=meta["beatmap_online_id"],
+            beatmapset_id=meta["beatmapset_id"],
+            gamemode=meta["gamemode"],
             resolution=resolution,
             skin=skin,
             motion_blur=motion_blur,
