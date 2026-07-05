@@ -91,6 +91,7 @@ from .statistics import (
 from .score_anticheat_analysis import ScoreAnticheatAnalysis
 from .suspicious_alert import SuspiciousAlert
 from .torii_replay_render import ToriiReplayRender
+from .torii_score_note import ToriiScoreNote
 from .team import Team, TeamMember, TeamRequest, TeamResp
 from .torii_gifts import ToriiGift
 from .torii_hiccup_report import ToriiHiccupReport
@@ -185,6 +186,7 @@ __all__ = [
     "SearchBeatmapsetsResp",
     "SuspiciousAlert",
     "ToriiReplayRender",
+    "ToriiScoreNote",
     "Team",
     "TeamMember",
     "TeamRequest",

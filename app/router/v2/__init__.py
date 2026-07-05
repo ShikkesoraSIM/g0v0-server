@@ -16,6 +16,7 @@ from . import (  # noqa: F401
     torii_hiccup_reports,
     torii_points,
     torii_replay_render,
+    torii_score_note,
     torii_restriction,
     torii_server_pulse,
     torii_store,
