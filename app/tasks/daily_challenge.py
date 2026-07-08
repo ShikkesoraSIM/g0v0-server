@@ -186,15 +186,20 @@ async def process_daily_challenge_top():
             await session.commit()
             del s
 
-        user_ids = (await session.exec(select(User.id).where(col(User.id).not_in(participated_users)))).all()
-        for id in user_ids:
-            stats = await session.get(DailyChallengeStats, id)
-            if stats is None:  # not execute
-                continue
-            stats.daily_streak_current = 0
-            if stats.last_weekly_streak and not are_same_weeks(
-                stats.last_weekly_streak.replace(tzinfo=UTC), now - timedelta(days=7)
-            ):
-                stats.weekly_streak_current = 0
-            stats.last_update = now
-        await session.commit()
+        # Solo rompemos rachas los dias que REALMENTE hubo daily challenge. Si el
+        # server no puso challenge (room is None) no tocamos a nadie: no es culpa
+        # del jugador. Antes esto zeroaba el streak de TODOS en cada dia sin
+        # challenge, castigando a la gente por un problema del server.
+        if room is not None:
+            user_ids = (await session.exec(select(User.id).where(col(User.id).not_in(participated_users)))).all()
+            for id in user_ids:
+                stats = await session.get(DailyChallengeStats, id)
+                if stats is None:  # not execute
+                    continue
+                stats.daily_streak_current = 0
+                if stats.last_weekly_streak and not are_same_weeks(
+                    stats.last_weekly_streak.replace(tzinfo=UTC), now - timedelta(days=7)
+                ):
+                    stats.weekly_streak_current = 0
+                stats.last_update = now
+            await session.commit()

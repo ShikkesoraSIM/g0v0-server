@@ -92,15 +92,19 @@ async def process_daily_challenge_score(session: AsyncSession, user_id: int, roo
     if last_played is None:
         stats.daily_streak_best = 1
         stats.daily_streak_current = 1
-    elif last_played.replace(tzinfo=UTC).date() == now.date() - timedelta(days=1):
-        stats.daily_streak_current += 1
-        if stats.daily_streak_current > stats.daily_streak_best:
-            stats.daily_streak_best = stats.daily_streak_current
     elif last_played.replace(tzinfo=UTC).date() == now.date():
         # Already counted a play today; don't double-count.
         stats.playcount -= 1
     else:
-        stats.daily_streak_current = 1
+        # Racha = daily challenges CONSECUTIVOS jugados, no dias calendario. Los
+        # cortes los maneja process_daily_challenge_top (zeroa al que falto un
+        # challenge que SI existio; los dias sin challenge ya no rompen nada). Un
+        # play en un dia nuevo simplemente avanza: si falto un challenge real ya
+        # quedo en 0 -> +1 = 1; si el server no puso challenge, se preservo -> +1
+        # continua la racha.
+        stats.daily_streak_current += 1
+        if stats.daily_streak_current > stats.daily_streak_best:
+            stats.daily_streak_best = stats.daily_streak_current
     if stats.last_weekly_streak is None:
         stats.weekly_streak_current = 1
         stats.weekly_streak_best = 1
