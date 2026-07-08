@@ -141,7 +141,10 @@ class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
         "user.team",
         *MULTIPLAYER_SCORE_INCLUDE,
     ]
-    USER_PROFILE_INCLUDES: ClassVar[list[str]] = ["beatmap", "beatmapset", "user"]
+    # current_user_attributes trae el flag de pin (is_pinned). Sin esto el front
+    # nunca sabe que un score esta pinneado -> siempre muestra "Pin" y no se puede
+    # despinnear desde el perfil.
+    USER_PROFILE_INCLUDES: ClassVar[list[str]] = ["beatmap", "beatmapset", "user", "current_user_attributes"]
 
     DEFAULT_SCORE_INCLUDES: ClassVar[list[str]] = ["user", "user.country", "user.cover", "user.team"]
 
