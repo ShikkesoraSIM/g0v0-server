@@ -425,6 +425,34 @@ async def register_user(
             logger.warning(
                 f"Failed to post Discord new-account embed for user {new_user.id}: {discord_err}"
             )
+
+        # torii: emitimos el token del usuario nuevo aca mismo (server auto-login) y lo devolvemos.
+        # antes esta funcion NO tenia return de exito -> devolvia null -> el frontend web hacia un
+        # SEGUNDO login que reusaba el token de Turnstile (single-use) ya quemado en el register -> ese
+        # login fallaba -> no redirigia al perfil -> el user reintentaba y le salia "Username already
+        # taken" aunque la cuenta ya estaba creada. devolviendo el token, el front queda logueado con
+        # la misma request, sin segundo login. (el cliente osu! in-game ignora el body y hace su propio
+        # login, asi que no lo afecta.)
+        access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+        access_token = create_access_token(data={"sub": str(new_user.id)}, expires_delta=access_token_expires)
+        refresh_token_str = generate_refresh_token()
+        await store_token(
+            db,
+            new_user.id,
+            int(settings.osu_web_client_id),
+            ["*"],
+            access_token,
+            refresh_token_str,
+            settings.access_token_expire_minutes * 60,
+            settings.refresh_token_expire_minutes * 60,
+            allow_multiple_devices=settings.enable_multi_device_login,
+        )
+
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token_str,
+            expires_in=settings.access_token_expire_minutes * 60,
+        )
     except Exception:
         await db.rollback()
         # æ‰“å°è¯¦ç»†é”™è¯¯ä¿¡æ¯ç”¨äºŽè°ƒè¯•
