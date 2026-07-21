@@ -19,6 +19,7 @@ default; DISCORD_OSU_CHAT_WEBHOOK_URL para prenderlo).
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import httpx
@@ -154,6 +155,56 @@ def notify_team_created(*, username: str, user_id: int, team_name: str, short_na
     ))
 
 
+# ── batching de los #1 ───────────────────────────────────────────────────────
+# en vez de spamear un mensaje por cada #1, los junta en redis y los manda de a
+# tandas (una mini-lista en un solo mensaje) cuando llega a _NUM1_BATCH, o si el
+# mas viejo espero mas de _NUM1_MAX_WAIT_S (red de seguridad para dias tranquilos).
+_NUM1_KEY = "feed:new1:pending"
+_NUM1_TS_KEY = "feed:new1:first_ts"
+_NUM1_BATCH = 10
+_NUM1_MAX_WAIT_S = 6 * 60 * 60
+
+
+async def _flush_number_ones(redis, *, count: int | None) -> None:
+    if count is None:
+        lines = await redis.lrange(_NUM1_KEY, 0, -1)
+        if lines:
+            await redis.delete(_NUM1_KEY)
+    else:
+        lines = await redis.lpop(_NUM1_KEY, count) or []
+        if isinstance(lines, (bytes, str)):
+            lines = [lines]
+    if not lines:
+        return
+    if await redis.llen(_NUM1_KEY) == 0:
+        await redis.delete(_NUM1_TS_KEY)
+    text = "\n".join(x.decode() if isinstance(x, bytes) else x for x in lines)
+    url = (settings.discord_title_feed_webhook_url or "").strip()
+    if not url:
+        return
+    n = len(lines)
+    await _post(url, _embed(f"{n} new #1", text, _COLOUR_NUMBER_ONE))
+
+
+async def _enqueue_number_one(line: str) -> None:
+    from app.dependencies.database import get_redis
+    try:
+        redis = get_redis()
+        n = await redis.rpush(_NUM1_KEY, line)
+        if n == 1:
+            await redis.set(_NUM1_TS_KEY, str(int(time.time())))
+        if n >= _NUM1_BATCH:
+            await _flush_number_ones(redis, count=_NUM1_BATCH)
+            return
+        ts = await redis.get(_NUM1_TS_KEY)
+        if ts is not None:
+            ts_s = ts.decode() if isinstance(ts, bytes) else ts
+            if int(time.time()) - int(ts_s) >= _NUM1_MAX_WAIT_S:
+                await _flush_number_ones(redis, count=None)
+    except Exception as exc:
+        logger.warning("Failed to enqueue #1 feed event: {}", exc)
+
+
 def notify_new_number_one(
     *,
     username: str,
@@ -172,11 +223,8 @@ def notify_new_number_one(
     stats_part = f" ({', '.join(stats)})" if stats else ""
     dethroned = f", dethroning **{dethroned_username}**" if dethroned_username else ""
 
-    _feed(_embed(
-        "👑 New #1",
-        f"**[{username}]({_profile(user_id)})** took #1 on [{map_title}]({beatmap_url}){stats_part}{dethroned}",
-        _COLOUR_NUMBER_ONE,
-    ))
+    line = f"👑 **[{username}]({_profile(user_id)})** took #1 on [{map_title}]({beatmap_url}){stats_part}{dethroned}"
+    _fire(_enqueue_number_one(line))
 
 
 # ── relay del chat publico #osu (canal propio, apagado si la env no esta) ────
