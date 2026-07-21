@@ -179,9 +179,7 @@ async def upload_beatmapset_package(
     if beatmapset.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="You do not own this beatmapset")
 
-    # snapshot para el #feed antes de que el procesado comitee y expire los objetos
-    feed_artist = beatmapset.artist
-    feed_title = beatmapset.title
+    # el mapper si lo snapshoteamos aca (current_user no se expira con el commit del set)
     feed_mapper = current_user.username
     feed_mapper_id = current_user.id
 
@@ -195,11 +193,16 @@ async def upload_beatmapset_package(
         from app.service.discord_feed import notify_beatmapset_uploaded
 
         if await redis.set(f"feed:bss:{beatmapset_id}", "1", nx=True):
+            # leer artist/title DESPUES del process: el .osz recien ahi setea la metadata real.
+            # antes se snapshoteaba ANTES de process_beatmapset_package y salia "Unknown - Unknown"
+            # (el PUT de create trae metadata vacia; el titulo/artista viven en el .osz).
+            await db.refresh(beatmapset)
+
             notify_beatmapset_uploaded(
                 username=feed_mapper,
                 user_id=feed_mapper_id,
-                artist=feed_artist,
-                title=feed_title,
+                artist=beatmapset.artist or "Unknown",
+                title=beatmapset.title or "Unknown",
                 beatmapset_id=beatmapset_id,
             )
     except Exception:
