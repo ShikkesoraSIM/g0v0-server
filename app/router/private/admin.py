@@ -1771,29 +1771,42 @@ async def add_blacklisted_beatmap(
     if not beatmaps:
         raise HTTPException(status_code=404, detail="No beatmaps found in this beatmapset")
 
-    # Check if any beatmap in this set is already banned
+    # Idempotente: baneamos solo los beatmaps del set que NO estan ya baneados, en vez de
+    # fallar cuando algun diff ya estaba (eso rompia el "Add to blacklist" del website con un 400).
     beatmap_ids = [b.id for b in beatmaps]
-    existing_banned = (
-        await session.exec(
-            select(BannedBeatmaps).where(col(BannedBeatmaps.beatmap_id).in_(beatmap_ids))
-        )
-    ).all()
+    already_banned_ids = set(
+        (
+            await session.exec(
+                select(BannedBeatmaps.beatmap_id).where(col(BannedBeatmaps.beatmap_id).in_(beatmap_ids))
+            )
+        ).all()
+    )
 
-    if existing_banned:
-        raise HTTPException(status_code=400, detail="Some beatmaps in this beatmapset are already blacklisted")
+    to_ban = [b for b in beatmaps if b.id not in already_banned_ids]
 
-    # Ban all beatmaps in the set
-    for beatmap in beatmaps:
-        banned_item = BannedBeatmaps(
+    if not to_ban:
+        return {
+            "beatmapset_id": beatmapset_id,
+            "added": 0,
+            "already_blacklisted": len(already_banned_ids),
+            "message": "All beatmaps in this beatmapset were already blacklisted",
+        }
+
+    for beatmap in to_ban:
+        session.add(BannedBeatmaps(
             beatmap_id=beatmap.id,
             source="manual",
             reason="manual admin beatmapset blacklist",
-        )
-        session.add(banned_item)
+        ))
 
     await session.commit()
 
-    return {"beatmapset_id": beatmapset_id, "message": "Beatmapset added to blacklist"}
+    return {
+        "beatmapset_id": beatmapset_id,
+        "added": len(to_ban),
+        "already_blacklisted": len(already_banned_ids),
+        "message": "Beatmapset added to blacklist",
+    }
 
 
 @router.delete(
