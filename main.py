@@ -278,8 +278,18 @@ async def get_user_avatar_root(
         raise HTTPException(status_code=404, detail="User not found")
 
     avatar_url = user.avatar_url
-    if not avatar_url:
-        avatar_url = "https://lazer.g0v0.top/default.jpg"
+
+    # torii: espejo del tratamiento de UserModel.transform — sin avatar subido va el default
+    # torii per-user (o el logo si el user opto por eso), y los avatares nsfw se enmascaran
+    # (este endpoint no tiene viewer, asi que nsfw nunca se sirve por aca). antes redirigia
+    # al default.jpg generico de g0v0 y el cliente mostraba cualquier cosa para ids sin avatar.
+    if not avatar_url or avatar_url == User.DEFAULT_AVATAR_URL or user.avatar_nsfw:
+        use_logo = False
+        if not user.avatar_nsfw:
+            await user.awaitable_attrs.user_preference
+            pref = user.user_preference
+            use_logo = bool(pref and (pref.extra or {}).get("default_avatar_use_logo"))
+        avatar_url = User.torii_logo_avatar_url() if use_logo else User.torii_default_avatar_url(user.id)
 
     separator = "&" if "?" in avatar_url else "?"
     avatar_url_with_timestamp = f"{avatar_url}{separator}"
