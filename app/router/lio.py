@@ -248,7 +248,10 @@ def _validate_playlist_items(items: list[dict[str, Any]]) -> None:
 
 async def _create_room(db: Database, room_data: dict[str, Any]) -> tuple[Room, int]:
     host_user_id = room_data.get("user_id", BANCHOBOT_ID)
-    match_type = room_data.get("match_type", "HeadToHead" if host_user_id != BANCHOBOT_ID else "Matchmaking")
+    # el spectator manda el tipo real en la key "type" (snake_case: "ranked_play",
+    # "matchmaking", etc). "match_type" queda como fallback legacy. sin esto las salas
+    # de ranked play se tipaban MATCHMAKING y el cliente crasheaba casteando el room state.
+    match_type = room_data.get("type") or room_data.get("match_type") or ("HeadToHead" if host_user_id != BANCHOBOT_ID else "Matchmaking")
     room_name = room_data.get("name", f"{match_type} room: {utcnow().isoformat()}")
     password = room_data.get("password")
     queue_mode = room_data.get("queue_mode", "HostOnly")
@@ -561,8 +564,16 @@ async def create_multiplayer_room(
             host_user = await db.get(User, host_user_id)
             if host_user:
                 await server.batch_join_channel([host_user], channel)
-            # Add playlist items
-            await _add_playlist_items(db, fetcher, room_id, room_data, host_user_id)
+            # las salas de matchmaking/ranked-play se crean SIN playlist: el spectator
+            # escribe los items directo a la DB (AddPlaylistItemAsync) a medida que avanza
+            # el match. si exigimos playlist aca la sala se rechaza y el cliente queda
+            # colgado en "waiting for opponents". el spectator manda el tipo en la key
+            # "type" (no "match_type"), y estas salas las crea BanchoBot, asi que
+            # _create_room las tipa MATCHMAKING: gateamos sobre el room ya creado.
+            is_matchmaking = room.type in (MatchType.MATCHMAKING, MatchType.RANKED_PLAY)
+            has_playlist = bool(room_data.get("initial_playlist") or room_data.get("playlist"))
+            if has_playlist or not is_matchmaking:
+                await _add_playlist_items(db, fetcher, room_id, room_data, host_user_id)
 
             # Add host as participant
             # await _add_host_as_participant(db, room_id, host_user_id)
