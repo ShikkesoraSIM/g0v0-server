@@ -16,6 +16,7 @@ class MatchType(str, Enum):
     HEAD_TO_HEAD = "head_to_head"
     TEAM_VERSUS = "team_versus"
     MATCHMAKING = "matchmaking"
+    RANKED_PLAY = "ranked_play"
 
 
 class QueueMode(str, Enum):

@@ -528,6 +528,67 @@ CALCULATOR_CONFIG='{}'
         ),
         "游戏设置",
     ]
+    matchmaking_current_season: Annotated[
+        str,
+        Field(
+            default="2026-S1",
+            description=(
+                "Active matchmaking season id. The comfort star-rating pick is once per "
+                "(user, ruleset) per this value; bump it to open a new season."
+            ),
+        ),
+        "游戏设置",
+    ]
+    comfort_floor_factor: Annotated[
+        float,
+        Field(
+            default=0.75,
+            description=(
+                "Anti-sandbag: the comfort star-rating pick must be >= this fraction of the "
+                "mod-adjusted SR of the player's top play (proportional floor, scales across the "
+                "whole range instead of a flat offset that bottoms out for low-SR players)."
+            ),
+        ),
+        "游戏设置",
+    ]
+    comfort_floor_min: Annotated[
+        float,
+        Field(
+            default=1.0,
+            description="The comfort-pick floor is clamped so it never drops below this star rating.",
+        ),
+        "游戏设置",
+    ]
+    comfort_pick_max: Annotated[
+        float,
+        Field(default=7.5, description="Upper bound the comfort star-rating pick is clamped to."),
+        "游戏设置",
+    ]
+    comfort_seed_sigma: Annotated[
+        float,
+        Field(
+            default=150.0,
+            description=(
+                "Provisional OpenSkill sigma the comfort pick seeds a new player's matchmaking "
+                "rating with. Igual al default del sistema (150): antes era 200 y las primeras "
+                "partidas swingueaban demasiado (el ELO saltaba a Master y volvia a provisional al "
+                "reiniciar). 150 hace que el pick quede mas cerca de lo elegido y estabiliza antes."
+            ),
+        ),
+        "游戏设置",
+    ]
+    matchmaking_placement_plays: Annotated[
+        int,
+        Field(
+            default=5,
+            description=(
+                "Ranked matches a player must finish in a pool before their rank tier is final. "
+                "Below this the client shows a 'Provisional' badge instead of the seeded tier, so "
+                "a fresh star-pick seed does not read as e.g. 'Master' with zero games played."
+            ),
+        ),
+        "游戏设置",
+    ]
     enable_supporter_for_all_users: Annotated[
         bool,
         Field(default=False, description="å¯ç”¨æ‰€æœ‰æ–°æ³¨å†Œç”¨æˆ·çš„æ”¯æŒè€…çŠ¶æ€"),
