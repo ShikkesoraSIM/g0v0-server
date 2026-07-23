@@ -851,8 +851,11 @@ async def get_leaderboard(
         extra_need = 0
         for s in await session.exec(query):
             if s.user_id in scores:
+                # fila duplicada del mismo usuario (varios gamemodes en el leaderboard "global
+                # including automation": osu + relax + autopilot). la deduplicamos para el DISPLAY,
+                # pero NO tocamos `count`: `count` ya es COUNT(DISTINCT user_id), asi que restar aca
+                # descontaba de mas y el total se iba a negativo (el "#1 of -7").
                 extra_need += 1
-                count -= 1
                 if s.total_score > scores[s.user_id].total_score:
                     scores[s.user_id] = s.score
             else:
@@ -951,23 +954,28 @@ async def get_score_position_by_id(
     if wheres is None:
         return 0
 
-    partition_cols = _partition_cols_for_ranking(type, mods)
-
-    rownum = (
-        func.row_number()
-        .over(
-            partition_by=partition_cols,
-            order_by=(col(TotalScoreBestScore.total_score).desc(), col(TotalScoreBestScore.score_id).desc()),
+    # el total_score de ESTE score (mi mejor en el beatmap)
+    my_total_score = (
+        await session.exec(
+            select(TotalScoreBestScore.total_score).where(col(TotalScoreBestScore.score_id) == score_id)
         )
-        .label("row_number")
-    )
+    ).one_or_none()
+    if my_total_score is None:
+        return 0
 
-    subq = select(TotalScoreBestScore.score_id, TotalScoreBestScore.user_id, rownum).where(*wheres).subquery()
-    stmt = select(subq.c.row_number).where(subq.c.score_id == score_id)
-
-    result = await session.exec(stmt)
-    s = result.one_or_none()
-    return s if s else 0
+    # posicion = 1 + usuarios DISTINTOS con un mejor score que el mio.
+    # Antes usaba ROW_NUMBER sobre filas crudas: si alguien arriba tuyo tenia varias filas (osu +
+    # relax + autopilot en el leaderboard "global including automation") contaba cada una y te
+    # empujaba la posicion hacia abajo (#2 real mostraba #3). Contar user_id distintos lo alinea
+    # con el count y con la lista deduplicada del leaderboard.
+    higher = (
+        await session.exec(
+            select(func.count(func.distinct(col(TotalScoreBestScore.user_id)))).where(
+                *wheres, col(TotalScoreBestScore.total_score) > my_total_score
+            )
+        )
+    ).one()
+    return int(higher or 0) + 1
 
 def _partition_cols_for_ranking(type: LeaderboardType, mods: list[str] | None):
     mods = mods or []
