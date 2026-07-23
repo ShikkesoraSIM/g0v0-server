@@ -24,6 +24,7 @@ from sqlmodel import select
 from app.database import User
 from app.database.torii_store import ToriiOwnedCosmetic, ToriiStoreConfig, record_owned_cosmetics
 from app.dependencies.database import Database
+from app.models.torii_auras import TORII_AURAS
 from app.dependencies.user import get_current_user
 from app.log import log
 from app.models.torii_cosmetic_prices import price_for
@@ -207,6 +208,22 @@ async def purchase(
         raise HTTPException(status_code=400, detail="Not enough points")
 
     await record_owned_cosmetics(db, uid, [cid], "store")
+
+    # torii: comprar un aura tambien otorga su owning_group como titulo custom (torii_titles).
+    # El entitlement de auras es por GRUPO (user_group_keys incluye torii_titles); antes la compra
+    # solo creaba la fila owned SIN dar entitlement, entonces el aura no aparecia en la lista de
+    # settings y no persistia al reiniciar (is_aura_allowed_for_user daba False -> el equip no se
+    # re-resolvia al bootear). build_groups ignora titulos que no estan en TORII_GROUPS, asi que
+    # esto NO agrega badge espurio: solo habilita el cosmetic.
+    aura = TORII_AURAS.get(cid)
+    if aura is not None and aura.owning_groups:
+        titles = list(current_user.torii_titles or [])
+        for grp in aura.owning_groups:
+            if grp not in titles:
+                titles.append(grp)
+        current_user.torii_titles = titles
+        db.add(current_user)
+
     try:
         await db.commit()
     except IntegrityError:
