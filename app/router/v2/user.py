@@ -340,9 +340,28 @@ async def get_user_avatar(session: Database, user_id: int):
     texture loader can resolve avatars for locally-stored scores, whose RealmUser
     carries no AvatarUrl and so falls back to `{api}/users/{id}/avatar`. MUST be
     declared before `/users/{user_id}/{ruleset}` or that catch-all swallows
-    `avatar` as a ruleset and 422s (which rendered a blank avatar client-side)."""
+    `avatar` as a ruleset and 422s (which rendered a blank avatar client-side).
+
+    Mirrors UserModel.transform's public avatar rules so we never leak an
+    NSFW-flagged avatar through this unauthenticated path: no / default avatar ->
+    the varied Torii default (logo if the user opted out of the AI-made set); an
+    NSFW-flagged avatar -> the Torii default too; otherwise the real upload."""
     user = await session.get(User, user_id)
-    url = (user.avatar_url if user is not None else None) or User.DEFAULT_AVATAR_URL
+    if user is None:
+        return RedirectResponse(User.torii_default_avatar_url(user_id))
+
+    url = user.avatar_url
+    if not url or url == User.DEFAULT_AVATAR_URL:
+        await user.awaitable_attrs.user_preference
+        pref = user.user_preference
+        if pref and (pref.extra or {}).get("default_avatar_use_logo"):
+            url = User.torii_logo_avatar_url()
+        else:
+            url = User.torii_default_avatar_url(user.id)
+    elif user.avatar_nsfw:
+        # Unauthenticated viewer -> non-privileged, hide NSFW like the transform.
+        url = User.torii_default_avatar_url(user.id)
+
     return RedirectResponse(url)
 
 
