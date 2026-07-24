@@ -44,6 +44,7 @@ from app.utils import api_doc, utcnow
 from .router import router
 
 from fastapi import BackgroundTasks, HTTPException, Path, Query, Request, Security
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import joinedload
 from sqlmodel import exists, func, select, tuple_
 from sqlmodel.sql.expression import col
@@ -331,6 +332,18 @@ async def get_user_beatmaps_passed(
             for beatmap in beatmaps
         ]
     }
+
+
+@router.get("/users/{user_id}/avatar", include_in_schema=False)
+async def get_user_avatar(session: Database, user_id: int):
+    """Redirect to a user's avatar image by id. Public (no auth) so the game's
+    texture loader can resolve avatars for locally-stored scores, whose RealmUser
+    carries no AvatarUrl and so falls back to `{api}/users/{id}/avatar`. MUST be
+    declared before `/users/{user_id}/{ruleset}` or that catch-all swallows
+    `avatar` as a ruleset and 422s (which rendered a blank avatar client-side)."""
+    user = await session.get(User, user_id)
+    url = (user.avatar_url if user is not None else None) or User.DEFAULT_AVATAR_URL
+    return RedirectResponse(url)
 
 
 @router.get(
