@@ -342,10 +342,14 @@ async def get_user_avatar(session: Database, user_id: int):
     declared before `/users/{user_id}/{ruleset}` or that catch-all swallows
     `avatar` as a ruleset and 422s (which rendered a blank avatar client-side).
 
-    Mirrors UserModel.transform's public avatar rules so we never leak an
-    NSFW-flagged avatar through this unauthenticated path: no / default avatar ->
-    the varied Torii default (logo if the user opted out of the AI-made set); an
-    NSFW-flagged avatar -> the Torii default too; otherwise the real upload."""
+    Serves the user's REAL avatar, NSFW included: this is the fallback for
+    locally-stored scores, i.e. the viewer's OWN plays, so they should see their
+    own avatar rather than a placeholder. No new exposure — the raw avatar file
+    (`/file/avatars/...`) is already publicly fetchable; NSFW consent for viewing
+    OTHER users' avatars is still enforced on the payload path (UserModel.transform,
+    used by the online leaderboards + profiles). Only substitutes a varied Torii
+    default (logo if the user opted out of the AI-made set) when there is no custom
+    avatar at all."""
     user = await session.get(User, user_id)
     if user is None:
         return RedirectResponse(User.torii_default_avatar_url(user_id))
@@ -358,9 +362,6 @@ async def get_user_avatar(session: Database, user_id: int):
             url = User.torii_logo_avatar_url()
         else:
             url = User.torii_default_avatar_url(user.id)
-    elif user.avatar_nsfw:
-        # Unauthenticated viewer -> non-privileged, hide NSFW like the transform.
-        url = User.torii_default_avatar_url(user.id)
 
     return RedirectResponse(url)
 
