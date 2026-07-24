@@ -135,18 +135,25 @@ class ScoreDict(TypedDict):
 class ScoreModel(AsyncAttrs, DatabaseModel[ScoreDict]):
     # https://github.com/ppy/osu-web/blob/master/app/Transformers/ScoreTransformer.php#L72-L84
     MULTIPLAYER_SCORE_INCLUDE: ClassVar[list[str]] = ["playlist_item_id", "room_id", "solo_score_id"]
+    # torii: sub-includes de cosmeticos del jugador (aura + name colour + grupos). van juntos en TODA
+    # lista de scores para que cualquier surface con scores (leaderboard de song-select, perfil,
+    # multiplayer, gameplay solo) muestre el aura/color del jugador — el cliente necesita
+    # equipped_aura (Path 1) o groups (Path 2 fallback) para resolver el aura. Costo: el resolver de
+    # aura solo pega a la DB si el aura equipada es una POSEIDA (regalada), raro en un leaderboard.
+    COSMETIC_USER_INCLUDES: ClassVar[list[str]] = ["user.equipped_aura", "user.equipped_name_colour", "user.groups"]
     MULTIPLAYER_BASE_INCLUDES: ClassVar[list[str]] = [
         "user.country",
         "user.cover",
         "user.team",
+        *COSMETIC_USER_INCLUDES,
         *MULTIPLAYER_SCORE_INCLUDE,
     ]
     # current_user_attributes trae el flag de pin (is_pinned). Sin esto el front
     # nunca sabe que un score esta pinneado -> siempre muestra "Pin" y no se puede
     # despinnear desde el perfil.
-    USER_PROFILE_INCLUDES: ClassVar[list[str]] = ["beatmap", "beatmapset", "user", "current_user_attributes"]
+    USER_PROFILE_INCLUDES: ClassVar[list[str]] = ["beatmap", "beatmapset", "user", "current_user_attributes", *COSMETIC_USER_INCLUDES]
 
-    DEFAULT_SCORE_INCLUDES: ClassVar[list[str]] = ["user", "user.country", "user.cover", "user.team"]
+    DEFAULT_SCORE_INCLUDES: ClassVar[list[str]] = ["user", "user.country", "user.cover", "user.team", *COSMETIC_USER_INCLUDES]
 
     # 基本字段
     beatmap_id: int = Field(index=True, foreign_key="beatmaps.id")

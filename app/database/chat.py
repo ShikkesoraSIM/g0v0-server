@@ -344,7 +344,11 @@ class ChatMessageModel(DatabaseModel[ChatMessageDict]):
         show_nsfw_media: bool = False,
     ) -> UserDict:
         # Build canonical payload first, then apply viewer policy.
-        user_resp = await UserModel.transform(db_message.user, show_nsfw_media=True)
+        # torii: con LIST_INCLUDES el sender trae equipped_aura + equipped_name_colour + groups, igual
+        # que el path live via Redis (redis_message_system usa LIST_INCLUDES). Sin esto el history
+        # servido por este DB-fallback (Redis miss) y los mensajes de admin/banchobot llegaban
+        # "stripped" y el aura/color de OTROS usuarios no se veia en el chat.
+        user_resp = await UserModel.transform(db_message.user, includes=UserModel.LIST_INCLUDES, show_nsfw_media=True)
         return UserModel.apply_nsfw_media_policy(user_resp, show_nsfw_media)
 
 

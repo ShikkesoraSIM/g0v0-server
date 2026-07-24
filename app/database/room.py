@@ -52,6 +52,11 @@ class RoomModel(DatabaseModel[RoomDict]):
     SHOW_RESPONSE_INCLUDES: ClassVar[list[str]] = [
         "current_user_score.playlist_item_attempts",
         "host.country",
+        # torii: el aura/color/grupos del host viajan con el room, para que el nombre del host se
+        # vea con su cosmetico en la lista de rooms/lobby igual que en cualquier otro lado.
+        "host.equipped_aura",
+        "host.equipped_name_colour",
+        "host.groups",
         "playlist.beatmap.beatmapset",
         "playlist.beatmap.checksum",
         "playlist.beatmap.max_combo",
@@ -188,7 +193,8 @@ class RoomModel(DatabaseModel[RoomDict]):
             )
         for recent_participant in await session.exec(query):
             user_instance = await recent_participant.awaitable_attrs.user
-            participants.append(await UserModel.transform(user_instance, show_nsfw_media=show_nsfw_media))
+            # torii: CARD_INCLUDES para que los participantes recientes lleven su aura/color/grupos.
+            participants.append(await UserModel.transform(user_instance, includes=UserModel.CARD_INCLUDES, show_nsfw_media=show_nsfw_media))
         return participants
 
     @ondemand

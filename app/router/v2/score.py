@@ -85,7 +85,10 @@ from sqlmodel import col, exists, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 READ_SCORE_TIMEOUT = 10
-DEFAULT_SCORE_INCLUDES = ["user", "user.country", "user.cover", "user.team"]
+# torii: el aura + name colour + grupos del jugador viajan en cada score para que el leaderboard de
+# song-select (y el score detail) muestren el cosmetico de CUALQUIER jugador, no solo el local.
+_COSMETIC_USER_INCLUDES = ["user.equipped_aura", "user.equipped_name_colour", "user.groups"]
+DEFAULT_SCORE_INCLUDES = ["user", "user.country", "user.cover", "user.team", *_COSMETIC_USER_INCLUDES]
 SCORE_DETAIL_INCLUDES = [
     "beatmap",
     "beatmapset",
@@ -96,6 +99,7 @@ SCORE_DETAIL_INCLUDES = [
     "user.country",
     "user.cover",
     "user.team",
+    *_COSMETIC_USER_INCLUDES,
 ]
 logger = log("Score")
 LAST_CLIENT_HASH_KEY = "metadata:user:last_client_hash:{user_id}"

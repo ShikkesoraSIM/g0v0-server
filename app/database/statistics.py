@@ -195,7 +195,9 @@ class UserStatisticsModel(DatabaseModel[UserStatisticsDict]):
         from .user import UserModel
 
         user_instance = await statistics.awaitable_attrs.user
-        return await UserModel.transform(user_instance, show_nsfw_media=show_nsfw_media)
+        # torii: CARD_INCLUDES para que el user de los rankings lleve su aura/color/grupos (ademas de
+        # country/cover/team). el resolver no forwardea sub-includes, asi que lo damos explicito.
+        return await UserModel.transform(user_instance, includes=UserModel.CARD_INCLUDES, show_nsfw_media=show_nsfw_media)
 
 
 class UserStatistics(AsyncAttrs, UserStatisticsModel, table=True):
