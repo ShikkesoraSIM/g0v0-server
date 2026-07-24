@@ -6,7 +6,12 @@ from app.config import settings
 from app.models.beatmap import BeatmapRankStatus
 from app.models.notification import NotificationName
 from app.models.score import GameMode
-from app.models.torii_auras import resolve_effective_aura_id
+from app.models.torii_auras import (
+    AURA_SENTINEL_DEFAULT,
+    AURA_SENTINEL_NONE,
+    is_aura_allowed_for_user,
+    resolve_effective_aura_id,
+)
 from app.models.torii_groups import build_groups, is_currently_supporting
 from app.models.user import Country, Page
 from app.path import STATIC_DIR
@@ -472,7 +477,24 @@ class UserModel(DatabaseModel[UserDict]):
         # Also: aura only renders while the user is currently supporting,
         # so lapsed donors stop showing their aura even if their stored
         # equipped_aura value still says "supporter-aura".
-        resolved = resolve_effective_aura_id(obj, getattr(obj, "equipped_aura", None))
+        equipped = getattr(obj, "equipped_aura", None)
+
+        # Entitlement is owned OR group-granted. Fast path: sentinels + picks a group
+        # already grants never touch the DB (so serialising the N users of a leaderboard
+        # doesn't fire N owned-cosmetic queries). Only when the equipped aura is a concrete
+        # id that NO group grants — i.e. possibly a gifted/bought one — do we look up the
+        # user's owned auras to see if they unlocked it.
+        owned = None
+        if (
+            equipped
+            and equipped not in (AURA_SENTINEL_DEFAULT, AURA_SENTINEL_NONE)
+            and not is_aura_allowed_for_user(obj, equipped)
+        ):
+            from app.database.torii_store import owned_aura_ids
+
+            owned = await owned_aura_ids(_session, obj.id)
+
+        resolved = resolve_effective_aura_id(obj, equipped, owned)
         if resolved == "supporter-aura" and not is_currently_supporting(obj):
             return None
         return resolved

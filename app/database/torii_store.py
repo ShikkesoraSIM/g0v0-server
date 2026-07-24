@@ -93,3 +93,28 @@ async def record_owned_cosmetics(session: AsyncSession, user_id: int, cosmetic_i
     for cid in ids:
         if cid not in existing:
             session.add(ToriiOwnedCosmetic(user_id=user_id, cosmetic_id=cid, source=source))
+
+
+async def owned_aura_ids(session: AsyncSession, user_id: int) -> set[str]:
+    """Los ids de AURA que un usuario posee como cosmetico desbloqueado (regalo/compra),
+    con independencia de sus grupos.
+
+    El entitlement de auras es ``owned OR group-granted``: un aura es un cosmetico que se
+    desbloquea y listo (regalo/compra), y ADEMAS los roles la otorgan como bonus (ej el grupo
+    ``admin`` habilita el ``admin-embers``). Esta funcion resuelve la parte ``owned``. Filtra por
+    el catalogo de auras para no traer trails / name-colours que viven en la misma tabla."""
+    from app.models.torii_auras import TORII_AURAS
+
+    aura_ids = list(TORII_AURAS.keys())
+    if not aura_ids:
+        return set()
+
+    rows = (
+        await session.exec(
+            select(ToriiOwnedCosmetic.cosmetic_id).where(
+                ToriiOwnedCosmetic.user_id == user_id,
+                col(ToriiOwnedCosmetic.cosmetic_id).in_(aura_ids),
+            )
+        )
+    ).all()
+    return set(rows)

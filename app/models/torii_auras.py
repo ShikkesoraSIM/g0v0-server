@@ -288,11 +288,18 @@ def is_aura_id_known(aura_id: str | None) -> bool:
     return aura_id in TORII_AURAS
 
 
-def is_aura_allowed_for_user(user: object, aura_id: str | None) -> bool:
-    """Does this user's group set grant them the right to equip `aura_id`?
+def is_aura_allowed_for_user(user: object, aura_id: str | None, owned_aura_ids: set[str] | None = None) -> bool:
+    """Is this user entitled to equip `aura_id`?
 
-    Sentinels (None / "default" / "none") are always allowed — they're not
-    locked behind groups.
+    Entitlement is ``owned OR group-granted``:
+      - `owned_aura_ids` are auras the user unlocked as a cosmetic (gift / purchase),
+        independent of any group. Pass them in from a DB lookup (they live in
+        `torii_owned_cosmetics`, see `torii_store.owned_aura_ids`). Omitted = group-only
+        check (used by call-sites that only care about the role-granted path).
+      - group-granted: the user owns one of the aura's `owning_groups` (a role like
+        `admin` unlocking `admin-embers` as a bonus).
+
+    Sentinels (None / "default" / "none") are always allowed — they're not locked.
     """
     if aura_id is None or aura_id in (AURA_SENTINEL_DEFAULT, AURA_SENTINEL_NONE):
         return True
@@ -302,46 +309,60 @@ def is_aura_allowed_for_user(user: object, aura_id: str | None) -> bool:
     # Owner flex: id 3 (Shikkesora) may equip any known aura.
     if _is_aura_owner(user):
         return True
+    # Owned directly (gift / purchase) — a cosmetic you unlocked, no group needed.
+    if owned_aura_ids and aura_id in owned_aura_ids:
+        return True
+    # Granted by a role you hold (admin -> admin-embers, etc).
     user_keys = user_group_keys(user)
     return any(g in user_keys for g in aura.owning_groups)
 
 
-def available_auras_for_user(user: object) -> list[AuraDefinition]:
-    """All auras the user is entitled to equip, ordered by `default_priority`
-    ascending then by catalog insertion order. Returned in the order the
-    settings picker should display them."""
+def available_auras_for_user(user: object, owned_aura_ids: set[str] | None = None) -> list[AuraDefinition]:
+    """All auras the user is entitled to equip (owned OR group-granted), ordered by
+    `default_priority` ascending then by catalog insertion order. This is what the
+    settings picker / inventory shows, so it includes auras unlocked via gift/purchase
+    (`owned_aura_ids`) even when the user holds none of the aura's groups."""
     # Owner flex: id 3 (Shikkesora) is entitled to every aura in the catalog.
     if _is_aura_owner(user):
         return sorted(TORII_AURAS.values(), key=lambda a: a.default_priority)
     user_keys = user_group_keys(user)
-    eligible = [a for a in TORII_AURAS.values() if any(g in user_keys for g in a.owning_groups)]
+    owned = owned_aura_ids or set()
+    eligible = [
+        a
+        for a in TORII_AURAS.values()
+        if a.aura_id in owned or any(g in user_keys for g in a.owning_groups)
+    ]
     eligible.sort(key=lambda a: a.default_priority)
     return eligible
 
 
 def resolve_default_aura_id(user: object) -> str | None:
-    """The aura id this user gets when they have no explicit pick. None if
-    the user has no eligible auras at all."""
+    """The aura id this user gets when they have NO explicit pick. Deliberately
+    GROUP-ONLY: a role aura auto-shows (that's the point of roles), but an owned
+    aura (gift/purchase) only renders once the user equips it explicitly — we
+    don't surprise someone by auto-wearing a cosmetic they just unlocked. None
+    if the user has no eligible group auras at all."""
     eligible = available_auras_for_user(user)
     return eligible[0].aura_id if eligible else None
 
 
-def resolve_effective_aura_id(user: object, equipped: str | None) -> str | None:
+def resolve_effective_aura_id(user: object, equipped: str | None, owned_aura_ids: set[str] | None = None) -> str | None:
     """Translate a stored `equipped_aura` value into the aura id that should
     actually render on this user's name. Encapsulates the sentinel logic so
     every API response and consumer treats it identically.
 
-    Returns None when no aura should render (either explicit opt-out, or
-    user has no eligible groups).
+    `owned_aura_ids` lets an explicit pick of an owned-but-not-group aura resolve
+    (the gift/purchase case). Returns None when no aura should render (either
+    explicit opt-out, or user has no eligible auras).
     """
     if equipped == AURA_SENTINEL_NONE:
         return None
     if equipped is None or equipped == AURA_SENTINEL_DEFAULT:
         return resolve_default_aura_id(user)
-    # Explicit pick — only honour it if the user still owns the relevant
-    # group, otherwise fall back to default. Demoting a user implicitly
-    # demotes their aura too without server intervention.
-    if is_aura_allowed_for_user(user, equipped):
+    # Explicit pick — honour it if the user still owns it (as a cosmetic) OR is
+    # still in the granting group. A role aura implicitly demotes when the group
+    # is lost; an owned aura sticks (you can't un-own a gift).
+    if is_aura_allowed_for_user(user, equipped, owned_aura_ids):
         return equipped
     return resolve_default_aura_id(user)
 

@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from app.database import FavouriteBeatmapset, User
-from app.database.torii_store import ToriiOwnedCosmetic
+from app.database.torii_store import ToriiOwnedCosmetic, owned_aura_ids
 from app.database.user import UserModel
 from app.dependencies.database import Database, get_redis
 from app.dependencies.fetcher import get_fetcher
@@ -118,13 +118,17 @@ class UpdateEquippedAuraBody(BaseModel):
     tags=["user", "auras"],
 )
 async def get_aura_catalog(
+    session: Database,
     current_user: Annotated[User, Security(get_current_user, scopes=["identify"])],
 ):
-    available = available_auras_for_user(current_user)
+    # owned = auras desbloqueadas como cosmetico (regalo/compra); el picker las muestra ademas
+    # de las que otorgan los grupos.
+    owned = await owned_aura_ids(session, current_user.id)
+    available = available_auras_for_user(current_user, owned)
     return AuraCatalogResponse(
         available=[AuraCatalogEntry(**aura_to_api_dict(a)) for a in available],
         current_setting=current_user.equipped_aura,
-        effective_aura_id=resolve_effective_aura_id(current_user, current_user.equipped_aura),
+        effective_aura_id=resolve_effective_aura_id(current_user, current_user.equipped_aura, owned),
     )
 
 
@@ -155,8 +159,9 @@ async def update_equipped_aura(
             f"'{AURA_SENTINEL_DEFAULT}', '{AURA_SENTINEL_NONE}', or null.",
         )
 
-    # Real aura ids must belong to a group the user holds.
-    if not is_aura_allowed_for_user(current_user, new_value):
+    # Real aura ids must be OWNED (gift/purchase) OR granted by a group the user holds.
+    owned = await owned_aura_ids(session, current_user.id)
+    if not is_aura_allowed_for_user(current_user, new_value, owned):
         raise HTTPException(
             status_code=403,
             detail=f"You don't have access to aura {new_value!r}.",
@@ -177,11 +182,11 @@ async def update_equipped_aura(
     # the DB write.
     await publish_user_updated(current_user.id)
 
-    available = available_auras_for_user(current_user)
+    available = available_auras_for_user(current_user, owned)
     return AuraCatalogResponse(
         available=[AuraCatalogEntry(**aura_to_api_dict(a)) for a in available],
         current_setting=current_user.equipped_aura,
-        effective_aura_id=resolve_effective_aura_id(current_user, current_user.equipped_aura),
+        effective_aura_id=resolve_effective_aura_id(current_user, current_user.equipped_aura, owned),
     )
 
 
