@@ -349,10 +349,15 @@ async def get_user_avatar(session: Database, user_id: int):
     OTHER users' avatars is still enforced on the payload path (UserModel.transform,
     used by the online leaderboards + profiles). Only substitutes a varied Torii
     default (logo if the user opted out of the AI-made set) when there is no custom
-    avatar at all."""
+    avatar at all.
+
+    Ids that aren't Torii users are almost always locally-stored scores set on
+    bancho (osu! official) — their id lives in a.ppy.sh's space, not ours — so we
+    fall back to the osu! avatar CDN and the player's bancho pfp shows instead of
+    a Torii placeholder (this is what the old pre-Torii-fallback behaviour did)."""
     user = await session.get(User, user_id)
     if user is None:
-        return RedirectResponse(User.torii_default_avatar_url(user_id))
+        return RedirectResponse(f"https://a.ppy.sh/{user_id}")
 
     url = user.avatar_url
     if not url or url == User.DEFAULT_AVATAR_URL:
