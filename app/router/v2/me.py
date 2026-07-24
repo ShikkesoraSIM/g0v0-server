@@ -17,6 +17,7 @@ from app.models.torii_auras import (
     resolve_effective_aura_id,
 )
 from app.models.torii_cosmetic_prices import clean_cosmetic_ids
+from app.models.torii_groups import build_groups
 from app.service.pp_variant_service import apply_pp_variant_to_user_response, normalize_pp_variant
 from app.service.user_update_publisher import publish_user_updated
 from app.utils import api_doc
@@ -242,17 +243,28 @@ async def update_equipped_name_colour(
         if not clean_cosmetic_ids([new_value]) or not new_value.startswith("name-"):
             raise HTTPException(status_code=400, detail=f"Not a name-colour id: {new_value!r}")
 
-        # Must be owned — only BOUGHT colours live in this field.
-        owns = (
-            await session.exec(
-                select(ToriiOwnedCosmetic.id).where(
-                    ToriiOwnedCosmetic.user_id == current_user.id,
-                    ToriiOwnedCosmetic.cosmetic_id == new_value,
+        if new_value.startswith("name-group-"):
+            # Role colour (e.g. `name-group-torii-donator`): entitled by group
+            # membership, not by purchase. Store the user's explicit pick so their
+            # equipped role colour shows everywhere (leaderboards, others' clients),
+            # instead of every client re-deriving their highest-priority group.
+            # Validate they actually hold the group so a role colour can't be spoofed.
+            identifier = new_value[len("name-group-") :]
+            group_ids = {g["identifier"] for g in build_groups(current_user)}
+            if identifier not in group_ids:
+                raise HTTPException(status_code=403, detail="You don't have that role colour.")
+        else:
+            # Bought colour: must be owned.
+            owns = (
+                await session.exec(
+                    select(ToriiOwnedCosmetic.id).where(
+                        ToriiOwnedCosmetic.user_id == current_user.id,
+                        ToriiOwnedCosmetic.cosmetic_id == new_value,
+                    )
                 )
-            )
-        ).first()
-        if owns is None:
-            raise HTTPException(status_code=403, detail="You don't own that name colour.")
+            ).first()
+            if owns is None:
+                raise HTTPException(status_code=403, detail="You don't own that name colour.")
 
     current_user.equipped_name_colour = new_value
     session.add(current_user)
