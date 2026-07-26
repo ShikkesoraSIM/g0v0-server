@@ -8,6 +8,7 @@ from . import (  # noqa: F401
     avatar,
     beatmapset,
     cover,
+    discord_redeem,
     donations,
     mod_alerts,
     oauth,

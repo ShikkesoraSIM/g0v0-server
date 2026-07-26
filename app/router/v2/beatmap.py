@@ -56,8 +56,18 @@ async def lookup_beatmap(
         )
     try:
         beatmap = await Beatmap.get_or_fetch(db, fetcher, bid=id, md5=md5)
-    except HTTPError:
-        raise HTTPException(status_code=404, detail="Beatmap not found")
+    except HTTPError as e:
+        # torii: no mentir con un 404. El cliente trata "no existe online" como
+        # definitivo y le BORRA el id online al mapa (ResetOnlineInfo -> OnlineID=-1),
+        # y despues no reintenta nunca: el barrido de arranque busca OnlineID > 0, o
+        # sea saltea justo las filas que rompio. Resultado: esa dificultad no vuelve a
+        # submitear un score nunca mas, en silencio. Un mirror caido medio segundo no
+        # puede costar eso, asi que solo devolvemos 404 cuando el upstream realmente
+        # dijo 404; cualquier otra cosa es un problema nuestro y va como 502.
+        upstream = getattr(e, "response", None) if isinstance(e, HTTPStatusError) else None
+        if upstream is not None and upstream.status_code == 404:
+            raise HTTPException(status_code=404, detail="Beatmap not found")
+        raise HTTPException(status_code=502, detail="Beatmap lookup failed upstream")
 
     if beatmap is None:
         raise HTTPException(status_code=404, detail="Beatmap not found")

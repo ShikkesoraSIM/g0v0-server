@@ -810,6 +810,15 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="ToriiHalo è½®è¯¢ç®¡ç†å‘Šè­¦æ—¶ä½¿ç”¨çš„ç§æœ‰ token"),
         "åä½œå¼Šè®¾ç½®",
     ]
+    # torii: token propio para el canje de coins de discord. Va aparte del de
+    # mod-alerts a proposito: ese solo LEE, este MINTEA puntos, y no queremos que
+    # una credencial filtrada haga las dos cosas. Vacio => el endpoint devuelve 503
+    # y el canje simplemente no existe.
+    discord_redeem_token: Annotated[
+        str,
+        Field(default="", description="Token privado de ToriiHalo para canjear coins por puntos"),
+        "torii",
+    ]
     suspicious_alert_pp_threshold: Annotated[
         float,
         Field(default=1200.0, description="è¾¾åˆ°è¯¥ pp åŽç›´æŽ¥å‘Šè­¦"),

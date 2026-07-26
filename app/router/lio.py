@@ -320,7 +320,9 @@ async def _add_playlist_items(
     # beatmapset row too) before touching room_playlists.
     for item_data in items_raw:
         beatmap_id = item_data["beatmap_id"]
-        if not beatmap_id:
+        # `not beatmap_id` no alcanza: -1 es truthy en python, y el spectator
+        # manda -1 para mapas sin id online. Ver _ensure_beatmap_exists.
+        if not beatmap_id or int(beatmap_id) <= 0:
             continue
         resolved = await Beatmap.get_or_fetch(db, fetcher, bid=beatmap_id)
         if resolved is None:
@@ -436,6 +438,14 @@ async def _ensure_beatmap_exists(db: Database, fetcher, redis, beatmap_id: int) 
     Returns:
         Dict: 包含状态信息的响应
     """
+    # Torii: el spectator manda beatmap_id=-1 cuando el cliente esta jugando un
+    # mapa sin id online (una dificultad local, una copia hecha en el editor, o
+    # metadata online sin resolver). Esos scores no submitean nunca, asi que no
+    # tiene sentido salir a buscarlos: ppy devuelve 404 y nos llenaba el log de
+    # warnings (16 en un par de horas). Cortamos temprano y sin ruido.
+    if beatmap_id <= 0:
+        return {"success": False, "error": "beatmap has no online id", "beatmap_id": beatmap_id}
+
     try:
         # 1. 确保谱面元数据存在于数据库中
         from app.database.beatmap import Beatmap
