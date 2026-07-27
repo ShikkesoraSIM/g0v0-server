@@ -620,7 +620,8 @@
           "MG",
           "RP",
           "AS",
-          "TD"
+          "TD",
+          "HS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": false,
@@ -650,7 +651,8 @@
           "MG",
           "RP",
           "AS",
-          "TD"
+          "TD",
+          "HS"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": false,
@@ -1349,6 +1351,36 @@
           "AS"
         ],
         "RequiresConfiguration": true,
+        "UserPlayable": true,
+        "ValidForMultiplayer": true,
+        "ValidForFreestyleAsRequiredMod": true,
+        "ValidForMultiplayerAsFreeMod": true,
+        "AlwaysValidForSubmission": false
+      },
+      {
+        "Acronym": "HS",
+        "Name": "Hit Sounder",
+        "Description": "Hitsounds follow your fingers, not the notes. Mash freely.",
+        "Type": "Fun",
+        "Settings": [
+          {
+            "Name": "bank",
+            "Type": "string",
+            "Label": "Sample set",
+            "Description": "Which bank to mash with when there is no note nearby."
+          },
+          {
+            "Name": "use_note_samples",
+            "Type": "boolean",
+            "Label": "Keep note hitsounds",
+            "Description": "Off makes every press sound the same, ignoring what the mapper hitsounded."
+          }
+        ],
+        "IncompatibleMods": [
+          "AT",
+          "CN"
+        ],
+        "RequiresConfiguration": false,
         "UserPlayable": true,
         "ValidForMultiplayer": true,
         "ValidForFreestyleAsRequiredMod": true,

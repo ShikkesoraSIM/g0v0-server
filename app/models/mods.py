@@ -175,6 +175,16 @@ DEFAULT_RANKED_MODS = {
         # without further constraint (check=False) so the ranked-mods
         # validator's extra="forbid" stays satisfied.
         "PA": {"pitch_shift": {"check": False, "type": "number"}, "extended_limits": {"check": False, "type": "boolean"}},
+        # Hit Sounder: Torii fun mod (osu!std only) that fires hitsounds off the
+        # player's keypresses instead of off the notes, so you can mash through a
+        # break like taiko. It moves audio around and nothing else: hit windows,
+        # object timing and everything the difficulty calculator reads are
+        # untouched, so a play with HS is exactly as hard as one without it and
+        # it stays ranked. `bank` picks which sample set to mash with (an enum,
+        # serialised as a string) and `use_note_samples` toggles borrowing the
+        # mapper's hitsounds. Neither changes the play, so both are accepted
+        # without constraint.
+        "HS": {"bank": {"check": False, "type": "string"}, "use_note_samples": {"check": False, "type": "boolean"}},
         "TD": {},
         "BL": {},   # Blinds
         "NS": {"hidden_combo_count": {"check": False, "type": "number"}},
