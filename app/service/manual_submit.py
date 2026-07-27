@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import datetime
 import io
+import json
+import lzma
 import struct
 
 from sqlalchemy import func, text
@@ -76,6 +78,51 @@ def _read_str(f: io.BytesIO) -> str:
 
 _MODE_NAMES = ["osu", "taiko", "catch", "mania"]
 
+# Replays from this version on carry a LegacyReplaySoloScoreInfo blob appended
+# after the legacy body (see LegacyScoreEncoder in the client).
+_LAZER_BLOCK_MIN_VERSION = 30000001
+
+
+def _read_lazer_block(f: io.BytesIO, version: int) -> dict | None:
+    """The lazer score info appended to the end of the .osr, if there is one.
+
+    This block is the ONLY place a replay records what the mods really were.
+    The legacy header has a single DT bit and no way to say "1.15x", so a rate
+    changed play read from the header alone comes back as full 1.5x Double Time
+    and scores accordingly. Reading this is the difference between submitting
+    the play someone actually made and inventing a much harder one.
+    """
+    if version < _LAZER_BLOCK_MIN_VERSION:
+        return None
+
+    raw = f.read(4)
+
+    # Old or hand-made files can simply stop here, which is not an error.
+    if len(raw) < 4:
+        return None
+
+    length = struct.unpack("<i", raw)[0]
+
+    if length <= 0:
+        return None
+
+    blob = f.read(length)
+
+    if len(blob) < length:
+        return None
+
+    try:
+        # LZMA-alone, the same framing the client writes.
+        decoded = lzma.decompress(blob, format=lzma.FORMAT_ALONE).decode("ascii")
+        parsed = json.loads(decoded)
+    except (lzma.LZMAError, ValueError, UnicodeDecodeError) as exc:
+        # A replay we cannot read here still submits from the legacy header, so
+        # this is worth a note rather than a failure.
+        logger.warning("manual submit: could not read the lazer block in this replay (%s)", exc)
+        return None
+
+    return parsed if isinstance(parsed, dict) else None
+
 
 def parse_replay(data: bytes) -> dict:
     """Decode a .osr byte blob into the fields the submission path needs."""
@@ -96,6 +143,7 @@ def parse_replay(data: bytes) -> dict:
         replay_len = struct.unpack("<i", f.read(4))[0]
         f.seek(replay_len, 1)
         online_score_id = struct.unpack("<q", f.read(8))[0]
+        lazer_info = _read_lazer_block(f, version)
     except (IndexError, struct.error) as exc:
         raise ReplayParseError(f"not a valid .osr file: {exc}") from exc
 
@@ -123,6 +171,7 @@ def parse_replay(data: bytes) -> dict:
         played_at_utc=played_at,
         replay_len=replay_len,
         online_score_id=online_score_id,
+        lazer_info=lazer_info,
     )
 
 
@@ -148,12 +197,44 @@ _MODS_DISPLAY = {
 }
 
 
-def mods_to_acronyms(mods_bitmask: int) -> list[str]:
-    return [acr for bit, acr in _MODS_DISPLAY.items() if mods_bitmask & bit]
+def mods_to_acronyms(mods_bitmask: int, lazer_info: dict | None = None) -> list[str]:
+    """Human-readable mod list for the preview panel.
+
+    Shows the same thing the commit will actually submit, settings included, so
+    an admin approving "DT" is never approving a different play than the one on
+    screen. A rate is spelled out because it is the whole point: "DT 1.15x" and
+    "DT" are wildly different scores.
+    """
+    labels = []
+
+    for mod in osr_mods_to_lazer(mods_bitmask, lazer_info):
+        rate = (mod.get("settings") or {}).get("speed_change")
+        labels.append(f"{mod['acronym']} {rate}x" if rate is not None else mod["acronym"])
+
+    return labels
 
 
-def osr_mods_to_lazer(mods_bitmask: int) -> list[dict]:
-    """Convert the .osr int bitmask to lazer's APIMod list shape."""
+def osr_mods_to_lazer(mods_bitmask: int, lazer_info: dict | None = None) -> list[dict]:
+    """The mods the play was actually set with, in lazer's APIMod shape.
+
+    When the replay carries a lazer block its mod list wins outright: it is the
+    real thing, settings and all. The bitmask below is a lossy fallback for
+    genuinely legacy replays, and it CANNOT express a custom rate. Deriving
+    "DT" from it for a lazer replay means submitting a 1.15x play as a 1.5x one,
+    which is exactly how a 543pp score once landed as 1967pp.
+    """
+    if lazer_info is not None:
+        mods = lazer_info.get("mods")
+
+        if isinstance(mods, list):
+            cleaned = [m for m in mods if isinstance(m, dict) and isinstance(m.get("acronym"), str)]
+
+            # An empty list is a real answer here: it means the play was NoMod.
+            if len(cleaned) == len(mods):
+                return [{"acronym": m["acronym"], "settings": m.get("settings") or {}} for m in cleaned]
+
+        logger.warning("manual submit: the lazer block had an unreadable mod list, falling back to the legacy bits")
+
     acronyms = [acr for bit, acr in _OSR_MOD_TO_LAZER.items() if mods_bitmask & bit]
     # NC implies DT and PF implies SD; lazer's validator rejects the pair.
     if "NC" in acronyms and "DT" in acronyms:
@@ -252,7 +333,7 @@ def _build_submission_info(replay: dict, acc_pct: float) -> SoloScoreSubmissionI
         max_combo=replay["max_combo"],
         ruleset_id=replay["mode"],
         passed=True,  # a final score in hand means they finished
-        mods=osr_mods_to_lazer(replay["mods"]),
+        mods=osr_mods_to_lazer(replay["mods"], replay.get("lazer_info")),
         statistics=statistics,
         maximum_statistics=maximum_statistics,
     )
@@ -303,7 +384,7 @@ async def preview(session: AsyncSession, data: bytes, override_user_id: int | No
         "total_score": replay["total_score"],
         "max_combo": replay["max_combo"],
         "accuracy": round(acc_pct, 2),
-        "mods": mods_to_acronyms(replay["mods"]),
+        "mods": mods_to_acronyms(replay["mods"], replay.get("lazer_info")),
         "played_at": replay["played_at_utc"].isoformat(),
         "counts": {
             "great": replay["n300"], "ok": replay["n100"], "meh": replay["n50"],
@@ -369,7 +450,7 @@ async def commit(
     username = user.username
     bm_id = beatmap.id
     bm_version = beatmap.version
-    mods_acr = mods_to_acronyms(replay["mods"])
+    mods_acr = mods_to_acronyms(replay["mods"], replay.get("lazer_info"))
 
     # Backdate the token's created_at to when the play actually happened.
     # ScoreToken.ruleset_id is the string-backed GameMode enum (not the raw
@@ -403,6 +484,26 @@ async def commit(
     score_acc = float(score.accuracy)
     score_rank = str(score.rank)
     score_total = int(score.total_score)
+
+    # Keep the .osr. A manually submitted score used to land without one, which
+    # left it unwatchable, unrenderable and, worse, impossible to audit: when one
+    # of these turned out to have the wrong mods there was nothing left to check
+    # it against. Best-effort, because the score itself is already committed and
+    # a storage hiccup should not undo an accepted play.
+    try:
+        from app.dependencies.storage import get_storage_service
+
+        storage = get_storage_service()
+        replay_path = f"replays/{score_id}_{bm_id}_{user_id}_lazer_replay.osr"
+
+        await storage.write_file(replay_path, data, "application/x-osu-replay")
+
+        score.has_replay = True
+        await session.commit()
+
+        logger.info(f"manual submit: stored the replay for score {score_id} at {replay_path}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"manual submit: could not store the replay for score {score_id}: {exc}")
 
     try:
         from app.router.v2.score import _process_user
