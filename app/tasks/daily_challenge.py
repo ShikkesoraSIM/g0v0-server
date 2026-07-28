@@ -143,63 +143,101 @@ async def daily_challenge_job():
 async def process_daily_challenge_top():
     async with with_db() as session:
         now = utcnow()
-        room = (
+
+        # Se cierra la sala del challenge ANTERIOR, la que ya termino. Ordenar
+        # por ends_at no alcanza para elegirla: hay dias con dos salas, y el
+        # 2026-06-06 convivieron la del dia (termino 23:59) y una de prueba que
+        # termino 16:08, asi que un reinicio a las 17 de ese dia habria cerrado
+        # la equivocada y le cortaba la racha a todo el servidor. Se pide ademas
+        # que el dia de la sala ya haya terminado.
+        candidates = (
             await session.exec(
-                select(Room).where(
+                select(Room)
+                .where(
                     Room.category == RoomCategory.DAILY_CHALLENGE,
                     col(Room.ends_at) > now - timedelta(days=1),
                     col(Room.ends_at) < now,
                 )
+                .order_by(col(Room.ends_at).desc())
             )
-        ).first()
-        participated_users = []
-        if room is not None:
-            scores = (
-                await session.exec(
-                    select(PlaylistBestScore)
-                    .where(
-                        PlaylistBestScore.room_id == room.id,
-                        PlaylistBestScore.playlist_id == 0,
-                        col(PlaylistBestScore.score).has(col(Score.passed).is_(True)),
-                    )
-                    .order_by(col(PlaylistBestScore.total_score).desc())
-                )
-            ).all()
-            total_score_count = len(scores)
-            s = []
-            for i, score in enumerate(scores):
-                stats = await session.get(DailyChallengeStats, score.user_id)
-                if stats is None:  # not execute
-                    continue
-                if stats.last_update is None or stats.last_update.replace(tzinfo=UTC).date() != now.date():
-                    # Percentile by rank (1-based) over the passing field. ceil
-                    # keeps top10 a strict subset of top50 (so the counters stay
-                    # consistent) and means #1 always counts as top 10%.
-                    rank = i + 1
-                    if rank <= ceil(total_score_count * 0.1):
-                        stats.top_10p_placements += 1
-                    if rank <= ceil(total_score_count * 0.5):
-                        stats.top_50p_placements += 1
-                s.append(s)
-                participated_users.append(score.user_id)
-                stats.last_update = now
-            await session.commit()
-            del s
+        ).all()
+        room = next(
+            (r for r in candidates if r.ends_at is not None and r.ends_at.replace(tzinfo=UTC).date() < now.date()),
+            None,
+        )
+        if room is None:
+            return
 
-        # Solo rompemos rachas los dias que REALMENTE hubo daily challenge. Si el
-        # server no puso challenge (room is None) no tocamos a nadie: no es culpa
-        # del jugador. Antes esto zeroaba el streak de TODOS en cada dia sin
-        # challenge, castigando a la gente por un problema del server.
-        if room is not None:
-            user_ids = (await session.exec(select(User.id).where(col(User.id).not_in(participated_users)))).all()
-            for id in user_ids:
-                stats = await session.get(DailyChallengeStats, id)
-                if stats is None:  # not execute
-                    continue
-                stats.daily_streak_current = 0
-                if stats.last_weekly_streak and not are_same_weeks(
-                    stats.last_weekly_streak.replace(tzinfo=UTC), now - timedelta(days=7)
-                ):
-                    stats.weekly_streak_current = 0
+        # Esta tarea la dispara el cron de las 00:01 y TAMBIEN cada arranque del
+        # backend, porque main.py la llama en el lifespan. Un deploy al mediodia
+        # la volvia a correr con la sala de ayer y le cortaba la racha al que ya
+        # habia jugado hoy. Con esta llave cada sala se cierra una sola vez, sin
+        # importar cuantas veces reinicie el proceso.
+        redis = get_redis()
+        if not await redis.set(f"daily_challenge:top_done:{room.id}", 1, nx=True, ex=60 * 60 * 24 * 30):
+            return
+
+        room_day = room.ends_at.replace(tzinfo=UTC).date()
+
+        scores = (
+            await session.exec(
+                select(PlaylistBestScore)
+                .where(
+                    PlaylistBestScore.room_id == room.id,
+                    PlaylistBestScore.playlist_id == 0,
+                    col(PlaylistBestScore.score).has(col(Score.passed).is_(True)),
+                )
+                .order_by(col(PlaylistBestScore.total_score).desc())
+            )
+        ).all()
+        total_score_count = len(scores)
+        participated_users = []
+        for i, score in enumerate(scores):
+            stats = await session.get(DailyChallengeStats, score.user_id)
+            if stats is None:  # not execute
+                continue
+            if stats.last_update is None or stats.last_update.replace(tzinfo=UTC).date() != now.date():
+                # Percentile by rank (1-based) over the passing field. ceil
+                # keeps top10 a strict subset of top50 (so the counters stay
+                # consistent) and means #1 always counts as top 10%.
+                rank = i + 1
+                if rank <= ceil(total_score_count * 0.1):
+                    stats.top_10p_placements += 1
+                if rank <= ceil(total_score_count * 0.5):
+                    stats.top_50p_placements += 1
+            participated_users.append(score.user_id)
+            stats.last_update = now
+        await session.commit()
+
+        # Solo se rompen rachas los dias que REALMENTE hubo daily challenge. Si
+        # el server no puso challenge no se toca a nadie: no es culpa del
+        # jugador.
+        user_ids = (await session.exec(select(User.id).where(col(User.id).not_in(participated_users)))).all()
+        for id in user_ids:
+            stats = await session.get(DailyChallengeStats, id)
+            if stats is None:  # not execute
+                continue
+            if stats.last_day_streak and stats.last_day_streak.replace(tzinfo=UTC).date() > room_day:
+                # Ya completo un challenge POSTERIOR al que se esta cerrando.
+                # Como solo se cierran salas del dia anterior, eso solo puede ser
+                # el de hoy: ese credito es real y no se le saca. Pero la racha
+                # arranca en 1, porque el de room_day lo falto. Saltearlo con un
+                # continue le dejaria la racha vieja mas uno, o sea que el que
+                # venia de cinco, falta un dia y juega a las 00:00:30 quedaria en
+                # seis. Eso es inflar, y es tan malo como sacarsela.
+                stats.daily_streak_current = 1
+                if stats.daily_streak_best < 1:
+                    stats.daily_streak_best = 1
                 stats.last_update = now
-            await session.commit()
+                continue
+            stats.daily_streak_current = 0
+            # La condicion vieja zeroaba justo al que jugo ESTA semana: pedia que
+            # el ultimo play no cayera en la semana pasada y nunca miraba la
+            # actual. Se corta solo si no jugo en ninguna de las dos.
+            if stats.last_weekly_streak and not (
+                are_same_weeks(stats.last_weekly_streak.replace(tzinfo=UTC), now)
+                or are_same_weeks(stats.last_weekly_streak.replace(tzinfo=UTC), now - timedelta(days=7))
+            ):
+                stats.weekly_streak_current = 0
+            stats.last_update = now
+        await session.commit()
