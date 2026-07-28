@@ -741,6 +741,24 @@ async def oauth_token(
                 db, redis, user_id, token_id, ip_address, user_agent, web_uuid
             )
             logger.debug(f"New location login detected but email verification disabled, auto-verifying user {user_id}")
+
+            # torii: this branch used to return without logging anything, so a
+            # login from a device we have never seen left no trace at all. That
+            # is the single most useful event there is for moderation: it is the
+            # first login of a fresh account, and the one place the client hash
+            # gets recorded. With email verification off in production it meant
+            # every new account was invisible in the login log.
+            await LoginLogService.record_login(
+                db=db,
+                user_id=user_id,
+                request=request,
+                user_agent=raw_user_agent,
+                client_hash=normalized_version_hash or None,
+                client_label=client_label_for_log,
+                login_success=True,
+                login_method="password",
+                notes=f"New device (auto-verified) - IP: {ip_address}, country: {country_code}",
+            )
         else:
             # ä¸æ˜¯æ–°è®¾å¤‡ç™»å½•ï¼Œæ­£å¸¸ç™»å½•
             await LoginLogService.record_login(
