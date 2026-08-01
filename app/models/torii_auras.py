@@ -244,6 +244,23 @@ TORII_AURAS: dict[str, AuraDefinition] = {
         owning_groups=(),
         default_priority=200,
     ),
+    # 7/27, the osu! date. Handed out to everyone who was around on the day.
+    # Ownership-only like the founder variants: no group grants it, so it never
+    # auto-equips on anyone and never wins the default fallback (hence 200, not
+    # a low number — lower wins here). The only way in is a row in
+    # torii_owned_cosmetics, which is what the drop writes.
+    #
+    # display_name has to stay EXACTLY this: the client's picker reads the name
+    # and description from this catalog, while the art comes from the shipped
+    # zenith-727-blue.toriicosmetic. A mismatch shows one name over another's
+    # artwork.
+    "zenith-727-blue": AuraDefinition(
+        aura_id="zenith-727-blue",
+        display_name="Blue Zenith 727",
+        description="For everyone who was around on 7/27.",
+        owning_groups=(),
+        default_priority=200,
+    ),
 }
 
 
