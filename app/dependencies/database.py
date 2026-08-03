@@ -4,9 +4,11 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime
 import json
+import traceback
 from typing import Annotated
 
 from app.config import settings
+from app.log import logger
 
 from fastapi import Depends
 from pydantic import BaseModel
@@ -74,6 +76,7 @@ async def release_session(session: AsyncSession) -> None:
     (e.g. create_playlist_room returns a refreshed Room and the caller reads room.id,
     which a rollback would turn into a DetachedInstanceError).
     """
+    _warn_if_uncommitted(session)
     try:
         await asyncio.shield(session.close())
     except asyncio.CancelledError:
@@ -81,6 +84,47 @@ async def release_session(session: AsyncSession) -> None:
         # connection is still released; honor the cancellation.
         raise
     except Exception:
+        pass
+
+
+def _warn_if_uncommitted(session: AsyncSession) -> None:
+    """Shout when a session is closed with writes that were never committed.
+
+    This exists because of the 2026-08-03 outage. `get_rank()` was a read helper
+    that did a `session.add(RankHistory(...))` on WHOEVER called it, and every
+    caller was a response serialiser that never commits. So plain profile views
+    turned into uncommitted write transactions, InnoDB took the row locks, and
+    the connections went back to the pool still holding them — 175 of them, the
+    oldest asleep for 5 hours. Those locks blocked the spectator's
+    `UPDATE lazer_users SET is_online = 0` until it timed out inside
+    OnDisconnectedAsync, and players got dropped and reconnected in a loop.
+
+    Nothing anywhere reported it. The pool rolls the transaction back on return
+    so the data is never wrong, which is exactly why it stayed invisible for
+    months: the only symptom was lock contention somewhere else entirely.
+
+    A dropped write is always a bug: either the caller meant to commit, or it
+    should not have been writing on that path. Logging is enough — raising here
+    would turn a silent bug into a 500 on a path that is already unwinding.
+    """
+    try:
+        pendientes = len(session.new) + len(session.dirty) + len(session.deleted)
+        if pendientes == 0:
+            return
+
+        detalle = ", ".join(
+            sorted({type(o).__name__ for o in (*session.new, *session.dirty, *session.deleted)})
+        )
+        logger.error(
+            "Sesion cerrada con {n} escrituras sin commitear ({tipos}). Se pierden, y hasta que "
+            "se cierre la conexion mantienen locks en InnoDB. O falta el commit, o ese camino no "
+            "tendria que escribir. Traza:\n{traza}",
+            n=pendientes,
+            tipos=detalle,
+            traza="".join(traceback.format_stack(limit=12)),
+        )
+    except Exception:
+        # Un guard que rompe es peor que no tener guard.
         pass
 
 

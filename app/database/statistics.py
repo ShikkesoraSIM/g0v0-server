@@ -305,34 +305,24 @@ async def get_rank(session: AsyncSession, statistics: UserStatistics, country: s
             memo[cache_key] = None
         return None
 
-    if country is None:
-        today = utcnow().date()
-        # Daily snapshot for the profile rank graph. Insert it once per day; do
-        # NOT update it on every call. get_rank() runs on hot read paths (profile
-        # views, cache pre-warm) as well as score submits, so updating the shared
-        # "today" row from all of them serialised concurrent callers on one hot
-        # row and held its lock until each caller transaction committed, which is
-        # the source of the rank_history 1205 lock-wait-timeouts on the busiest
-        # users. The midnight batch (calculate_user_rank) finalises today's value;
-        # the live rank shown elsewhere is computed fresh above.
-        already = (
-            await session.exec(
-                select(RankHistory.id).where(
-                    RankHistory.user_id == statistics.user_id,
-                    RankHistory.mode == statistics.mode,
-                    RankHistory.date == today,
-                )
-            )
-        ).first()
-        if already is None:
-            session.add(
-                RankHistory(
-                    user_id=statistics.user_id,
-                    mode=statistics.mode,
-                    date=today,
-                    rank=rank,
-                )
-            )
+    # get_rank() DOES NOT WRITE. It used to insert the daily rank_history
+    # snapshot right here, and that is what took the server down on 2026-08-03.
+    #
+    # Every one of its callers is a response serialiser (global_rank,
+    # global_rank_percent, rank_change_since_30_days, country_rank on
+    # UserStatisticsModel). None of them owns a transaction and none of them
+    # commits, so the INSERT turned a read request into an uncommitted WRITE
+    # transaction: SQLAlchemy autoflushed it on the next query, InnoDB took the
+    # row locks, and the connection went back to the pool still holding them.
+    # 175 connections ended up asleep inside an open transaction, the oldest for
+    # 5 hours, and the row locks blocked the spectator's
+    # `UPDATE lazer_users SET is_online = 0` (DatabaseAccess.OfflineUser) until
+    # it hit the 50s lock timeout INSIDE OnDisconnectedAsync. Players got
+    # dropped and reconnected in a loop.
+    #
+    # A read path must not write. The daily snapshot belongs to the nightly
+    # batch (tasks/calculate_all_user_rank), which owns its own transaction and
+    # commits, and which covers every ranked active player anyway.
     if memo is not None:
         memo[cache_key] = rank
     return rank
