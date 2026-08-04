@@ -64,7 +64,7 @@ from .user import User, UserDict, UserModel
 
 from pydantic import BaseModel, field_serializer, field_validator
 from redis.asyncio import Redis
-from sqlalchemy import Boolean, Column, DateTime, Index, SmallInteger, TextClause, exists
+from sqlalchemy import Boolean, Column, DateTime, Index, SmallInteger, TextClause, and_, exists, or_
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import Mapped, aliased, joinedload
 from sqlalchemy.sql.elements import ColumnElement
@@ -714,15 +714,53 @@ class ScoreAround(SQLModel):
 
 
 async def get_best_id(session: AsyncSession, score_id: int) -> int | None:
-    rownum = (
-        func.row_number()
-        .over(partition_by=(col(BestScore.user_id), col(BestScore.gamemode)), order_by=col(BestScore.pp).desc())
-        .label("rn")
-    )
-    subq = select(BestScore, rownum).subquery()
-    stmt = select(subq.c.rn).where(subq.c.score_id == score_id)
-    result = await session.exec(stmt)
-    return result.one_or_none()
+    """Que numero de top play es este score para su dueño (1 = el mejor).
+
+    Antes esto era un ROW_NUMBER() OVER (PARTITION BY user_id, gamemode) sobre un
+    subquery SIN WHERE, y recien afuera se filtraba por score_id. O sea: se
+    calculaba la ventana sobre la tabla best_scores ENTERA, de todos los usuarios y
+    todos los modos, para quedarse con una sola fila. MySQL no puede empujar el
+    score_id adentro de la ventana, asi que no habia forma de que fuera barato.
+
+    Medido en prod sobre 8 dias: 1.077.933 llamadas, 57.211 segundos, o sea casi
+    16 horas de CPU y el 8% del tiempo de vida del server en esta funcion sola. Es
+    la consulta mas cara que tenemos por lejos, y como se llama una vez por cada
+    play que se muestra, era el motivo de que los perfiles cargaran lento.
+
+    La posicion de un score no necesita ninguna ventana: es cuantos scores mejores
+    tiene ese jugador en ese modo, mas uno. Con el indice
+    (user_id, gamemode, pp) eso es un rango de a lo sumo el largo de su top list.
+
+    El desempate por score_id ASC es explicito a proposito. El ORDER BY pp DESC
+    pelado no desempata, asi que ante dos pp identicos la ventana devolvia
+    cualquier cosa. Ahora el orden es total y determinista, y ES EL MISMO que usa
+    el camino batcheado de router/v2/user.py: los dos tienen que coincidir o el
+    mismo score sale con dos numeros distintos segun por donde se pida.
+    """
+    fila = (
+        await session.exec(
+            select(BestScore.user_id, BestScore.gamemode, BestScore.pp).where(BestScore.score_id == score_id)
+        )
+    ).first()
+    if fila is None:
+        return None
+
+    user_id, gamemode, pp = fila
+
+    mejores = (
+        await session.exec(
+            select(func.count()).where(
+                BestScore.user_id == user_id,
+                BestScore.gamemode == gamemode,
+                or_(
+                    col(BestScore.pp) > pp,
+                    and_(col(BestScore.pp) == pp, col(BestScore.score_id) < score_id),
+                ),
+            )
+        )
+    ).one()
+
+    return mejores + 1
 
 def _base_mode(mode: GameMode) -> GameMode:
     match mode:

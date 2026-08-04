@@ -5,6 +5,7 @@ from app.models.score import GameMode
 from .statistics import UserStatistics
 from .user import User
 
+from sqlalchemy import Index
 from sqlmodel import (
     BigInteger,
     Column,
@@ -24,6 +25,11 @@ if TYPE_CHECKING:
 
 class BestScore(SQLModel, table=True):
     __tablename__: str = "best_scores"
+    # (user_id, gamemode, pp) es el orden en que se pregunta SIEMPRE: "de este
+    # jugador, en este modo, cuantos scores tienen mas pp". Sin el compuesto los
+    # indices sueltos de user_id / gamemode obligan a leer todas las filas del
+    # jugador (o peor, del modo) y ordenarlas a mano. Ver get_best_id.
+    __table_args__ = (Index("idx_best_scores_user_mode_pp", "user_id", "gamemode", "pp"),)
     user_id: int = Field(sa_column=Column(BigInteger, ForeignKey("lazer_users.id"), index=True))
     score_id: int = Field(sa_column=Column(BigInteger, ForeignKey("scores.id"), primary_key=True))
     beatmap_id: int = Field(foreign_key="beatmaps.id", index=True)

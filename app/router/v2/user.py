@@ -635,7 +635,7 @@ async def get_user_beatmapsets(
                 (col(Beatmapset.is_local).is_(True) & (Beatmapset.user_id == user.id))
                 | (
                     col(Beatmapset.is_local).is_not(True)
-                    & (func.lower(col(Beatmapset.creator)) == user.username.lower())
+                    & (col(Beatmapset.creator) == user.username)
                 )
             )
             stmt = (
@@ -1025,7 +1025,13 @@ async def get_user_scores(
         score_ids = [score.id for score in scores]
         rownum = (
             func.row_number()
-            .over(partition_by=(col(BestScore.user_id), col(BestScore.gamemode)), order_by=col(BestScore.pp).desc())
+            # El desempate por score_id va explicito: sin el, dos pp identicos salian
+            # en cualquier orden y este camino podia no coincidir con get_best_id,
+            # que responde lo mismo por otra via.
+            .over(
+                partition_by=(col(BestScore.user_id), col(BestScore.gamemode)),
+                order_by=(col(BestScore.pp).desc(), col(BestScore.score_id).asc()),
+            )
             .label("rn")
         )
         ranked_subq = (

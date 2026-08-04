@@ -533,7 +533,7 @@ class UserModel(DatabaseModel[UserDict]):
             (col(Beatmapset.is_local).is_(True) & (Beatmapset.user_id == obj.id))
             | (
                 col(Beatmapset.is_local).is_not(True)
-                & (func.lower(col(Beatmapset.creator)) == obj.username.lower())
+                & (col(Beatmapset.creator) == obj.username)
             )
         )
 
@@ -557,7 +557,7 @@ class UserModel(DatabaseModel[UserDict]):
             (col(Beatmapset.is_local).is_(True) & (Beatmapset.user_id == obj.id))
             | (
                 col(Beatmapset.is_local).is_not(True)
-                & (func.lower(col(Beatmapset.creator)) == obj.username.lower())
+                & (col(Beatmapset.creator) == obj.username)
             )
         )
 
@@ -596,7 +596,7 @@ class UserModel(DatabaseModel[UserDict]):
             (col(Beatmapset.is_local).is_(True) & (Beatmapset.user_id == obj.id))
             | (
                 col(Beatmapset.is_local).is_not(True)
-                & (func.lower(col(Beatmapset.creator)) == obj.username.lower())
+                & (col(Beatmapset.creator) == obj.username)
             )
         )
 
@@ -622,7 +622,7 @@ class UserModel(DatabaseModel[UserDict]):
             (col(Beatmapset.is_local).is_(True) & (Beatmapset.user_id == obj.id))
             | (
                 col(Beatmapset.is_local).is_not(True)
-                & (func.lower(col(Beatmapset.creator)) == obj.username.lower())
+                & (col(Beatmapset.creator) == obj.username)
             )
         )
 
