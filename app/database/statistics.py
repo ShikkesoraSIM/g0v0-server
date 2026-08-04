@@ -10,7 +10,7 @@ from ._base import DatabaseModel, included, ondemand
 from .rank_history import RankHistory
 
 from pydantic import field_validator
-from sqlalchemy import DateTime, Index
+from sqlalchemy import DateTime, Index, and_, or_
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlmodel import (
     BigInteger,
@@ -230,7 +230,13 @@ class UserStatistics(AsyncAttrs, UserStatisticsModel, table=True):
 
     # Serves the active-filter predicate (mode == X AND last_played >= cutoff)
     # as an index range, so get_rank() never has to touch the scores table.
-    __table_args__ = (Index("idx_user_stats_mode_lastplayed", "mode", "last_played"),)
+    __table_args__ = (
+        Index("idx_user_stats_mode_lastplayed", "mode", "last_played"),
+        # El ranking pregunta "de este modo, cuantos tienen mas pp que X".
+        # Con el indice de pp suelto hay que filtrar el modo despues; con el
+        # compuesto es un rango directo. Ver get_rank.
+        Index("idx_user_stats_mode_pp", "mode", "pp"),
+    )
 
     user: "User" = Relationship(back_populates="statistics")
 
@@ -276,34 +282,65 @@ async def get_rank(session: AsyncSession, statistics: UserStatistics, country: s
     if memo is not None and cache_key in memo:
         return memo[cache_key]
 
-    query = select(
-        UserStatistics.user_id,
-        func.row_number().over(order_by=col(UserStatistics.pp).desc()).label("rank"),
-    ).where(
-        UserStatistics.mode == statistics.mode,
-        UserStatistics.pp > 0,
-        col(UserStatistics.is_ranked).is_(True),
-        col(UserStatistics.user).has(is_active=True),
-        ~User.is_restricted_query(col(UserStatistics.user_id)),
-        # Active-only ranking: drop players with no play in this mode within
-        # ACTIVE_DAYS. row_number() above then renumbers densely over the
-        # remaining set, so a 30d+ inactive returns None here (unranked) and
-        # everyone below them moves up. They re-enter when their next play
-        # stamps last_played. NULL last_played (never played) is also excluded.
-        col(UserStatistics.last_played) >= active_cutoff(),
-    )
+    # Esto era un ROW_NUMBER() OVER (ORDER BY pp DESC) sobre TODOS los rankeados
+    # del modo, del que despues se sacaba una sola fila. O sea que para saber el
+    # puesto de UNO se ordenaba a los 10.786. Medido en prod: 1057 llamadas a
+    # 1,1 ms en una tanda de cargas de perfil. Mismo patron que get_best_id.
+    #
+    # El puesto es cuantos elegibles tienen mas pp, mas uno. Con el indice
+    # (mode, pp) es un rango contado, no un orden completo.
+    def elegibles():
+        """Los filtros del ranking, uno solo para las dos consultas de abajo: si
+        se separan, el "estoy rankeado" y el "cuantos hay arriba" pueden dejar de
+        coincidir y el puesto sale mal."""
+        cond = [
+            UserStatistics.mode == statistics.mode,
+            UserStatistics.pp > 0,
+            col(UserStatistics.is_ranked).is_(True),
+            col(UserStatistics.user).has(is_active=True),
+            ~User.is_restricted_query(col(UserStatistics.user_id)),
+            # Active-only ranking: drop players with no play in this mode within
+            # ACTIVE_DAYS, so the numbering closes over the remaining set and a
+            # 30d+ inactive comes back as None (unranked) instead of a stale
+            # position. They re-enter when their next play stamps last_played.
+            # NULL last_played (never played) is also excluded.
+            col(UserStatistics.last_played) >= active_cutoff(),
+        ]
+        if country is not None:
+            cond.append(col(UserStatistics.user).has(country_code=country))
+        return cond
 
-    if country is not None:
-        query = query.join(User).where(User.country_code == country)
-
-    subq = query.subquery()
-    result = await session.exec(select(subq.c.rank).where(subq.c.user_id == statistics.user_id))
-
-    rank = result.first()
-    if rank is None:
+    # Primero: ¿este jugador entra en el ranking? La ventana vieja contestaba esto
+    # sola (si no entraba, el subquery no devolvia fila y salia None), y ese None
+    # es lo que hace que el cliente lo muestre como no rankeado. Con un COUNT hay
+    # que preguntarlo aparte, porque un COUNT siempre devuelve un numero.
+    entra = (
+        await session.exec(
+            select(func.count()).where(*elegibles(), UserStatistics.user_id == statistics.user_id)
+        )
+    ).one()
+    if not entra:
         if memo is not None:
             memo[cache_key] = None
         return None
+
+    mi_pp = float(statistics.pp or 0)
+    # El desempate por user_id va explicito: el ORDER BY pp DESC pelado no
+    # desempataba, asi que dos pp identicos salian en cualquier orden.
+    rank = (
+        await session.exec(
+            select(func.count()).where(
+                *elegibles(),
+                or_(
+                    col(UserStatistics.pp) > mi_pp,
+                    and_(
+                        col(UserStatistics.pp) == mi_pp,
+                        col(UserStatistics.user_id) < statistics.user_id,
+                    ),
+                ),
+            )
+        )
+    ).one() + 1
 
     # get_rank() DOES NOT WRITE. It used to insert the daily rank_history
     # snapshot right here, and that is what took the server down on 2026-08-03.
