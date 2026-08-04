@@ -58,6 +58,43 @@ async def _collector_loop() -> None:
         await asyncio.sleep(_COLLECT_INTERVAL)
 
 
+_TOTALES_TTL = 300  # segundos
+_totales_cache: tuple[float, tuple[int, int, int, int, float]] | None = None
+
+
+async def _totales(session) -> tuple[int, int, int, int, float]:
+    """Los totales de la portada de estado, cacheados 5 minutos.
+
+    Son cinco agregados sobre tablas enteras: COUNT de las 216 mil filas de
+    `scores`, COUNT de las 89 mil de `beatmapsets`, y dos SUM sobre
+    lazer_user_statistics. Se recalculaban en CADA muestra del colector.
+
+    Medido: el COUNT de scores solo tardaba 18 ms y el de beatmapsets 8,9 ms, y
+    entre los tres se comian casi 5 segundos de base cada 8 minutos. Era lo mas
+    caro de todo el server, para un widget de estado. Y encima hay mas de un
+    colector vivo a la vez (uno por worker), asi que se multiplicaba.
+
+    Cinco minutos de desactualizacion en un contador de "total de scores del
+    server" no lo nota nadie. Lo que si tiene que seguir siendo del momento es lo
+    que esta abajo en _collect_sample: la gente online, los scores del ultimo
+    minuto y las conexiones de la base. Eso no se toca.
+    """
+    global _totales_cache
+
+    ahora = time.monotonic()
+    if _totales_cache is not None and ahora - _totales_cache[0] < _TOTALES_TTL:
+        return _totales_cache[1]
+
+    total_users = (await session.exec(select(func.count()).select_from(User))).one()
+    total_scores = (await session.exec(select(func.count()).select_from(Score))).one()
+    total_plays = int((await session.exec(select(func.sum(UserStatistics.play_count)))).one() or 0)
+    total_beatmapsets = (await session.exec(select(func.count()).select_from(Beatmapset))).one()
+    total_pp = float((await session.exec(select(func.sum(UserStatistics.pp)))).one() or 0)
+
+    _totales_cache = (ahora, (total_users, total_scores, total_plays, total_beatmapsets, total_pp))
+    return _totales_cache[1]
+
+
 async def _collect_sample() -> dict:
     redis = get_redis()
 
@@ -74,17 +111,7 @@ async def _collect_sample() -> dict:
 
     # sequential DB queries (one session)
     async with AsyncSession(engine) as session:
-        total_users = (await session.exec(select(func.count()).select_from(User))).one()
-        total_scores = (await session.exec(select(func.count()).select_from(Score))).one()
-        total_plays = int((await session.exec(
-            select(func.sum(UserStatistics.play_count))
-        )).one() or 0)
-        total_beatmapsets = (await session.exec(
-            select(func.count()).select_from(Beatmapset)
-        )).one()
-        total_pp = float((await session.exec(
-            select(func.sum(UserStatistics.pp))
-        )).one() or 0)
+        total_users, total_scores, total_plays, total_beatmapsets, total_pp = await _totales(session)
 
         # recent scores in last 60 s
         now_utc = datetime.now(timezone.utc)
