@@ -498,51 +498,84 @@ class BeatmapRawFetcher(BaseFetcher):
             return None
 
     async def get_beatmap_raw(self, beatmap_id: int) -> str:
-        future: asyncio.Future[str] | None = None
+        """Un solo fetch en vuelo por beatmap.
 
-        # Check if there is already an in-flight request for this beatmap.
-        async with self._request_lock:
-            if beatmap_id in self._pending_requests:
-                logger.debug(f"Beatmap {beatmap_id} request already in progress, waiting...")
-                future = self._pending_requests[beatmap_id]
+        REGLA: adentro de self._request_lock NO se espera NADA.
 
-        # If another coroutine already started this request, await it.
-        if future is not None:
+        Ese lock es UNO SOLO para todo el proceso (self._request_lock del __init__,
+        y el Fetcher es un singleton de modulo: app/dependencies/fetcher.py). La
+        version vieja tenia un `return await future` ADENTRO del
+        `async with self._request_lock`: una corrutina se quedaba con el lock global
+        colgada de una bajada de red ajena, y el `finally` del dueño necesita ESE
+        MISMO lock para limpiar. Se trababan mutuamente y no salian nunca, y de
+        paso congelaban todos los get_beatmap_raw del server, incluido el que
+        cuelga del calculo de pp del submit de scores.
+
+        A ese bloque solo se llegaba si primero fallaba la espera de mas arriba. O
+        sea que hacia falta que un fetch fallara para entrar. El 3 de agosto los
+        tres mirrors se cayeron a la vez (old.ppy.sh, osu.direct y b.ppy.sh en el
+        mismo minuto) y eso fue el gatillo.
+
+        Los otros dos arreglos, mas chicos:
+        - el `finally` hacia `pop(beatmap_id, None)` a secas, o sea que si dos
+          corrutinas se cruzaban se llevaba el future de la otra y la dejaba sin
+          registrar. Ahora borra SOLO el propio.
+        - si el fetch en vuelo falla, ahora falla para todos los que lo esperaban
+          en vez de que cada uno reintente. _fetch_beatmap_raw ya prueba todos los
+          mirrors por dentro: si fallo, fallaron todos, y reintentar es pegarle mas
+          fuerte a un mirror que ya se esta cayendo. Ese reintento era justo la
+          puerta de entrada al bloque roto.
+        """
+        propio: asyncio.Future[str] | None = None
+
+        # Dos vueltas como mucho: la segunda es solo para el caso de engancharse a
+        # un dueño que se cancela justo. Mas que eso es girar al pedo.
+        for _ in range(2):
+            async with self._request_lock:
+                en_vuelo = self._pending_requests.get(beatmap_id)
+                if en_vuelo is None:
+                    propio = asyncio.get_running_loop().create_future()
+                    # Si nadie lo espera y termina en excepcion, asyncio loguea
+                    # "Future exception was never retrieved". Este callback la
+                    # consume para que no ensucie el log.
+                    propio.add_done_callback(lambda f: f.cancelled() or f.exception())
+                    self._pending_requests[beatmap_id] = propio
+                    break
+
+            # Esperar SIEMPRE afuera del lock. El shield es para distinguir quien se
+            # cancelo: sin el, si nos cancelan a NOSOTROS tambien matariamos el
+            # fetch del dueño, que puede tener otros esperandolo.
+            logger.debug(f"Beatmap {beatmap_id} request already in progress, waiting...")
             try:
-                return await future
-            except Exception as e:
-                logger.warning(f"Waiting for beatmap {beatmap_id} failed: {e}")
-                future = None
+                return await asyncio.shield(en_vuelo)
+            except asyncio.CancelledError:
+                if not en_vuelo.cancelled():
+                    raise  # la cancelacion es nuestra, no del dueño
+                logger.debug(f"Beatmap {beatmap_id}: el dueño se cancelo, doy otra vuelta")
 
-        # Create a new in-flight request future.
-        async with self._request_lock:
-            if beatmap_id in self._pending_requests:
-                future = self._pending_requests[beatmap_id]
-                if future is not None:
-                    try:
-                        return await future
-                    except Exception as e:
-                        logger.debug(f"Concurrent request for beatmap {beatmap_id} failed: {e}")
-
-            future = asyncio.get_event_loop().create_future()
-            self._pending_requests[beatmap_id] = future
+        if propio is None:
+            # Dos veces seguidas nos enganchamos a dueños que se cancelaron. Lo
+            # hacemos nosotros sin registrarnos, que es peor para el dedup pero
+            # termina.
+            return await self._fetch_beatmap_raw(beatmap_id)
 
         try:
-            result = await self._fetch_beatmap_raw(beatmap_id)
-            if not future.done():
-                future.set_result(result)
-            return result
-        except asyncio.CancelledError:
-            if not future.done():
-                future.cancel()
+            resultado = await self._fetch_beatmap_raw(beatmap_id)
+            if not propio.done():
+                propio.set_result(resultado)
+            return resultado
+        except BaseException as e:
+            if not propio.done():
+                if isinstance(e, asyncio.CancelledError):
+                    propio.cancel()
+                else:
+                    propio.set_exception(e)
             raise
-        except Exception as e:
-            if not future.done():
-                future.set_exception(e)
-            return await future
         finally:
             async with self._request_lock:
-                self._pending_requests.pop(beatmap_id, None)
+                # Solo el propio: ver el docstring.
+                if self._pending_requests.get(beatmap_id) is propio:
+                    del self._pending_requests[beatmap_id]
 
     async def _fetch_beatmap_raw(self, beatmap_id: int) -> str:
         last_error = None

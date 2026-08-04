@@ -38,6 +38,14 @@ class ScoreToken(ScoreTokenBase, table=True):
     __table_args__ = (
         Index("idx_user_playlist", "user_id", "playlist_item_id"),
         Index("idx_playlist_room", "playlist_item_id", "room_id"),
+        # score_id no tenia NINGUN indice, y se lo consulta de dos formas:
+        #   WHERE score_id IS NULL AND created_at >= ? ORDER BY created_at DESC
+        #   WHERE score_id = ?
+        # Las dos escaneaban las 370 mil filas enteras: 82 ms por llamada y
+        # 366.747 filas leidas para devolver un puñado. Con el compuesto la
+        # primera pasa a un rango de 4 filas (medido con EXPLAIN en prod) y la
+        # segunda a un lookup directo, porque score_id va primero.
+        Index("idx_score_tokens_scoreid_created", "score_id", "created_at"),
     )
 
     user: Mapped[User] = Relationship()
