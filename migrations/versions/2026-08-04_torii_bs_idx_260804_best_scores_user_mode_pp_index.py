@@ -15,9 +15,14 @@ filas, asi que crear el indice es instantaneo.
 
 Idempotente: si ya se creo en caliente en prod, aca no hace nada.
 
-Revision ID: e5f6a7b8c9d0
+Revision ID: torii_bs_idx_260804
 Revises: d1e2f3a4b5c6
 Create Date: 2026-08-04
+
+OJO con el id: NO inventar uno "que parezca" del estilo abcdef123456. e5f6a7b8c9d0 ya
+existia desde junio (add_profile_media_reviews) y duplicarlo le armo un ciclo al grafo
+de alembic: el server no bootea y queda en restart loop. Antes de elegir uno,
+grepear que no exista.
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "e5f6a7b8c9d0"
+revision: str = "torii_bs_idx_260804"
 down_revision: str | Sequence[str] | None = "d1e2f3a4b5c6"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
