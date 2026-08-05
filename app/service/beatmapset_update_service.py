@@ -520,7 +520,13 @@ class BeatmapsetUpdateService:
                     logger.opt(colors=True).info(
                         f"<g>[{beatmap['beatmapset_id']}]</g> adding beatmap <blue>{beatmap['id']}</blue>"
                     )
-                    await Beatmap.from_resp_no_save(session, beatmap)  # pyright: ignore[reportArgumentType]
+                    # from_resp y no from_resp_no_save: la segunda arma el objeto y nada mas, no lo
+                    # agrega a la sesion ni commitea, asi que el resultado se caia al piso y la
+                    # diff nueva no se guardaba nunca. Es la otra mitad del entierro: la
+                    # autorreparacion de _missing_from_db la detectaba bien y despues no pasaba
+                    # nada. from_resp inserta si no esta y actualiza si ya estaba, asi que tambien
+                    # es idempotente si el mismo id llega dos veces.
+                    await Beatmap.from_resp(session, beatmap)  # pyright: ignore[reportArgumentType]
                 else:
                     beatmap = beatmaps.get(change.beatmap_id)
                     if not beatmap:
@@ -559,6 +565,18 @@ class BeatmapsetUpdateService:
                                 f"<g>[beatmap: {change.beatmap_id}]</g> MAP_DELETED received "
                                 f"but beatmap not found in database; deletion skipped"
                             )
+                        else:
+                            # Cambio de una diff que no tenemos: se inserta igual.
+                            #
+                            # Si no, se pierde. _missing_from_db no la puede rescatar porque el
+                            # dedup de mas arriba ve que el id ya esta en changed_beatmaps (como
+                            # UPDATED o STATUS_CHANGED) y no le agrega el MAP_ADDED.
+                            logger.opt(colors=True).info(
+                                f"<g>[beatmap: {change.beatmap_id}]</g> cambio de una diff que no "
+                                f"estaba en la base, insertandola"
+                            )
+                            session.add(new_db_beatmap)
+                            await session.commit()
                     if change.type != BeatmapChangeType.STATUS_CHANGED:
                         # Decide whether to wipe player best-scores on this
                         # beatmap. Wipe is appropriate when:
