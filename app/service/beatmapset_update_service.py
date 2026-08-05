@@ -360,8 +360,46 @@ class BeatmapsetUpdateService:
                 return
         processing = ProcessingBeatmapset(beatmapset, record)
         changed_beatmaps = processing.changed_beatmaps
+
+        # Auto-reparacion: lo que decimos tener pero no esta en la tabla.
+        #
+        # changed_beatmaps compara la API contra record.beatmaps, o sea contra NUESTRA PROPIA
+        # ANOTACION. Si alguna vez guardamos la anotacion sin llegar a materializar las filas, las
+        # dos fuentes quedan derivadas y esta comparacion no lo puede ver nunca: dice "no cambio
+        # nada", sube consecutive_no_change, el backoff crece, y el set queda enterrado. Al
+        # escribir esto habia 807 sets asi, con 1504 diffs perdidas, y los peores con la anotacion
+        # completa y CERO filas en la tabla.
+        #
+        # Mirar la tabla de verdad cierra ese agujero y ademas repara solo lo que ya derivo.
+        for beatmap_id in await self._missing_from_db(session, record.beatmapset_id, beatmapset["beatmaps"]):
+            if not any(c.beatmap_id == beatmap_id for c in changed_beatmaps):
+                changed_beatmaps.append(ChangedBeatmap(beatmap_id, BeatmapChangeType.MAP_ADDED))
+
         changed = processing.beatmapset_changed or changed_beatmaps
         if changed:
+            # Primero el trabajo, DESPUES la anotacion.
+            #
+            # Esto iba al reves: se guardaba record.beatmaps y consecutive_no_change = 0 y recien
+            # ahi se encolaban las tareas de fondo que insertan las filas. Si esas fallaban (error
+            # de red, excepcion, o el server reiniciando justo), quedaba anotado que ya sabiamos de
+            # unas diffs que nunca guardamos, y por lo de arriba no habia forma de volver a
+            # detectarlo. Es la misma familia que el snapshot de rank_history: guardar el resultado
+            # de un trabajo que todavia no paso.
+            #
+            # Se esperan en vez de encolarse. El sync es un job de fondo, asi que tardar un poco
+            # mas no le molesta a nadie; y para el camino immediate (refrescar un set porque
+            # alguien lo pidio) esperar es justamente lo que queremos.
+            try:
+                await self._process_changed_beatmaps(changed_beatmaps, beatmapset["beatmaps"])
+                await self._process_changed_beatmapset(beatmapset)
+            except Exception as e:
+                logger.opt(colors=True).exception(
+                    f"<g>[{record.beatmapset_id}]</g> fallo al materializar los cambios: {e}. "
+                    f"NO se marca como sincronizado, se reintenta despues."
+                )
+                record.next_sync_time = utcnow() + timedelta(seconds=MIN_DELTA)
+                return
+
             record.beatmaps = [
                 SavedBeatmapMeta(
                     beatmap_id=bm["id"],
@@ -373,16 +411,6 @@ class BeatmapsetUpdateService:
             ]
             record.beatmap_status = BeatmapRankStatus(beatmapset["ranked"])
             record.consecutive_no_change = 0
-
-            bg_tasks.add_task(
-                self._process_changed_beatmaps,
-                changed_beatmaps,
-                beatmapset["beatmaps"],
-            )
-            bg_tasks.add_task(
-                self._process_changed_beatmapset,
-                beatmapset,
-            )
         else:
             record.consecutive_no_change += 1
 
@@ -409,6 +437,26 @@ class BeatmapsetUpdateService:
             for record in records:
                 await self.sync(record, session)
             await session.commit()
+
+    async def _missing_from_db(
+        self, session: AsyncSession, beatmapset_id: int, remote_beatmaps: list
+    ) -> list[int]:
+        """De las diffs que la API dice que tiene este set, cuales NO estan en la tabla beatmaps."""
+        remote_ids = [bm["id"] for bm in remote_beatmaps]
+        if not remote_ids:
+            return []
+
+        existentes = set(
+            (
+                await session.exec(
+                    select(Beatmap.id).where(
+                        col(Beatmap.beatmapset_id) == beatmapset_id,
+                        col(Beatmap.id).in_(remote_ids),
+                    )
+                )
+            ).all()
+        )
+        return [bid for bid in remote_ids if bid not in existentes]
 
     async def _process_changed_beatmapset(self, beatmapset: EnsuredBeatmapset):
         async with with_db() as session:
