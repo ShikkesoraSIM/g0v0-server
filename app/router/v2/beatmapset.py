@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import zipfile
 import re
@@ -507,6 +508,30 @@ async def _cached_osz_is_complete(storage, cache_path: str, beatmapset_id: int) 
         return True
 
 
+async def _payload_has_all_known_diffs(payload: bytes, beatmapset_id: int) -> bool:
+    """¿El .osz recien bajado trae al menos tantas diffs como sabemos que el set tiene?
+
+    Mismo criterio que _cached_osz_is_complete (cantidad y no nombres, y asimetrico), pero sobre
+    los bytes en memoria, antes de escribirlos al cache.
+    """
+    try:
+        async with with_db() as db:
+            en_base = (
+                await db.exec(
+                    select(func.count()).where(col(Beatmap.beatmapset_id) == beatmapset_id)
+                )
+            ).one()
+        if not en_base:
+            return True
+
+        with zipfile.ZipFile(io.BytesIO(payload)) as z:
+            en_zip = sum(1 for n in z.namelist() if n.lower().endswith(".osu"))
+        return en_zip >= en_base
+    except Exception as e:
+        logger.warning(f"[beatmap dl] no se pudo chequear el payload de {beatmapset_id}: {e}")
+        return True
+
+
 async def _close_response(resp: httpx.Response | None) -> None:
     """Best-effort cleanup of a streaming httpx response and its owned client."""
     if resp is None:
@@ -910,6 +935,19 @@ async def download_beatmapset(
                         f"[beatmap dl] NOT caching {beatmapset_id} from {chosen_label}: "
                         f"payload failed osz integrity check ({total} bytes, "
                         f"content-length={content_length})"
+                    )
+                elif not await _payload_has_all_known_diffs(payload, beatmapset_id):
+                    # Se sirve igual (algo es mejor que nada) pero NO se cachea, asi que el
+                    # proximo pedido vuelve a preguntarle a los mirrors en vez de quedarse pegado
+                    # a la version corta durante dias.
+                    #
+                    # Los mirrors no se actualizan todos a la vez: para el set 2593652, medido,
+                    # osu.direct y nerinyan tenian las 8 diffs mientras otro todavia servia 5.
+                    # Sin este chequeo alcanzaba con que el primero de la cadena fuera el atrasado
+                    # para volver a guardar el archivo viejo apenas lo purgabamos.
+                    logger.warning(
+                        f"[beatmap dl] NO se cachea {beatmapset_id} de {chosen_label}: "
+                        f"le faltan dificultades respecto de lo que sabemos del set"
                     )
                 else:
                     async def _flush_cache():
