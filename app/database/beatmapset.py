@@ -36,6 +36,61 @@ BeatmapCovers = TypedDict(
     },
 )
 
+COVER_VARIANTES = ("cover", "card", "list", "slimcover")
+
+
+def _otra_resolucion(url: str, *, retina: bool) -> str | None:
+    """La misma cover en la otra resolucion. Devuelve None si la url no tiene nombre de archivo."""
+    base, sep, query = url.partition("?")
+    corte = base.rfind(".")
+    if corte <= base.rfind("/"):
+        return None
+
+    raiz, ext = base[:corte], base[corte:]
+
+    if retina:
+        return url if raiz.endswith("@2x") else f"{raiz}@2x{ext}{sep}{query}"
+
+    return f"{raiz[:-3]}{ext}{sep}{query}" if raiz.endswith("@2x") else url
+
+
+def completar_covers(covers: Any) -> Any:
+    """
+    Rellena las variantes de cover que falten.
+
+    lazer lee las @2x y no las chicas: en BeatmapSetOnlineCovers, Cover mapea a "cover@2x", Card a
+    "card@2x" y List a "list@2x". Si esa clave no viene, OnlineBeatmapSetCover se queda sin url y
+    dibuja el cuadro gris.
+
+    Los mirrors de los que sacamos metadata mandan solo las cuatro chicas, asi que la mitad de los
+    sets de la base quedaron sin foto adentro del juego: el cartel del daily challenge, las cards,
+    cualquier lado que dibuje una portada.
+
+    assets.ppy.sh sirve las dos resoluciones en la misma ruta, cambia el nombre del archivo nomas
+    (cover.jpg / cover@2x.jpg), y el ?query de cache-busting es el mismo. Asi que la que falta se
+    deduce de la que hay en vez de salir a pedirla de nuevo, y con eso se arreglan tambien todas
+    las filas viejas sin tocar la base.
+    """
+    if not isinstance(covers, dict) or not covers:
+        return covers
+
+    completo = dict(covers)
+
+    for nombre in COVER_VARIANTES:
+        chica = completo.get(nombre)
+        retina = completo.get(f"{nombre}@2x")
+
+        if not retina and chica:
+            derivada = _otra_resolucion(chica, retina=True)
+            if derivada:
+                completo[f"{nombre}@2x"] = derivada
+        elif not chica and retina:
+            derivada = _otra_resolucion(retina, retina=False)
+            if derivada:
+                completo[nombre] = derivada
+
+    return completo
+
 
 class BeatmapHype(BaseModel):
     current: int
@@ -166,6 +221,10 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         )
         if not beatmapset_resp.get("covers"):
             beatmapset_resp["covers"] = cls._fallback_covers()
+        else:
+            # transform arma un dict a mano, no pasa por los validators del modelo, asi que las
+            # @2x hay que completarlas aca tambien. Ver completar_covers().
+            beatmapset_resp["covers"] = completar_covers(beatmapset_resp["covers"])
         return beatmapset_resp
 
     @field_validator("last_updated", "ranked_date", "submitted_date", mode="before")
@@ -185,7 +244,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
     @classmethod
     def _normalize_covers(cls, v):
         if v:
-            return v
+            return completar_covers(v)
 
         return cls._fallback_covers()
 
