@@ -465,6 +465,24 @@ class BeatmapsetUpdateService:
             if db_beatmapset:
                 await session.merge(new_beatmapset)
             await get_beatmapset_cache_service(get_redis()).invalidate_beatmapset_cache(beatmapset["id"])
+
+            # Y el .osz cacheado tambien, que si no seguimos sirviendo el zip viejo.
+            #
+            # La descarga tiene un cache en cache/beatmapsets/{id}.osz que solo se validaba como
+            # "es un zip sano", nunca como "es el zip correcto". Un set al que le agregan diffs se
+            # quedaba servido en su version vieja para siempre: el que entraba a un daily challenge
+            # se bajaba un archivo SIN la dificultad del challenge y no lo podia jugar.
+            try:
+                cache_path = f"cache/beatmapsets/{beatmapset['id']}.osz"
+                storage = get_storage_service()
+                if await storage.is_exists(cache_path):
+                    await storage.delete_file(cache_path)
+                    logger.opt(colors=True).info(
+                        f"<g>[{beatmapset['id']}]</g> el set cambio: se purga el .osz cacheado"
+                    )
+            except Exception as e:
+                logger.warning(f"no se pudo purgar el .osz cacheado de {beatmapset['id']}: {e}")
+
             await session.commit()
 
     async def _process_changed_beatmaps(self, changed: list[ChangedBeatmap], beatmaps_list: list[EnsuredBeatmap]):

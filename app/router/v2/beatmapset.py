@@ -1,5 +1,6 @@
 import asyncio
 import os
+import zipfile
 import re
 from typing import Annotated, Literal
 from urllib.parse import parse_qs
@@ -41,7 +42,7 @@ from fastapi import (
 from fastapi.responses import RedirectResponse
 from httpx import HTTPError
 from sqlalchemy import or_
-from sqlmodel import col, select
+from sqlmodel import col, func, select
 
 import httpx
 import logging
@@ -454,6 +455,58 @@ async def _cached_osz_looks_valid(storage, cache_path: str) -> bool:
         return True
 
 
+async def _cached_osz_is_complete(storage, cache_path: str, beatmapset_id: int) -> bool:
+    """El .osz cacheado, ¿trae al menos tantas dificultades como sabemos que el set tiene?
+
+    El validador de arriba solo pregunta "¿es un zip sano?", nunca "¿es el zip correcto?". Con eso
+    un set al que el mapper le agrega diffs se queda servido en su version vieja para siempre:
+    paso con "osu! MEGAMIX 2", cacheado el 29 de julio con 5 diffs cuando el set ya tenia 8, y el
+    que entraba al daily challenge se bajaba un archivo SIN la dificultad del challenge.
+
+    Se compara la CANTIDAD y no los nombres, aunque los nombres parezcan mas precisos. Los
+    mappers renombran diffs (en ese mismo set, "Memories" paso a ser "[4K] Memories"), asi que
+    por nombre cualquier renombre daria "falta una"; y si el mirror todavia sirve la version
+    vieja, se entra en un loop de bajar y descartar en cada pedido. La cantidad no se mueve con
+    un renombre y detecta igual el caso que importa, que es que falten diffs.
+
+    Asimetrico a proposito: solo se descarta si el zip trae MENOS. Un zip con diffs de mas es
+    simplemente mas nuevo que nuestra base y sirve igual.
+
+    Leer los nombres de un zip es leer su directorio central, no el archivo: son unos pocos KB
+    aunque el .osz pese 40 MB.
+    """
+    try:
+        async with with_db() as db:
+            en_base = (
+                await db.exec(
+                    select(func.count()).where(col(Beatmap.beatmapset_id) == beatmapset_id)
+                )
+            ).one()
+
+        # Sin nada en la base no hay con que comparar: se sirve lo que hay.
+        if not en_base:
+            return True
+
+        get_path = getattr(storage, "_get_file_path", None)
+        if get_path is None:
+            return True
+
+        with zipfile.ZipFile(get_path(cache_path)) as z:
+            en_zip = sum(1 for n in z.namelist() if n.lower().endswith(".osu"))
+
+        if en_zip < en_base:
+            logger.warning(
+                f"[beatmap dl] el osz cacheado de {beatmapset_id} tiene {en_zip} diffs y la base "
+                f"conoce {en_base}; se descarta y se vuelve a bajar"
+            )
+            return False
+        return True
+    except Exception as e:
+        # Ante la duda no rompemos la descarga: se sirve lo que hay.
+        logger.warning(f"[beatmap dl] no se pudo chequear completitud de {cache_path}: {e}")
+        return True
+
+
 async def _close_response(resp: httpx.Response | None) -> None:
     """Best-effort cleanup of a streaming httpx response and its owned client."""
     if resp is None:
@@ -607,7 +660,9 @@ async def download_beatmapset(
     # ── Layer 1: opportunistic cache from a previous proxy success.
     cache_path = f"cache/beatmapsets/{beatmapset_id}.osz"
     if await storage.is_exists(cache_path):
-        if await _cached_osz_looks_valid(storage, cache_path):
+        if await _cached_osz_looks_valid(storage, cache_path) and await _cached_osz_is_complete(
+            storage, cache_path, beatmapset_id
+        ):
             cached_url = await storage.get_file_url(cache_path)
             logger.info(f"[beatmap dl] cache hit {beatmapset_id} -> {cached_url}")
             return RedirectResponse(url=cached_url, status_code=307)
@@ -615,7 +670,7 @@ async def download_beatmapset(
         # de validacion): lo borramos y seguimos a la cadena de mirrors como si
         # nunca hubiera existido. Self-heal automatico, sin intervencion manual.
         logger.warning(
-            f"[beatmap dl] cached osz for {beatmapset_id} is invalid (poisoned); purging and refetching"
+            f"[beatmap dl] el osz cacheado de {beatmapset_id} esta envenenado o incompleto; se purga y se re-baja"
         )
         try:
             await storage.delete_file(cache_path)
