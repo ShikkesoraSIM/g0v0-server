@@ -153,6 +153,37 @@ _RULESET_TO_GAMEMODE: dict[int, GameMode] = {
 }
 
 
+async def _resync_and_retry_beatmap(session: AsyncSession, beatmap_id: int) -> Beatmap | None:
+    """Refresca el set al que pertenece esta diff y vuelve a buscarla.
+
+    Devuelve el Beatmap si aparecio, o None si de verdad no existe. No propaga errores: si el
+    mirror esta caido o el id no existe, el llamador sigue con su 404 de siempre.
+    """
+    from app.dependencies.fetcher import get_fetcher
+    from app.service.beatmapset_update_service import get_beatmapset_update_service
+
+    try:
+        fetcher = await get_fetcher()
+        remoto = await fetcher.get_beatmap(beatmap_id=beatmap_id)
+        beatmapset_id = remoto.get("beatmapset_id")
+
+        if not beatmapset_id:
+            return None
+
+        logger.info(
+            f"beatmap {beatmap_id} no estaba en la base; refrescando el set {beatmapset_id} y reintentando"
+        )
+        # immediate=True hace el sync en el momento y commitea, en vez de encolarlo.
+        await get_beatmapset_update_service().add_missing_beatmapset(beatmapset_id, immediate=True)
+    except Exception as e:
+        logger.warning(f"no se pudo refrescar el set de la beatmap {beatmap_id}: {e}")
+        return None
+
+    # El sync escribe con su propia sesion, asi que la nuestra tiene que volver a la base.
+    session.expire_all()
+    return await session.get(Beatmap, beatmap_id)
+
+
 async def _validate_daily_challenge_inputs(
     session: Database,
     *,
@@ -178,6 +209,23 @@ async def _validate_daily_challenge_inputs(
         )
 
     beatmap = await session.get(Beatmap, beatmap_id)
+    if beatmap is None:
+        # torii: antes de darse por vencido, preguntar.
+        #
+        # Un mapa nuevo al que el mapper le sigue agregando dificultades puede tener el set
+        # cacheado pero la diff no. Paso con "osu! MEGAMIX 2" (set 2593652): lo cacheamos con 6
+        # diffs, el mapper le agrego 3 mas, y elegir una de esas tres daba 404 sin ninguna
+        # explicacion para el que estaba armando el challenge.
+        #
+        # Y no se arreglaba solo: el sync marca el set como al dia ANTES de materializar las filas
+        # (ver beatmapset_update_service), asi que si esa parte falla el JSON queda adelantado, la
+        # comparacion siguiente es contra ese mismo JSON, y el set queda enterrado con backoff
+        # creciente. Al momento de escribir esto habia 807 sets asi, con 1504 diffs perdidas.
+        #
+        # Un refresh puntual del set, aca donde de verdad hace falta, resuelve el caso concreto y
+        # ademas repara el set de paso. Es UN pedido al mirror y solo cuando ya ibamos a fallar.
+        beatmap = await _resync_and_retry_beatmap(session, beatmap_id)
+
     if beatmap is None:
         raise HTTPException(status_code=404, detail=f"Beatmap {beatmap_id} not found")
 
