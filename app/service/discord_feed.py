@@ -179,7 +179,12 @@ async def _flush_number_ones(redis, *, count: int | None) -> None:
     if await redis.llen(_NUM1_KEY) == 0:
         await redis.delete(_NUM1_TS_KEY)
     text = "\n".join(x.decode() if isinstance(x, bytes) else x for x in lines)
-    url = (settings.discord_title_feed_webhook_url or "").strip()
+    # canal propio si esta configurado, si no el del feed de siempre.
+    url = (
+        getattr(settings, "discord_number_one_webhook_url", "")
+        or settings.discord_title_feed_webhook_url
+        or ""
+    ).strip()
     if not url:
         return
     n = len(lines)
@@ -215,6 +220,12 @@ def notify_new_number_one(
     accuracy: float | None,
     dethroned_username: str | None,
 ) -> None:
+    # Apagado = ni se encola. Si acumulara igual, al prenderlo de nuevo se
+    # vaciaria de golpe todo lo de mientras tanto, que es justo lo que no
+    # queremos.
+    if not getattr(settings, "discord_feed_number_one_enabled", True):
+        return
+
     stats = []
     if pp:
         stats.append(f"{pp:.0f}pp")

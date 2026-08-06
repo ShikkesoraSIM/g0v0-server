@@ -1015,6 +1015,20 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="Discord webhook URL for the #osu public chat relay (optional)"),
         "Donations",
     ]
+    # los #1 aparte del resto del feed. incluso de a tandas de 10 son la mayor
+    # parte del volumen del canal y tapan los otros eventos, asi que se prenden
+    # y se apagan solos.
+    discord_feed_number_one_enabled: Annotated[
+        bool,
+        Field(default=True, description="Post new #1 scores to the Discord feed"),
+        "Donations",
+    ]
+    # y si tienen canal propio, va aca. vacio = usan el webhook del feed.
+    discord_number_one_webhook_url: Annotated[
+        str,
+        Field(default="", description="Dedicated Discord webhook URL for new #1 scores (falls back to the feed webhook)"),
+        "Donations",
+    ]
 
     # å­˜å‚¨è®¾ç½®
     storage_service: Annotated[
