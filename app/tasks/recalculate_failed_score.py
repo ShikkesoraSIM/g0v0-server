@@ -11,6 +11,12 @@ from app.log import logger
 from sqlmodel import select
 
 
+# La tarea corre cada 5 min, asi que 12 intentos son una hora: le sobra para aguantar
+# tanto el cache corto de fallo transitorio como el de una hora de ausencia real.
+RECALC_INTENTOS_KEY = "score:recalculate:intentos"
+RECALC_MAX_INTENTOS_SIN_MAPA = 12
+
+
 @get_scheduler().scheduled_job("interval", id="recalculate_failed_beatmap", minutes=5)
 async def recalculate_failed_score():
     redis = get_redis()
@@ -34,15 +40,27 @@ async def recalculate_failed_score():
                         score, session, redis, fetcher, raise_when_not_found=True
                     )
                 except NoBeatmapError:
-                    # The beatmap is gone (deleted or unreachable from every mirror).
-                    # Drop the score from the recalc queue so we don't loop on it forever.
-                    logger.warning(
-                        f"Beatmap {score.beatmap_id} unreachable for score {score_id}; dropping from recalc queue"
-                    )
+                    # "No se pudo bajar el mapa" NO es "el mapa no existe". Esto tiraba el
+                    # score de la cola en el primer intento, y el primer intento cae a los
+                    # 5 minutos, o sea justo adentro de la ventana en la que el mapa esta
+                    # marcado como inexistente por un timeout. El mapa despues vuelve y el
+                    # score se queda en 0pp para siempre, sin nadie mirandolo.
+                    #
+                    # Se reintenta con tope, que era lo que el descarte queria evitar.
+                    intentos = await redis.hincrby(RECALC_INTENTOS_KEY, str(score_id), 1)
+                    if intentos >= RECALC_MAX_INTENTOS_SIN_MAPA:
+                        logger.warning(
+                            f"Beatmap {score.beatmap_id} sigue sin aparecer para el score {score_id} "
+                            f"despues de {intentos} intentos; se saca de la cola"
+                        )
+                        await redis.hdel(RECALC_INTENTOS_KEY, str(score_id))
+                        continue
+                    need_add.add(score_id)
                     continue
                 if not successed:
                     need_add.add(score_id)
                 else:
+                    await redis.hdel(RECALC_INTENTOS_KEY, str(score_id))
                     score.pp = pp
                     logger.info(
                         f"Recalculated PP for score {score.id} (user: {score.user_id}) at {score.ended_at}: {pp}"
