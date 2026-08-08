@@ -136,6 +136,22 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
         if GameMode.FRUITS in performance_modes:
             performance_modes.add(GameMode.FRUITSRX)
 
+        # Lo mismo para dificultad. Faltaba, y esa asimetria era el bug: el pp de relax
+        # y autopilot andaba (esta expansion de aca arriba) pero la dificultad decia que
+        # no se podia, asi que los llamadores con guarda se quedaban sin star rating y el
+        # que no la tiene (calculate_beatmap_attributes) le mandaba "osurx" al perf-server
+        # y se comia un ArgumentException.
+        #
+        # La dificultad de relax ES la de osu, que es exactamente lo que /performance hace
+        # internamente con to_base_ruleset(); el ajuste de relax lo pone Torii despues.
+        if GameMode.OSU in difficulty_modes:
+            difficulty_modes.add(GameMode.OSURX)
+            difficulty_modes.add(GameMode.OSUAP)
+        if GameMode.TAIKO in difficulty_modes:
+            difficulty_modes.add(GameMode.TAIKORX)
+        if GameMode.FRUITS in difficulty_modes:
+            difficulty_modes.add(GameMode.FRUITSRX)
+
         return AvailableModes(
             has_performance_calculator=performance_modes,
             has_difficulty_calculator=difficulty_modes,
@@ -236,9 +252,17 @@ class PerformanceServerPerformanceCalculator(BasePerformanceCalculator):
                 resp = await client.post(
                     f"{self.server_url}/difficulty",
                     json={
+                        # to_base_ruleset() igual que en /performance. El perf-server solo
+                        # conoce osu/taiko/fruits/mania; mandarle "osurx", "osuap", "taikorx"
+                        # o "fruitsrx" le saca un ArgumentException "Invalid ruleset name
+                        # provided" y la dificultad de TODO score de relax y autopilot se
+                        # cae. Venia asi desde el 24-jul-2026, 2278 veces.
+                        #
+                        # Que estaba mal era solo esta linea: dos abajo ya se usa
+                        # to_base_ruleset() para elegir con que parsear la respuesta.
                         "beatmap_file": beatmap_raw,
                         "mods": mods or [],
-                        "ruleset": gamemode.value if gamemode else None,
+                        "ruleset": gamemode.to_base_ruleset().value if gamemode else None,
                     },
                 )
                 if resp.status_code != 200:

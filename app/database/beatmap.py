@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, ClassVar, NotRequired
 from typing_extensions import TypedDict
 
 from app.calculator import get_calculator
+from app.calculators.performance._base import DifficultyError
 from app.config import settings
 from app.models.beatmap import BeatmapRankStatus, effective_rank_status
 from app.models.mods import APIMod
@@ -672,9 +673,22 @@ async def calculate_beatmap_attributes(
     key = f"beatmap:{beatmap_id}:{ruleset}:{hashlib.sha256(str(mods_).encode()).hexdigest()}:attributes"
     if await redis.exists(key):
         return TypeAdapter(DifficultyAttributesUnion).validate_json(await redis.get(key))
+
+    # La guarda va aca y no en cada llamador: de los cinco que hay, cuatro no la tenian
+    # (los dos de achievements, el de score y el de la api v1), asi que un ruleset que el
+    # perf-server no conoce se iba igual por la red y volvia como una excepcion sin
+    # manejar del otro lado, ensuciando su log.
+    #
+    # Mismo tipo de error que tiraba antes (el calculador levanta DifficultyError cuando
+    # la respuesta no es 200), asi que para el que llama no cambia nada: solo se ahorra
+    # el viaje.
+    calculator = get_calculator()
+    if await calculator.can_calculate_difficulty(ruleset) is False:
+        raise DifficultyError(f"No hay calculador de dificultad para el ruleset {ruleset}")
+
     resp = await fetcher.get_or_fetch_beatmap_raw(redis, beatmap_id)
 
-    attr = await get_calculator().calculate_difficulty(resp, mods_, ruleset)
+    attr = await calculator.calculate_difficulty(resp, mods_, ruleset)
     await redis.set(key, attr.model_dump_json())
     return attr
 
