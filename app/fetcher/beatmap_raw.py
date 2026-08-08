@@ -11,7 +11,7 @@ from app.log import fetcher_logger
 from ._base import BaseFetcher
 from .beatconnect import beatconnect_base_url, beatconnect_enabled, beatconnect_headers
 
-from httpx import AsyncClient, HTTPError, Limits
+from httpx import AsyncClient, HTTPError, HTTPStatusError, Limits
 import redis.asyncio as redis
 
 urls = [
@@ -27,12 +27,40 @@ logger = fetcher_logger("BeatmapRawFetcher")
 
 BEATCONNECT_NEGATIVE_CACHE_SECONDS = 60 * 60 * 6
 RAW_NEGATIVE_CACHE_SECONDS = 60 * 60
+# "no lo pudimos bajar recien" no es "no existe". Se cachea igual, pero cortito y
+# solo para no martillar la fuente mientras esta caida. Ver _ausencia_real().
+RAW_TRANSIENT_CACHE_SECONDS = 60
 
 
 class NoBeatmapError(Exception):
     """Beatmap 不存在异常"""
 
     pass
+
+
+def _ausencia_real(e: BaseException) -> bool:
+    """
+    Si podemos afirmar que el mapa NO EXISTE, o si solo fallo el intento.
+
+    Importa porque el resultado se cachea: marcar "no existe" le da 0pp a TODO el que
+    juegue ese mapa hasta que venza el TTL, sin un solo error a la vista.
+
+    El 8-ago-2026 habia 54 mapas marcados asi que se bajaban perfecto de ppy y de
+    osu.direct. Se habian marcado durante una tanda de timeouts, porque el except de
+    abajo agarraba httpx.HTTPError, que es la CLASE BASE de TimeoutException,
+    ConnectError y compania. Un hipo de red = una hora de 0pp para ese mapa.
+    """
+    if isinstance(e, NoBeatmapError):
+        return True
+
+    # HTTPStatusError es lo unico que trae una respuesta de la que fiarse.
+    if isinstance(e, HTTPStatusError):
+        return e.response.status_code in (404, 410)
+
+    # _fetch_beatmap_raw envuelve el ultimo error en un HTTPError generico, asi que
+    # la verdad esta en la causa.
+    causa = e.__cause__
+    return _ausencia_real(causa) if causa is not None else False
 
 
 class BeatmapRawFetcher(BaseFetcher):
@@ -655,7 +683,21 @@ class BeatmapRawFetcher(BaseFetcher):
         try:
             raw = await self.get_beatmap_raw(beatmap_id)
         except (NoBeatmapError, HTTPError) as e:
-            await redis.set(miss_cache_key, str(e), ex=RAW_NEGATIVE_CACHE_SECONDS)
+            # Una hora de "no existe" SOLO si de verdad no existe. Si fue un timeout o
+            # la fuente estaba caida, se marca 60s nomas: alcanza para no martillarla y
+            # no le regala 0pp a todo el que juegue ese mapa durante una hora.
+            if _ausencia_real(e):
+                await redis.set(miss_cache_key, str(e), ex=RAW_NEGATIVE_CACHE_SECONDS)
+            else:
+                logger.warning(
+                    "No se pudo bajar el beatmap {} y NO parece que no exista ({}: {}). "
+                    "Se reintenta en {}s en vez de darlo por perdido una hora.",
+                    beatmap_id,
+                    type(e).__name__,
+                    e,
+                    RAW_TRANSIENT_CACHE_SECONDS,
+                )
+                await redis.set(miss_cache_key, str(e), ex=RAW_TRANSIENT_CACHE_SECONDS)
             raise
 
         await redis.set(cache_key, raw, ex=cache_expire)
