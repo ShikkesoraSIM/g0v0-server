@@ -32,11 +32,70 @@ PpVariant = Literal["stable", "pp_dev"]
 logger = log("PpVariant")
 
 SCORE_PP_DEV_CACHE_TTL_SECONDS = 60 * 60 * 24
-SCORE_PP_DEV_FALLBACK_CACHE_TTL_SECONDS = 60
+# 60s reintentaba demasiado seguido: con el perf-server a media maquina (fallando
+# algunas y no las suficientes como para abrir el cortacircuitos) el churn seguia.
+# 5 min no es "sticky stable" y baja los reintentos 5 veces.
+SCORE_PP_DEV_FALLBACK_CACHE_TTL_SECONDS = 300
 USER_PP_DEV_CACHE_TTL_SECONDS = 60 * 30       # user stats: 30 min (was 10)
 USER_PP_DEV_PROFILE_CACHE_TTL_SECONDS = 60 * 30  # full profile: 30 min
 RANKING_PP_DEV_CACHE_TTL_SECONDS = 60 * 10    # ranking snapshot: 10 min (was 5)
 SCORE_PP_DEV_CALC_TIMEOUT_SECONDS = 2.5
+
+# ── cortacircuitos del pp-dev ────────────────────────────────────────────────
+# pp-dev usa el MISMO perf-server que el envio de scores en vivo (get_calculator()
+# es uno solo). Cuando el perf-server se pone lento, esto pasaba:
+#
+#   se vence el calculo -> se cachea el fallback 60s -> un minuto despues alguien
+#   abre un perfil y se reintenta -> mas carga -> se vence otra vez -> ...
+#
+# y no sale nunca solo. Medido el 8-ago-2026: 13.611 timeouts en una hora, picos
+# de 790 por minuto, cada score reintentado unas 30 veces. El perf-server quedaba
+# tapado y los scores que la gente estaba jugando se guardaban con 0pp, con el PUT
+# del cliente colgado hasta que cortaba a los 30s ("Score was not submitted").
+#
+# Un perfil pide hasta PP_DEV_RECALC_TOP_SCORE_LIMIT scores, asi que una sola
+# visita son 100 llamadas: el amplificador.
+#
+# Con esto, si el perf-server viene fallando se deja de pedir pp-dev un rato y se
+# muestra pp stable. Recalcular pp para una vista de perfil es cosmetico; que a
+# alguien le entre el score que acaba de jugar no lo es.
+_BREAKER_KEY = "ppdev:breaker"
+_BREAKER_FAILS_KEY = "ppdev:fails"
+_BREAKER_FAIL_WINDOW_SECONDS = 60
+_BREAKER_TRIP_AFTER_FAILS = 20
+_BREAKER_COOLDOWN_SECONDS = 300
+
+
+async def _breaker_abierto(redis: Redis) -> bool:
+    try:
+        return await redis.exists(_BREAKER_KEY) > 0
+    except Exception:
+        # si redis no contesta no vamos a empeorarlo con mas trabajo: se asume abierto.
+        return True
+
+
+async def _breaker_anotar_falla(redis: Redis) -> None:
+    try:
+        fallas = await redis.incr(_BREAKER_FAILS_KEY)
+        if fallas == 1:
+            await redis.expire(_BREAKER_FAILS_KEY, _BREAKER_FAIL_WINDOW_SECONDS)
+        if fallas >= _BREAKER_TRIP_AFTER_FAILS:
+            await redis.set(_BREAKER_KEY, "1", ex=_BREAKER_COOLDOWN_SECONDS)
+            await redis.delete(_BREAKER_FAILS_KEY)
+            logger.warning(
+                f"pp-dev cortado por {_BREAKER_COOLDOWN_SECONDS}s: {fallas} calculos fallados "
+                f"en {_BREAKER_FAIL_WINDOW_SECONDS}s. Se sirve pp stable para dejarle el "
+                f"perf-server a los scores en vivo."
+            )
+    except Exception:
+        pass
+
+
+async def _breaker_anotar_exito(redis: Redis) -> None:
+    try:
+        await redis.delete(_BREAKER_FAILS_KEY)
+    except Exception:
+        pass
 PP_DEV_RECALC_TOP_SCORE_LIMIT = 100
 PP_DEV_RANKING_RECALC_USER_LIMIT = 50
 PP_DEV_CALC_BATCH_CONCURRENCY = 3
@@ -119,6 +178,12 @@ async def get_score_pp_variant(
         await redis.set(cache_key, "0", ex=SCORE_PP_DEV_CACHE_TTL_SECONDS)
         return 0.0
 
+    # Cortacircuitos abierto: se devuelve stable y NO se cachea, asi cuando el
+    # perf-server se recupera vuelve a intentar en la proxima visita en vez de
+    # quedar pegado al TTL del fallback.
+    if await _breaker_abierto(redis):
+        return float(score.pp or 0.0)
+
     # pp-dev is now the primary calculator — use it directly.
     pp_dev_calculator = get_calculator()
 
@@ -149,12 +214,15 @@ async def get_score_pp_variant(
         if success:
             pp_value = float(calculated)
             calc_succeeded = True
+            await _breaker_anotar_exito(redis)
     except TimeoutError:
+        await _breaker_anotar_falla(redis)
         logger.warning(
             f"pp-dev calculation timeout for score {score.id} "
             f"after {SCORE_PP_DEV_CALC_TIMEOUT_SECONDS}s; using stable pp fallback"
         )
     except Exception as e:
+        await _breaker_anotar_falla(redis)
         logger.warning(f"Failed to calculate pp-dev for score {score.id}, using stable pp: {e}")
 
     # Avoid "sticky stable" results: cache fallback briefly so we retry pp-dev soon.
