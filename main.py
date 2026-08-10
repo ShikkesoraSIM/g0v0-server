@@ -66,6 +66,7 @@ from app.tasks import (
 from app.utils import bg_tasks, utcnow
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -328,10 +329,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     except Exception:
         # Logging must never break the error response itself.
         pass
+    # ctx trae el ValueError original, que json.dumps no serializa: el handler
+    # reventaba y devolvia 500 en vez del 422.
     return JSONResponse(
         status_code=422,
         content={
-            "error": json.dumps(exc.errors()),
+            "error": json.dumps(jsonable_encoder(exc.errors())),
         },
     )
 

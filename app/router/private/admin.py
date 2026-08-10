@@ -243,6 +243,26 @@ async def _validate_daily_challenge_inputs(
     required_mods = _parse_mods_raw(required_mods_raw, ruleset_id=ruleset_id, field_name="required_mods")
     allowed_mods = _parse_mods_raw(allowed_mods_raw, ruleset_id=ruleset_id, field_name="allowed_mods")
 
+    # Un permitido incompatible con un requerido deja elegir algo que despues no
+    # se puede submitear (paso con MG + RX).
+    choca_con = set()
+    for mod in required_mods:
+        info = API_MODS.get(ruleset_id, {}).get(mod["acronym"])
+        if info:
+            choca_con.update(info["IncompatibleMods"])
+
+    conflictivos = sorted({m["acronym"] for m in allowed_mods if m["acronym"] in choca_con})
+    if conflictivos:
+        requeridos = ", ".join(m["acronym"] for m in required_mods)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Estos mods permitidos son incompatibles con los requeridos ({requeridos}): "
+                f"{', '.join(conflictivos)}. El cliente los dejaria elegir y despues el score no "
+                f"se podria enviar, asi que sacalos de allowed_mods."
+            ),
+        )
+
     return beatmap, required_mods, allowed_mods
 
 
