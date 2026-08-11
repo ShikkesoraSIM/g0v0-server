@@ -18,6 +18,7 @@ from app.dependencies.cache import UserCacheService
 from app.dependencies.database import Database
 from app.dependencies.user import ClientUser
 from app.models.score import GameMode
+from app.utils import utcnow
 from app.models.user import Page
 from app.models.userpage import (
     UpdateUserpageRequest,
@@ -126,7 +127,7 @@ async def get_my_username_change_request(
     session: Database,
     current_user: ClientUser,
 ):
-    """返回当前用户最近一条待审核的用户名修改申请，没有则返回 null。"""
+    """La pendiente si hay, si no la ultima resuelta que el usuario todavia no vio."""
     request = (
         await session.exec(
             select(UsernameChangeRequest)
@@ -137,9 +138,50 @@ async def get_my_username_change_request(
             .order_by(col(UsernameChangeRequest.created_at).desc())
         )
     ).first()
+
+    if request is None:
+        request = (
+            await session.exec(
+                select(UsernameChangeRequest)
+                .where(
+                    col(UsernameChangeRequest.user_id) == current_user.id,
+                    col(UsernameChangeRequest.status) != STATUS_PENDING,
+                    col(UsernameChangeRequest.acknowledged_at).is_(None),
+                )
+                .order_by(col(UsernameChangeRequest.created_at).desc())
+            )
+        ).first()
+
     if request is None:
         return None
     return _username_request_to_resp(request)
+
+
+@router.post(
+    "/username-change-request/acknowledge",
+    name="marcar como visto el resultado del cambio de nombre",
+    tags=["用户", "g0v0 API"],
+)
+async def acknowledge_username_change_request(
+    session: Database,
+    current_user: ClientUser,
+):
+    pendientes = (
+        await session.exec(
+            select(UsernameChangeRequest).where(
+                col(UsernameChangeRequest.user_id) == current_user.id,
+                col(UsernameChangeRequest.status) != STATUS_PENDING,
+                col(UsernameChangeRequest.acknowledged_at).is_(None),
+            )
+        )
+    ).all()
+
+    for r in pendientes:
+        r.acknowledged_at = utcnow()
+        session.add(r)
+    await session.commit()
+
+    return {"acknowledged": len(pendientes)}
 
 
 class UserSelfUpdate(BaseModel):

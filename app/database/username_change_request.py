@@ -30,3 +30,4 @@ class UsernameChangeRequest(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, sa_column=Column(DateTime, nullable=False, index=True))
     reviewed_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     reviewed_by_id: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    acknowledged_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
