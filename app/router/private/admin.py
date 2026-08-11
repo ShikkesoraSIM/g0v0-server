@@ -3766,7 +3766,6 @@ async def approve_username_change_request(
         created_at=utcnow(),
         type=EventType.USERNAME_CHANGE,
         user_id=user.id,
-        user=user,
     )
     rename_event.event_payload["user"] = {
         "username": new_name,

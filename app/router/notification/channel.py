@@ -252,6 +252,8 @@ async def get_channel(
                     try:
                         await session.commit()
                         await session.refresh(db_channel)
+                        # el commit expira current_user y el transform de abajo lo usa
+                        await session.refresh(current_user)
                     except Exception as exc:
                         await session.rollback()
                         logger.warning(
