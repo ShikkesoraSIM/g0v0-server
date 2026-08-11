@@ -41,7 +41,7 @@ from fastapi import (
     Security,
 )
 from fastapi.responses import RedirectResponse
-from httpx import HTTPError
+from httpx import HTTPError, HTTPStatusError
 from sqlalchemy import or_
 from sqlmodel import col, func, select
 
@@ -204,6 +204,11 @@ async def search_beatmapset(
         # 缓存搜索结果
         await cache_service.cache_search_result(query_hash, cursor_hash, sets.model_dump())
         return sets
+    except HTTPStatusError as e:
+        # ppy tira 4xx con ciertas queries; para el que busca eso es 'no hay nada'
+        if 400 <= e.response.status_code < 500:
+            return SearchBeatmapsetsResp(beatmapsets=[], total=0)
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except HTTPError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
