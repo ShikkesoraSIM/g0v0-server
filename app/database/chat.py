@@ -182,7 +182,7 @@ class ChatChannelModel(DatabaseModel[ChatChannelDict]):
         channel: "ChatChannel",
         user: User,
     ) -> ChatUserAttributes:
-        from app.dependencies.database import get_redis
+        from app.dependencies.database import redis_message_client
 
         silence = (
             await session.exec(
@@ -195,7 +195,8 @@ class ChatChannelModel(DatabaseModel[ChatChannelDict]):
         can_message = silence is None
         can_message_error = "You are silenced in this channel" if not can_message else None
 
-        redis = get_redis()
+        # las escribe el notification server, que usa redis_message_client (db 1)
+        redis = redis_message_client
         last_read_id_raw = await redis.get(f"chat:{channel.channel_id}:last_read:{user.id}")
         last_msg_raw = await redis.get(f"chat:{channel.channel_id}:last_msg")
         last_msg = int(last_msg_raw) if last_msg_raw and last_msg_raw.isdigit() else None
@@ -210,9 +211,9 @@ class ChatChannelModel(DatabaseModel[ChatChannelDict]):
     @ondemand
     @staticmethod
     async def last_read_id(_session: AsyncSession, channel: "ChatChannel", user: User) -> int | None:
-        from app.dependencies.database import get_redis
+        from app.dependencies.database import redis_message_client
 
-        redis = get_redis()
+        redis = redis_message_client
         last_read_id_raw = await redis.get(f"chat:{channel.channel_id}:last_read:{user.id}")
         last_msg_raw = await redis.get(f"chat:{channel.channel_id}:last_msg")
         last_msg = int(last_msg_raw) if last_msg_raw and last_msg_raw.isdigit() else None
@@ -221,9 +222,9 @@ class ChatChannelModel(DatabaseModel[ChatChannelDict]):
     @ondemand
     @staticmethod
     async def last_message_id(_session: AsyncSession, channel: "ChatChannel") -> int | None:
-        from app.dependencies.database import get_redis
+        from app.dependencies.database import redis_message_client
 
-        redis = get_redis()
+        redis = redis_message_client
         last_msg_raw = await redis.get(f"chat:{channel.channel_id}:last_msg")
         return int(last_msg_raw) if last_msg_raw and last_msg_raw.isdigit() else None
 
