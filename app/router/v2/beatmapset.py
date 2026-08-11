@@ -710,7 +710,7 @@ async def download_beatmapset(
     # ── Negative cache: avoid spamming mirrors when we already proved this
     # map is unavailable everywhere. The lazer client retries failed
     # downloads automatically; without this short-circuit each retry would
-    # walk the entire mirror chain again. 5-minute TTL gives mirrors time
+    # walk the entire mirror chain again. 60s TTL gives mirrors time
     # to refresh their indexes if it's a transient gap.
     neg_cache_key = f"dl_failed:{beatmapset_id}"
     try:
@@ -856,7 +856,7 @@ async def download_beatmapset(
             detail=(
                 "All download mirrors failed. The map either doesn't exist on "
                 "Nerinyan, osu.direct, Gatari, or BeatConnect, or every mirror "
-                "is currently rate-limiting/down. Cached this status for 5 minutes."
+                "is currently rate-limiting/down. Try again in a minute."
             ),
         )
 
@@ -887,7 +887,7 @@ async def download_beatmapset(
             await _mark_unavailable("all-mirrors-non-osz")
             raise HTTPException(
                 status_code=503,
-                detail="All mirrors returned invalid (non-osz) responses. Cached this status for 5 minutes.",
+                detail="All mirrors returned invalid (non-osz) responses. Try again in a minute.",
             )
 
     content_length = chosen.headers.get("Content-Length")
