@@ -307,8 +307,6 @@ class SuspiciousAlertService:
             user_id=user.id,
             payload={
                 "username": user.username,
-                "user_id": score.user_id,
-                "score_id": score.id,
                 "user_id": user.id,
                 "country_code": user.country_code,
                 "ip_address": ip_address,
@@ -637,6 +635,8 @@ class SuspiciousAlertService:
             ),
             payload={
                 "username": user.username,
+                "user_id": score.user_id,
+                "score_id": score.id,
                 "pp": round(float(score.pp), 2),
                 "accuracy": round(float(score.accuracy or 0) * 100, 2),
                 "mods": mods,
