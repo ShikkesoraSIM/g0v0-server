@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.config import settings
 from app.database.beatmap import Beatmap
+from app.database.beatmapset import Beatmapset
 from app.database.suspicious_alert import SuspiciousAlert
 from app.database.user import User
 from app.database.user_login_log import UserLoginLog
@@ -595,4 +596,55 @@ class SuspiciousAlertService:
             await session.commit()
         return True
 
+    @staticmethod
+    async def maybe_record_high_pp_alert(
+        session: AsyncSession,
+        score: "Score",
+        user: User,
+        threshold: float | None = None,
+    ) -> AlertResult | None:
+        """Se llama recien cuando el score entro a los tops, asi que ya sabemos que suma pp."""
+        umbral = float(threshold if threshold is not None else (settings.high_pp_alert_threshold or 0))
+        if umbral <= 0 or float(score.pp or 0) < umbral:
+            return None
 
+        from app.database.high_pp_whitelist import HighPpWhitelist
+
+        if await session.get(HighPpWhitelist, score.user_id) is not None:
+            return None
+
+        beatmap = await session.get(Beatmap, score.beatmap_id)
+        beatmapset_id = beatmap.beatmapset_id if beatmap else None
+        beatmapset = await session.get(Beatmapset, beatmapset_id) if beatmapset_id else None
+        nombre_mapa = (
+            f"{beatmapset.artist} - {beatmapset.title} [{beatmap.version}]"
+            if beatmapset and beatmap
+            else str(score.beatmap_id)
+        )
+        mods = SuspiciousAlertService._format_mods(score.mods or [])
+
+        return await SuspiciousAlertService._create_alert(
+            session,
+            kind="high_pp_play",
+            severity="warning",
+            fingerprint=SuspiciousAlertService._fingerprint("high_pp_play", score.id),
+            title=f"{user.username} set a {float(score.pp):.0f}pp play",
+            body=(
+                f"{user.username} just set a {float(score.pp):.0f}pp play on {nombre_mapa} "
+                f"({float(score.accuracy or 0) * 100:.2f}%, {mods or 'NM'})."
+            ),
+            payload={
+                "username": user.username,
+                "pp": round(float(score.pp), 2),
+                "accuracy": round(float(score.accuracy or 0) * 100, 2),
+                "mods": mods,
+                "gamemode": str(score.gamemode),
+                "beatmap_id": score.beatmap_id,
+                "beatmapset_id": beatmapset_id,
+                "beatmap_name": nombre_mapa,
+                "threshold": umbral,
+            },
+            user_id=score.user_id,
+            score_id=score.id,
+            beatmap_id=score.beatmap_id,
+        )

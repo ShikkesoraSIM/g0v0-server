@@ -44,6 +44,7 @@ from .chat import (
     ChatMessageDict,
     ChatMessageModel,
 )
+from .high_pp_whitelist import HighPpWhitelist
 from .counts import (
     CountResp,
     MonthlyPlaycounts,

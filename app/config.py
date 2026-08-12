@@ -1008,6 +1008,16 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="Discord webhook URL for admin title-grant feed (optional)"),
         "Donations",
     ]
+    high_pp_alert_threshold: Annotated[
+        float,
+        Field(default=1000.0, description="pp threshold that triggers a moderation alert (0 disables)"),
+        "Donations",
+    ]
+    high_pp_backfill_threshold: Annotated[
+        float,
+        Field(default=800.0, description="pp threshold used by the one-off historical sweep"),
+        "Donations",
+    ]
     # relay one-way del chat publico #osu a discord. webhook PROPIO (no el del
     # feed: el chat lo inundaria). vacio = apagado.
     discord_osu_chat_webhook_url: Annotated[

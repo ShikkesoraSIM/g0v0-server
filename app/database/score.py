@@ -1522,6 +1522,15 @@ async def _process_score_pp(score: "Score", session: AsyncSession, redis: Redis,
         )
         session.add(best_score)
         await session.delete(previous_pp_best) if previous_pp_best else None
+
+        try:
+            from app.service.suspicious_alert_service import SuspiciousAlertService
+
+            usuario = await session.get(User, user_id)
+            if usuario is not None:
+                await SuspiciousAlertService.maybe_record_high_pp_alert(session, score, usuario)
+        except Exception:
+            logger.exception("fallo la alerta de pp alto para el score {sid}", sid=score.id)
         logger.info(
             "Updated PP best for user {user_id} | score_id={score_id} pp={pp:.2f}",
             user_id=user_id,
