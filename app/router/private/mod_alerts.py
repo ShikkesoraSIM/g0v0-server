@@ -210,7 +210,7 @@ async def backfill_high_pp_alerts(
         if dry_run:
             continue
 
-        resultado = await SuspiciousAlertService.maybe_record_high_pp_alert(session, score, user, threshold=umbral)
+        resultado = await SuspiciousAlertService.maybe_record_high_pp_alert(session, score, user, threshold=umbral, backfill=True)
         if resultado is not None and resultado.created:
             creadas += 1
 

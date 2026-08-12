@@ -602,6 +602,7 @@ class SuspiciousAlertService:
         score: "Score",
         user: User,
         threshold: float | None = None,
+        backfill: bool = False,
     ) -> AlertResult | None:
         """Se llama recien cuando el score entro a los tops, asi que ya sabemos que suma pp."""
         umbral = float(threshold if threshold is not None else (settings.high_pp_alert_threshold or 0))
@@ -645,6 +646,7 @@ class SuspiciousAlertService:
                 "beatmapset_id": beatmapset_id,
                 "beatmap_name": nombre_mapa,
                 "threshold": umbral,
+                "backfill": backfill,
             },
             user_id=score.user_id,
             score_id=score.id,
