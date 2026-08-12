@@ -176,17 +176,13 @@ async def backfill_high_pp_alerts(
     from app.database.user import User
     from app.service.suspicious_alert_service import SuspiciousAlertService
 
-    from sqlmodel import col, func, select
+    from sqlmodel import col, select
 
     umbral = float(threshold if threshold is not None else settings.high_pp_backfill_threshold)
 
-    mejores = (
+    filas = (
         await session.exec(
-            select(BestScore.user_id, func.max(col(BestScore.pp)).label("pp"))
-            .where(col(BestScore.pp) >= umbral)
-            .group_by(col(BestScore.user_id))
-            .order_by(func.max(col(BestScore.pp)).desc())
-            .limit(limit)
+            select(BestScore).where(col(BestScore.pp) >= umbral).order_by(col(BestScore.pp).desc())
         )
     ).all()
 
@@ -195,27 +191,22 @@ async def backfill_high_pp_alerts(
     creadas = 0
     saltadas = 0
     detalle = []
-    for user_id, pp in mejores:
-        if user_id in whitelisted:
+    vistos: set[int] = set()
+    for best in filas:
+        if best.user_id in vistos or len(vistos) >= limit:
+            continue
+        vistos.add(best.user_id)
+
+        if best.user_id in whitelisted:
             saltadas += 1
             continue
 
-        best = (
-            await session.exec(
-                select(BestScore)
-                .where(col(BestScore.user_id) == user_id, col(BestScore.pp) == pp)
-                .limit(1)
-            )
-        ).first()
-        if best is None:
-            continue
-
         score = await session.get(Score, best.score_id)
-        user = await session.get(User, user_id)
+        user = await session.get(User, best.user_id)
         if score is None or user is None:
             continue
 
-        detalle.append({"user_id": user_id, "username": user.username, "pp": round(float(pp), 2)})
+        detalle.append({"user_id": best.user_id, "username": user.username, "pp": round(float(best.pp), 2)})
         if dry_run:
             continue
 
