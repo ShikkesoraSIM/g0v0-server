@@ -225,3 +225,65 @@ async def backfill_high_pp_alerts(
         "skipped_whitelisted": saltadas,
         "detail": detalle[:50],
     }
+
+
+@router.get("/mod-alerts/user/{user_id}/high-pp", tags=["Moderation Alerts"])
+async def user_high_pp_plays(
+    user_id: int,
+    session: Database,
+    x_torii_mod_alert_token: Annotated[str | None, Header(alias="X-Torii-Mod-Alert-Token")] = None,
+    threshold: float | None = None,
+    limit: int = 25,
+):
+    _validate_mod_alert_token(x_torii_mod_alert_token)
+    from app.database.beatmap import Beatmap
+    from app.database.beatmapset import Beatmapset
+    from app.database.best_scores import BestScore
+    from app.database.score import Score
+    from app.database.user import User
+    from app.service.suspicious_alert_service import SuspiciousAlertService
+
+    from sqlmodel import col, select
+
+    umbral = float(threshold if threshold is not None else settings.high_pp_backfill_threshold)
+    user = await session.get(User, user_id)
+
+    filas = (
+        await session.exec(
+            select(BestScore)
+            .where(col(BestScore.user_id) == user_id, col(BestScore.pp) >= umbral)
+            .order_by(col(BestScore.pp).desc())
+            .limit(max(1, min(limit, 100)))
+        )
+    ).all()
+
+    plays = []
+    for best in filas:
+        score = await session.get(Score, best.score_id)
+        if score is None:
+            continue
+        beatmap = await session.get(Beatmap, score.beatmap_id)
+        beatmapset = await session.get(Beatmapset, beatmap.beatmapset_id) if beatmap else None
+        plays.append(
+            {
+                "score_id": score.id,
+                "pp": round(float(best.pp), 2),
+                "accuracy": round(float(score.accuracy or 0) * 100, 2),
+                "mods": SuspiciousAlertService._format_mods(score.mods or []),
+                "gamemode": str(score.gamemode),
+                "beatmap_id": score.beatmap_id,
+                "beatmap_name": (
+                    f"{beatmapset.artist} - {beatmapset.title} [{beatmap.version}]"
+                    if beatmapset and beatmap
+                    else str(score.beatmap_id)
+                ),
+                "ended_at": score.ended_at.isoformat() if score.ended_at else None,
+            }
+        )
+
+    return {
+        "user_id": user_id,
+        "username": user.username if user else None,
+        "threshold": umbral,
+        "plays": plays,
+    }
