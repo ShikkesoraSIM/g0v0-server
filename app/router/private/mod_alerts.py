@@ -82,16 +82,17 @@ async def whitelist_alert_user(
     from app.utils import utcnow
 
     alert = await _get_alert(session, alert_id)
-    if alert.user_id is None:
+    user_id = alert.user_id
+    if user_id is None:
         raise HTTPException(status_code=400, detail="alert has no user")
 
-    if await session.get(HighPpWhitelist, alert.user_id) is None:
-        session.add(HighPpWhitelist(user_id=alert.user_id, added_by_id=moderator_id, reason=reason))
+    if await session.get(HighPpWhitelist, user_id) is None:
+        session.add(HighPpWhitelist(user_id=user_id, added_by_id=moderator_id, reason=reason))
 
     alert.resolved_at = utcnow()
     session.add(alert)
     await session.commit()
-    return {"ok": True, "user_id": alert.user_id}
+    return {"ok": True, "user_id": user_id}
 
 
 @router.post("/mod-alerts/{alert_id}/ban-beatmapset", tags=["Moderation Alerts"])
