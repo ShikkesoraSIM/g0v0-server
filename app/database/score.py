@@ -22,7 +22,6 @@ from app.config import settings
 from app.dependencies.database import get_redis
 from app.log import log
 from app.models.beatmap import BeatmapRankStatus
-from app.models.torii_groups import is_currently_supporting
 from app.models.model import (
     CurrentUserAttributes,
     PinAttributes,
@@ -825,15 +824,12 @@ async def _score_where(
     else:
         wheres.append(col(TotalScoreBestScore.gamemode) == mode)
 
-    # ---- supporter-gated leaderboards ----
-    # Use the live `is_currently_supporting()` helper (donor_end_at > now)
-    # rather than the stored `user.is_supporter` column. The column went
-    # stale system-wide for a stretch where ENABLE_SUPPORTER_FOR_ALL_USERS
-    # was on at registration and we never had a cron to re-flip it; this
-    # helper is the single source of truth that the /me serializer also
-    # uses, so the gate behaves the same way the lazer client expects.
+    # ---- leaderboards de pais y amigos ----
+    # en osu! oficial son supporter-only, en torii los ve cualquiera. lo unico
+    # que pedimos es estar logueado, porque hace falta el country_code y la
+    # lista de follows del que pregunta.
     if type == LeaderboardType.FRIENDS:
-        if user and is_currently_supporting(user):
+        if user:
             subq = (
                 select(DBRelationship.target_id)
                 .where(DBRelationship.type == RelationshipType.FOLLOW, DBRelationship.user_id == user.id)
@@ -844,7 +840,7 @@ async def _score_where(
             return None
 
     elif type == LeaderboardType.COUNTRY:
-        if user and is_currently_supporting(user):
+        if user:
             wheres.append(col(TotalScoreBestScore.user).has(col(User.country_code) == user.country_code))
         else:
             return None

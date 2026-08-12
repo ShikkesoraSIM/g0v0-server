@@ -252,7 +252,10 @@ class UserModel(DatabaseModel[UserDict]):
         # path, which returns the SQLAlchemy InstrumentedAttribute for
         # any name that matches a column instead of our function.
         live_supporter = is_currently_supporting(db_instance)
-        user_resp["is_supporter"] = live_supporter
+        # torii no cobra por features: el flag sale true para todos asi el cliente
+        # deja de esconder cosas. la donacion real vive en support_level, que es lo
+        # unico que pinta el corazon en el perfil.
+        user_resp["is_supporter"] = True
         # support_level is OnDemand on the base model, so it only
         # appears in dumps that were materialised with an `includes`
         # list containing it. Mirror that gating here: if it wasn't in
