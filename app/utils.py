@@ -182,9 +182,11 @@ def extract_user_agent(user_agent: str | None) -> "UserAgentInfo":
     if not ua:
         return info
 
-    client_identifiers = ("osu!", "osu!lazer", "osu-framework")
+    # "torii" va primero pero los viejos siguen: hasta que todos updateen,
+    # conviven clientes mandando "osu!" y clientes mandando "Torii".
+    client_identifiers = ("torii", "osu!", "osu!lazer", "osu-framework")
     if any(identifier in lower_ua for identifier in client_identifiers):
-        info.browser = "osu!"
+        info.browser = "Torii"
         info.is_client = True
         return info
 
