@@ -49,7 +49,13 @@ async def create_daily_challenge_room(
         )
 
 
-@get_scheduler().scheduled_job("cron", hour=0, minute=0, second=0, id="daily_challenge")
+# Cada 5 minutos, no solo a las 00:00. El job ya es idempotente (sale si no hay
+# challenge agendado para hoy, y sale si ya hay una sala viva), asi que correrlo
+# seguido no duplica nada y arregla dos agujeros:
+#   - un challenge cargado a mitad del dia arranca solo, sin esperar al otro dia
+#   - si el server estaba caido a las 00:00 el challenge del dia no se perdia
+#     para siempre, se crea cuando vuelve
+@get_scheduler().scheduled_job("cron", minute="*/5", id="daily_challenge")
 async def daily_challenge_job():
     now = utcnow()
     redis = get_redis()
