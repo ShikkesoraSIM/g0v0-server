@@ -576,11 +576,13 @@ async def get_user_ranking(
         col(UserStatistics.last_played) >= active_cutoff(),
     ]
     include = UserStatistics.RANKING_INCLUDES.copy()
+    # Desempate por user_id, el mismo que usa get_rank(): sin esto los pp empatados
+    # salen en cualquier orden y contradicen los numeros de las mismas filas.
     if sort == "performance":
-        order_by = col(UserStatistics.pp).desc()
+        order_by = (col(UserStatistics.pp).desc(), col(UserStatistics.user_id).asc())
         include.append("rank_change_since_30_days")
     else:
-        order_by = col(UserStatistics.ranked_score).desc()
+        order_by = (col(UserStatistics.ranked_score).desc(), col(UserStatistics.user_id).asc())
     if country:
         wheres.append(col(UserStatistics.user).has(country_code=country.upper()))
         include.append("country_rank")
@@ -595,7 +597,7 @@ async def get_user_ranking(
         .where(
             *wheres,
         )
-        .order_by(order_by)
+        .order_by(*order_by)
         .limit(50)
         .offset(50 * (page - 1))
     )
@@ -603,14 +605,30 @@ async def get_user_ranking(
     # è½¬æ¢ä¸ºå“åº”æ ¼å¼
     ranking_data = []
     for statistics in statistics_list:
+        # OJO: aca NO va user_country=current_user.country_code. Ese era el pais del QUE
+        # MIRA, no del dueño de la fila, y este payload se cachea canonico y se le sirve
+        # a todo el mundo: el country_rank de cada fila quedaba calculado contra el pais
+        # del primer visitante que pisaba el miss. El country_rank correcto se stampea
+        # posicional abajo.
         user_stats_resp = await UserStatisticsModel.transform(
             statistics,
             includes=include,
-            user_country=current_user.country_code,
             # Cache canonical (unsanitized) payload; apply viewer policy right before response.
             show_nsfw_media=True,
         )
         ranking_data.append(user_stats_resp)
+
+    # Puesto POSICIONAL del orden de esta misma query (ver el comentario gemelo en
+    # ranking_cache_service.refresh_ranking_cache): la pagina queda auto-consistente por
+    # construccion, en vez de depender de un get_rank por fila que corre con caches de
+    # otros momentos. Solo performance; en las paginas por score la posicion es por score.
+    if sort == "performance":
+        for idx, user_stats_resp in enumerate(ranking_data):
+            pos = 50 * (page - 1) + idx + 1
+            if country:
+                user_stats_resp["country_rank"] = pos
+            else:
+                user_stats_resp["global_rank"] = pos
 
     # å¼‚æ­¥ç¼“å­˜æ•°æ®ï¼ˆä¸ç­‰å¾…å®Œæˆï¼‰
     # ä½¿ç”¨é…ç½®æ–‡ä»¶ä¸­çš„TTLè®¾ç½®

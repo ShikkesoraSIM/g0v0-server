@@ -418,6 +418,20 @@ class UserCacheService:
             await self.invalidate_user_scores_cache(user_id, mode)
             await invalidate_pp_variant_caches_for_user(redis=self.redis, user_id=user_id, mode=mode)
 
+            # Las paginas de ranking del modo tambien: un submit que mueve pp/score las
+            # deja viejas AL INSTANTE, pero solo expiraban por TTL (10 min) porque
+            # invalidate_cache no tenia ningun caller. El que llegaba a #1 seguia
+            # apareciendo #2 en el leaderboard hasta que venciera el TTL. El proximo GET
+            # (o el warmer) las rehace; en este server rearmar una pagina es barato.
+            try:
+                from app.service.ranking_cache_service import get_ranking_cache_service
+
+                ranking_cache = get_ranking_cache_service(self.redis)
+                await ranking_cache.invalidate_cache(mode, "performance")
+                await ranking_cache.invalidate_cache(mode, "score")
+            except Exception as ranking_err:
+                logger.warning(f"failed to invalidate ranking pages after submit: {ranking_err}")
+
             # Warm pp-dev mirrors so profile/rank views switch immediately after score submit.
             if fetcher is not None:
                 try:

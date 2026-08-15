@@ -408,11 +408,14 @@ class RankingCacheService:
             ]
             include = UserStatistics.RANKING_INCLUDES.copy()
 
+            # Desempate explicito por user_id: get_rank() desempata user_id ASC, y un
+            # ORDER BY pelado deja a los pp empatados en cualquier orden, contradiciendo
+            # los numeros de esas mismas filas.
             if type == "performance":
-                order_by = col(UserStatistics.pp).desc()
+                order_by = (col(UserStatistics.pp).desc(), col(UserStatistics.user_id).asc())
                 include.append("rank_change_since_30_days")
             else:
-                order_by = col(UserStatistics.ranked_score).desc()
+                order_by = (col(UserStatistics.ranked_score).desc(), col(UserStatistics.user_id).asc())
 
             if country:
                 wheres.append(col(UserStatistics.user).has(country_code=country.upper()))
@@ -439,7 +442,7 @@ class RankingCacheService:
             for page in range(1, max_pages + 1):
                 try:
                     statistics_list = await session.exec(
-                        select(UserStatistics).where(*wheres).order_by(order_by).limit(50).offset(50 * (page - 1))
+                        select(UserStatistics).where(*wheres).order_by(*order_by).limit(50).offset(50 * (page - 1))
                     )
 
                     statistics_data = statistics_list.all()
@@ -466,6 +469,26 @@ class RankingCacheService:
                                 logger.warning(f"Asset proxy processing failed for ranking cache: {e}")
 
                         ranking_data.append(user_dict)
+
+                    # El puesto que ve el usuario sale POSICIONAL del orden de esta misma
+                    # query, no de get_rank() por fila. Los resolvers corren en momentos
+                    # distintos con caches propios, y en prod quedo una pagina con el orden
+                    # bien pero global_rank embebidos [2,2,3,5,5]: dos #2 y dos #5 en la
+                    # misma pagina, con el #1 real del server marcado como 2. Stampear el
+                    # indice hace la pagina auto-consistente por construccion y de paso
+                    # ahorra el COUNT por fila. Solo para performance: en las paginas por
+                    # score la posicion es por score y el global_rank sigue siendo de pp.
+                    if type == "performance":
+                        for idx, user_dict in enumerate(ranking_data):
+                            pos = 50 * (page - 1) + idx + 1
+                            if country:
+                                # Pagina de pais: la posicion es el country rank. El
+                                # transform de arriba ni siquiera recibia user_country,
+                                # asi que su country_rank era el rank GLOBAL (el kwarg
+                                # defaultea None y get_rank sin pais cuenta a todos).
+                                user_dict["country_rank"] = pos
+                            else:
+                                user_dict["global_rank"] = pos
 
                     # 缓存这一页的数据
                     await self.cache_ranking(ruleset, type, ranking_data, country, page)
