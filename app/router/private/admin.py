@@ -160,7 +160,6 @@ async def _resync_and_retry_beatmap(session: AsyncSession, beatmap_id: int) -> B
     mirror esta caido o el id no existe, el llamador sigue con su 404 de siempre.
     """
     from app.dependencies.fetcher import get_fetcher
-    from app.service.beatmapset_update_service import get_beatmapset_update_service
 
     try:
         fetcher = await get_fetcher()
@@ -171,15 +170,20 @@ async def _resync_and_retry_beatmap(session: AsyncSession, beatmap_id: int) -> B
             return None
 
         logger.info(
-            f"beatmap {beatmap_id} no estaba en la base; refrescando el set {beatmapset_id} y reintentando"
+            f"beatmap {beatmap_id} no estaba en la base; trayendo el set {beatmapset_id} y reintentando"
         )
-        # immediate=True hace el sync en el momento y commitea, en vez de encolarlo.
-        await get_beatmapset_update_service().add_missing_beatmapset(beatmapset_id, immediate=True)
+        # get_or_fetch crea PRIMERO la fila del beatmapset (con sus diffs) y recien despues
+        # registra el sync. Antes esto llamaba a add_missing_beatmapset(immediate=True), que
+        # va al reves: commitea el BeatmapSync, que tiene FK contra beatmapsets.id, para un set
+        # que todavia no existe. Con un set ya conocido no se notaba nunca; con uno nuevo
+        # reventaba con IntegrityError 1452 y el admin se comia un 404 que mentia, porque el
+        # mapa existe perfectamente en ppy.
+        await Beatmapset.get_or_fetch(session, fetcher, beatmapset_id)
     except Exception as e:
-        logger.warning(f"no se pudo refrescar el set de la beatmap {beatmap_id}: {e}")
+        logger.warning(f"no se pudo traer el set de la beatmap {beatmap_id}: {e}")
         return None
 
-    # El sync escribe con su propia sesion, asi que la nuestra tiene que volver a la base.
+    # get_or_fetch commitea en esta misma sesion; expire_all la obliga a releer lo recien escrito.
     session.expire_all()
     return await session.get(Beatmap, beatmap_id)
 
