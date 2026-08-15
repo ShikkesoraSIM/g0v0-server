@@ -2858,6 +2858,7 @@ async def create_daily_challenge(
     )
 
     # Automatically assign room_id if for today and not provided
+    sala_recien_creada = False
     if new_challenge.room_id is None and challenge_date == utcnow().date():
         now = utcnow()
         next_day = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2872,10 +2873,24 @@ async def create_daily_challenge(
             allowed_mods=allowed_mods_list,
         )
         new_challenge.room_id = room.id
+        sala_recien_creada = True
 
     session.add(new_challenge)
     await session.commit()
     await session.refresh(new_challenge)
+
+    # Si el challenge es para hoy, la sala nace ACA y no en el job del cron. El aviso al
+    # #feed vivia solamente adentro del job, asi que cargar un challenge a mano abria la
+    # sala y no avisaba nunca: cuando el job corria despues, veia que ya habia sala viva y
+    # salia sin postear. Va despues del commit para no anunciar algo que no quedo guardado.
+    if sala_recien_creada:
+        from app.tasks.daily_challenge import announce_daily_challenge
+
+        await announce_daily_challenge(
+            new_challenge.beatmap_id,
+            new_challenge.ruleset_id,
+            required_mods_list,
+        )
 
     # Refresh beatmap to avoid MissingGreenlet after commit
     if beatmap:
