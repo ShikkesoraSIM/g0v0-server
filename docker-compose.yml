@@ -91,8 +91,21 @@ services:
       context: ./docker/performance-server-author-port
       dockerfile: Dockerfile
       args:
-        OSU_REPO: https://github.com/ppy/osu.git
-        OSU_REF: pp-dev
+        # Los calculadores salen de NUESTRO fork, no de ppy.
+        #
+        # Esto apuntaba a ppy/osu rama pp-dev, asi que el rework de flow aim para relax
+        # (torii-osu PR #9 de Aideddo: washing machine por geometria + SmallCircleBonus
+        # anulado con relax) existia en el cliente y NUNCA corria aca. El 21-jul se
+        # construyo una imagen a mano desde el fork y anduvo bien; el 24-jul un
+        # `compose up --build` de rutina la piso con una build de ppy y volvio el pp
+        # inflado, sin que nadie tocara nada.
+        #
+        # Y va SHA fijo, nunca una rama: `pp-dev` se mueve sola, asi que cada rebuild
+        # traia otro calculo distinto y el cliente (que si esta pinneado) nunca podia
+        # coincidir. Este SHA es el tag v2026.813.6-nova, o sea exactamente el codigo
+        # que corre la gente. Al cortar release nueva, actualizar este pin tambien.
+        OSU_REPO: https://github.com/ShikkesoraSIM/torii-osu.git
+        OSU_REF: 94d3e79fea814e83e364fcbe11054e80a160831f
     image: g0v0-performance-server-ppdev
     container_name: performance_server
     environment:
