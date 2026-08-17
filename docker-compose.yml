@@ -88,7 +88,12 @@ services:
 
   performance-server:
     build:
-      context: ./docker/performance-server-author-port
+      # Contexto propio en net10, separado del de mania.
+      #
+      # nova es .NET 10 y el contexto viejo compila con el SDK 8, asi que apuntarlo a
+      # nuestro fork ahi tira NETSDK1045. No se puede bumpear el compartido: mania se
+      # construye del fork de Sunny (vernonlim), que es net8, y se lo llevaria puesto.
+      context: ./docker/performance-server-net10
       dockerfile: Dockerfile
       args:
         # Los calculadores salen de NUESTRO fork, no de ppy.
