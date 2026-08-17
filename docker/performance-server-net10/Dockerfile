@@ -7,11 +7,15 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG PERF_SERVER_REPO=https://github.com/ShikkesoraSIM/torii-performance-server.git
 ARG PERF_SERVER_REF=601d057
 ARG OSU_REPO=https://github.com/ShikkesoraSIM/torii-osu.git
-ARG OSU_REF=4a32bc465225200ebbe03664ca7143b3d3b262a9
+ARG OSU_REF=94d3e79fea814e83e364fcbe11054e80a160831f
+# OJO: estos DOS refs van sincronizados con el OSU_REF de arriba, son los mismos que
+# FRAMEWORK_REF/RESOURCES_REF del build-gu.yml del tag que corre el cliente. Si se
+# actualiza el OSU_REF y estos quedan viejos, el build muere con errores de override
+# tipo CS0115 (el codigo de nova llama a APIs que ese framework todavia no tiene).
 ARG FRAMEWORK_REPO=https://github.com/ShikkesoraSIM/torii-framework.git
-ARG FRAMEWORK_REF=32974cded87da78c014f330928f0bb481d9847a9
+ARG FRAMEWORK_REF=0ebb6908cbe70b763c6b4aab45dd6520b40c6bea
 ARG RESOURCES_REPO=https://github.com/ShikkesoraSIM/torii-resources.git
-ARG RESOURCES_REF=e2442fadd68e5d440ca807295e700b2b7a6b8aaf
+ARG RESOURCES_REF=cddd70c3acba2e3cac84f6494f8cecd07a321710
 
 WORKDIR /src
 
