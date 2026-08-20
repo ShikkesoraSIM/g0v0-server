@@ -1249,25 +1249,36 @@ async def process_score(
     # tira ArgumentException con claves repetidas, asi que pasar el mouse por
     # encima de ese score en el leaderboard volteaba el juego entero.
     #
-    # Se arregla donde corresponde: aca, que es el embudo por el que pasan solo,
-    # playlist y multi. Que no entre basura a la base, en vez de pedirle a cada
-    # lector que se defienda. Gana la primera aparicion, que es la de la sala.
+    # Se FUSIONAN, no se descarta uno. Quedarse con el primero borraria settings
+    # que el jugador si uso: si la sala pide DA con AR 9 y el jugador agrega CS
+    # 4, jugo con las dos cosas y el score tiene que decir las dos, o el pp se
+    # calcula sobre una dificultad que nunca existio.
+    #
+    # Ante la misma clave gana la PRIMERA aparicion, que es la que impone la
+    # sala: un requisito de la sala no lo puede pisar el jugador. Las claves que
+    # la sala no fijo las aporta el jugador.
     if info.mods:
-        vistos: set[str] = set()
-        normalizados = []
+        fusionados: dict[str, dict] = {}
+        orden: list[str] = []
         for mod in info.mods:
             acronimo = mod.get("acronym")
-            if acronimo in vistos:
+            if acronimo not in fusionados:
+                fusionados[acronimo] = dict(mod)
+                orden.append(acronimo)
                 continue
-            vistos.add(acronimo)
-            normalizados.append(mod)
-        if len(normalizados) != len(info.mods):
+            previo = fusionados[acronimo]
+            settings = dict(mod.get("settings") or {})
+            settings.update(previo.get("settings") or {})  # el primero pisa
+            if settings:
+                previo["settings"] = settings
+        if len(orden) != len(info.mods):
+            normalizados = [fusionados[a] for a in orden]
             logger.warning(
                 "mods duplicados en el score de {user_id} en {beatmap_id}: {antes} -> {despues}",
                 user_id=user.id,
                 beatmap_id=beatmap_id,
-                antes=[m.get("acronym") for m in info.mods],
-                despues=[m.get("acronym") for m in normalizados],
+                antes=info.mods,
+                despues=normalizados,
             )
             info.mods = normalizados
 
