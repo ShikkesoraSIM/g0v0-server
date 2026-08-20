@@ -1239,6 +1239,38 @@ async def process_score(
     info: SoloScoreSubmissionInfo,
     session: AsyncSession,
 ) -> Score:
+    # Normalizar los mods ANTES de tocar nada mas.
+    #
+    # Una sala de multi que EXIGE un mod mas el mismo mod elegido por el jugador
+    # llegan como dos entradas del mismo acronimo. osu! oficial nunca guarda un
+    # score asi (su cliente no te deja elegir un mod ya requerido), por eso su
+    # cliente puede indexar los mods por tipo sin miedo. El nuestro hacia lo
+    # mismo y se caia: ScoreMultiplierCalculator hace ToDictionary por tipo, que
+    # tira ArgumentException con claves repetidas, asi que pasar el mouse por
+    # encima de ese score en el leaderboard volteaba el juego entero.
+    #
+    # Se arregla donde corresponde: aca, que es el embudo por el que pasan solo,
+    # playlist y multi. Que no entre basura a la base, en vez de pedirle a cada
+    # lector que se defienda. Gana la primera aparicion, que es la de la sala.
+    if info.mods:
+        vistos: set[str] = set()
+        normalizados = []
+        for mod in info.mods:
+            acronimo = mod.get("acronym")
+            if acronimo in vistos:
+                continue
+            vistos.add(acronimo)
+            normalizados.append(mod)
+        if len(normalizados) != len(info.mods):
+            logger.warning(
+                "mods duplicados en el score de {user_id} en {beatmap_id}: {antes} -> {despues}",
+                user_id=user.id,
+                beatmap_id=beatmap_id,
+                antes=[m.get("acronym") for m in info.mods],
+                despues=[m.get("acronym") for m in normalizados],
+            )
+            info.mods = normalizados
+
     gamemode = GameMode.from_int(info.ruleset_id).to_special_mode(info.mods)
     mods_ranked = mods_can_get_pp(int(gamemode), info.mods)
     effective_ranked = ranked and mods_ranked
