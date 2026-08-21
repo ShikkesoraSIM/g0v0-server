@@ -65,7 +65,7 @@ verde "  healthy"
 # 5. EL chequeo que importa: que un score se pueda procesar de verdad.
 #    Hace rollback, no deja nada escrito.
 paso "Smoke test de submit"
-docker compose exec -T app python deploy/smoke_test.py 2>&1 | grep -viE "UserWarning|warnings.warn" || abortar "el smoke test de submit fallo"
+docker compose exec -T app python - < deploy/smoke_test.py 2>&1 | grep -viE "UserWarning|warnings.warn" || abortar "el smoke test de submit fallo"
 
 # 6. Que no haya aparecido nada feo en el arranque.
 paso "Revisando el log"
