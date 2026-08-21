@@ -1267,10 +1267,14 @@ async def process_score(
                 orden.append(acronimo)
                 continue
             previo = fusionados[acronimo]
-            settings = dict(mod.get("settings") or {})
-            settings.update(previo.get("settings") or {})  # el primero pisa
-            if settings:
-                previo["settings"] = settings
+            # OJO con el nombre: llamar `settings` a esta variable la hace local a
+            # TODA la funcion y rompe el `settings` global de config que se usa mas
+            # abajo, con UnboundLocalError. Paso justo eso y tumbo el submit de
+            # scores por 10 horas.
+            ajustes = dict(mod.get("settings") or {})
+            ajustes.update(previo.get("settings") or {})  # el primero pisa
+            if ajustes:
+                previo["settings"] = ajustes
         if len(orden) != len(info.mods):
             normalizados = [fusionados[a] for a in orden]
             logger.warning(
