@@ -1452,6 +1452,14 @@ async def get_user_playlist_score(
     if not score_record:
         raise HTTPException(status_code=404, detail="Score not found")
 
+    # scores_around necesita saber la sala y si es playlist; sin estos kwargs el
+    # resolver revienta con TypeError y el 500 hace que el cliente no pueda
+    # mostrar el resultado: el score SI estaba guardado, pero el jugador veia
+    # "not submitted". El otro endpoint (show_playlist_score) ya los pasaba;
+    # este quedo con la llamada vieja cuando se le agregaron los parametros.
+    room = await session.get(Room, room_id)
+    is_playlist = room is not None and room.category != RoomCategory.REALTIME
+
     resp = await ScoreModel.transform(
         score_record.score,
         includes=[
@@ -1459,6 +1467,9 @@ async def get_user_playlist_score(
             "position",
             "scores_around",
         ],
+        playlist_id=playlist_id,
+        room_id=room_id,
+        is_playlist=is_playlist,
     )
     return resp
 
