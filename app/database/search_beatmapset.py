@@ -3,7 +3,9 @@ from .beatmapset import BeatmapsetModel
 
 from sqlmodel import SQLModel
 
-SearchBeatmapset = BeatmapsetModel.generate_typeddict(("beatmaps.max_combo", "pack_tags"))
+# tags va aca porque el cliente y la web lo miran para el badge de mapas hechos
+# con IA; sin declararlo, la respuesta lo descarta aunque lo llenemos.
+SearchBeatmapset = BeatmapsetModel.generate_typeddict(("beatmaps.max_combo", "pack_tags", "tags"))
 
 
 class SearchBeatmapsetsResp(SQLModel):
