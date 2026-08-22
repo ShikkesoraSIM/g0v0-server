@@ -148,6 +148,15 @@ def notify_beatmapset_uploaded(*, username: str, user_id: int, artist: str, titl
     ))
 
 
+def notify_beatmapset_updated(*, username: str, user_id: int, artist: str, title: str, beatmapset_id: int) -> None:
+    _feed(_embed(
+        "🎼 Beatmap updated",
+        f"**[{username}]({_profile(user_id)})** updated "
+        f"[{artist} - {title}]({settings.web_url}beatmapsets/{beatmapset_id})",
+        _COLOUR_BSS,
+    ))
+
+
 def notify_mapperatorinator_map(
     *,
     username: str,

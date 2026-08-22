@@ -205,6 +205,10 @@ class SearchQueryModel(BaseModel):
         default=False,
         description="query local beatmaps only",
     )
+    ai: bool = Field(
+        default=False,
+        description="only maps generated with Mapperatorinator (implies is_local)",
+    )
     cursor_string: str | None = Field(
         default=None,
         description="游标字符串，用于分页",

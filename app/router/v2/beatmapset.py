@@ -101,6 +101,10 @@ async def _search_local_beatmapsets(
             )
         )
 
+    # el marcador que el cliente estampa en Tags de todo mapa generado con IA.
+    if query.ai:
+        stmt = stmt.where(col(Beatmapset.tags).ilike("%mapperatorinator%"))
+
     status_filters = _status_filters_from_query(query.s)
     if status_filters:
         stmt = stmt.where(col(Beatmapset.beatmap_status).in_(status_filters))
@@ -145,7 +149,8 @@ async def search_beatmapset(
     cache_service: BeatmapsetCacheService,
     current_user: User | None = Security(get_optional_user, scopes=["public"]),
 ):
-    if query.is_local:
+    # los mapas generados con IA solo existen aca, asi que pedirlos implica busqueda local.
+    if query.is_local or query.ai:
         return await _search_local_beatmapsets(db, query, current_user)
 
     params = parse_qs(qs=request.url.query, keep_blank_values=True)

@@ -18,6 +18,10 @@ from app.database.beatmap import clear_cached_beatmap_raws
 # real user.
 from app.dependencies.user import get_current_user
 from app.log import logger
+
+# ventana en la que varias subidas seguidas del mismo set cuentan como una sola
+# noticia de "actualizado".
+_UPDATE_FEED_COOLDOWN = 1800
 from app.dependencies.cache import BeatmapsetCacheService
 from app.dependencies.database import Database, Redis
 from app.dependencies.storage import StorageService
@@ -206,17 +210,29 @@ async def upload_beatmapset_package(
 
     updated_ids = await BeatmapsetUploadService.process_beatmapset_package(db, storage, beatmapset_id)
 
-    # evento al #feed de discord, UNA vez por set (los PUT de updates no re-anuncian)
+    # evento al #feed de discord: la primera subida se anuncia como mapa nuevo y las
+    # siguientes como update. el update tiene su propio cooldown porque subir un mapa
+    # es de a tandas (arreglas algo, resubis, arreglas otra cosa) y no queremos un
+    # mensaje por cada intento.
     try:
-        from app.service.discord_feed import notify_beatmapset_uploaded
+        from app.service.discord_feed import notify_beatmapset_updated, notify_beatmapset_uploaded
 
-        if await redis.set(f"feed:bss:{beatmapset_id}", "1", nx=True):
+        is_first_upload = await redis.set(f"feed:bss:{beatmapset_id}", "1", nx=True)
+        announce_update = False
+
+        if not is_first_upload:
+            announce_update = bool(
+                await redis.set(f"feed:bss:update:{beatmapset_id}", "1", ex=_UPDATE_FEED_COOLDOWN, nx=True)
+            )
+
+        if is_first_upload or announce_update:
             # leer artist/title DESPUES del process: el .osz recien ahi setea la metadata real.
             # antes se snapshoteaba ANTES de process_beatmapset_package y salia "Unknown - Unknown"
             # (el PUT de create trae metadata vacia; el titulo/artista viven en el .osz).
             await db.refresh(beatmapset)
 
-            notify_beatmapset_uploaded(
+            announce = notify_beatmapset_uploaded if is_first_upload else notify_beatmapset_updated
+            announce(
                 username=feed_mapper,
                 user_id=feed_mapper_id,
                 artist=beatmapset.artist or "Unknown",
