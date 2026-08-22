@@ -119,6 +119,19 @@ async def _search_local_beatmapsets(
     beatmapsets = (await db.exec(stmt)).all()
     includes = _beatmapset_includes_for_user(current_user)
     data = [await BeatmapsetModel.transform(bmset, user=current_user, includes=includes) for bmset in beatmapsets]
+
+    # el transform no trae tags por esta ruta y el cliente los necesita para saber
+    # que mapa salio de mapperatorinator (el badge de IA). se piden aparte, por
+    # columna, que es lo unico que no depende de como este cargada la fila.
+    ids = [bmset.id for bmset in beatmapsets]
+    if ids:
+        tags_by_id = {
+            row[0]: row[1] or ""
+            for row in (await db.exec(select(Beatmapset.id, Beatmapset.tags).where(col(Beatmapset.id).in_(ids)))).all()
+        }
+        for item in data:
+            item["tags"] = tags_by_id.get(item.get("id"), item.get("tags") or "")
+
     return SearchBeatmapsetsResp(total=len(data), beatmapsets=data)
 
 
