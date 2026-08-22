@@ -17,6 +17,7 @@ from app.database.beatmap import clear_cached_beatmap_raws
 # clients both work, same as every other endpoint that authenticates a
 # real user.
 from app.dependencies.user import get_current_user
+from app.log import logger
 from app.dependencies.cache import BeatmapsetCacheService
 from app.dependencies.database import Database, Redis
 from app.dependencies.storage import StorageService
@@ -47,6 +48,8 @@ async def initialize_beatmapset_upload(
     storage: StorageService,
     req: PutBeatmapSetRequest,
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+    cache_service: BeatmapsetCacheService,
+    redis: Redis,
 ):
     if req.beatmapset_id:
         beatmapset = await db.get(Beatmapset, req.beatmapset_id)
@@ -81,7 +84,9 @@ async def initialize_beatmapset_upload(
                 beatmapset.title_unicode = req.title
 
         # Delete beatmaps not in beatmaps_to_keep
-        if req.beatmaps_to_keep:
+        deleted_ids: list[int] = []
+
+        if req.beatmaps_to_keep is not None:
             from sqlmodel import col
 
             stmt = select(Beatmap).where(
@@ -89,6 +94,7 @@ async def initialize_beatmapset_upload(
                 ~col(Beatmap.id).in_(req.beatmaps_to_keep),
             )
             to_delete = (await db.exec(stmt)).all()
+            deleted_ids = [b.id for b in to_delete]
             for b in to_delete:
                 await db.delete(b)
 
@@ -112,6 +118,18 @@ async def initialize_beatmapset_upload(
                 select(Beatmap.id).where(Beatmap.beatmapset_id == beatmapset_id).order_by(Beatmap.id.asc())
             )
         ).all()
+
+        # las diffs borradas hay que sacarlas de la cache aca: el flujo de upload solo
+        # invalida las que quedaron, asi que una diff borrada seguiria contestando por
+        # /beatmaps/{id} hasta que la cache expire sola.
+        if deleted_ids:
+            try:
+                await cache_service.invalidate_beatmapset_cache(beatmapset_id)
+                for bid in deleted_ids:
+                    await cache_service.invalidate_beatmap_lookup_cache(bid)
+                await clear_cached_beatmap_raws(redis, deleted_ids)
+            except Exception:
+                logger.warning("no se pudo invalidar la cache de las diffs borradas: {}", deleted_ids)
     else:
         # Create a temporary beatmapset with default values
         # Custom ID generation: find the max ID in the 800,000,000 range and increment
