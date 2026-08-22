@@ -15,6 +15,7 @@ from . import (  # noqa: F401
     torii_comfort_pick,
     torii_gifts,
     torii_hiccup_reports,
+    torii_mapperatorinator,
     torii_points,
     torii_replay_render,
     torii_score_note,

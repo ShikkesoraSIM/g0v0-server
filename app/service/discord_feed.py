@@ -37,6 +37,7 @@ _COLOUR_DAILY = 0xFFD36E  # ambar
 _COLOUR_BSS = 0xFF8A65  # naranja
 _COLOUR_TEAM = 0x4DB6AC  # teal
 _COLOUR_NUMBER_ONE = 0xFFC107  # dorado
+_COLOUR_MAPPERATORINATOR = 0xFF6EC7  # rosa (mapas hechos con IA)
 
 # referencia fuerte a las tasks en vuelo (asyncio solo guarda weakrefs).
 _tasks: set[asyncio.Task] = set()
@@ -144,6 +145,26 @@ def notify_beatmapset_uploaded(*, username: str, user_id: int, artist: str, titl
         f"**[{username}]({_profile(user_id)})** uploaded "
         f"[{artist} - {title}]({settings.web_url}beatmapsets/{beatmapset_id})",
         _COLOUR_BSS,
+    ))
+
+
+def notify_mapperatorinator_map(
+    *,
+    username: str,
+    user_id: int,
+    title: str,
+    artist: str,
+    difficulty_name: str | None,
+    model: str | None,
+) -> None:
+    """Mapa generado con Mapperatorinator y con identidad propia (titulo/artista/fondo custom)."""
+    diff_part = f" [{difficulty_name}]" if difficulty_name else ""
+    model_part = f" ({model})" if model else ""
+    _feed(_embed(
+        "🤖 AI-generated beatmap",
+        f"**[{username}]({_profile(user_id)})** generated **{artist} - {title}**{diff_part} "
+        f"with Mapperatorinator{model_part}",
+        _COLOUR_MAPPERATORINATOR,
     ))
 
 
