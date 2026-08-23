@@ -72,8 +72,38 @@ class BeatmapsetUploadService:
         return None
 
     @staticmethod
-    async def _generate_covers(storage: "StorageService", beatmapset_id: int, bg_data: bytes) -> dict[str, str]:
-        img = Image.open(BytesIO(bg_data))
+    def _placeholder_background(seed: int) -> "Image.Image":
+        """Un fondo propio para los sets que no traen imagen.
+
+        Un mapa generado sin imagen elegida no tiene NADA que mostrar, y dejarlo sin
+        portada es peor que feo: la respuesta cae a una url de assets.ppy.sh que no
+        existe, o sea un cuadro negro esperando un 404. Un degrade oscuro con un tono
+        que depende del id (asi no son todos iguales) alcanza y sobra.
+        """
+        width, height = 960, 540
+        hue = seed % 360
+        top = Image.new("HSV", (1, 1), (int(hue * 255 / 360), 120, 70)).convert("RGB").getpixel((0, 0))
+        bottom = Image.new("HSV", (1, 1), (int(((hue + 40) % 360) * 255 / 360), 150, 25)).convert("RGB").getpixel((0, 0))
+
+        img = Image.new("RGB", (width, height))
+        pixels = img.load()
+
+        if pixels is not None:
+            for y in range(height):
+                ratio = y / (height - 1)
+                row = tuple(int(top[i] + (bottom[i] - top[i]) * ratio) for i in range(3))
+                for x in range(width):
+                    pixels[x, y] = row
+
+        return img
+
+    @staticmethod
+    async def _generate_covers(storage: "StorageService", beatmapset_id: int, bg_data: bytes | None) -> dict[str, str]:
+        if bg_data is None:
+            img = BeatmapsetUploadService._placeholder_background(beatmapset_id)
+        else:
+            img = Image.open(BytesIO(bg_data))
+
         if img.mode != "RGB":
             img = img.convert("RGB")
 
@@ -572,24 +602,23 @@ class BeatmapsetUploadService:
                         cover_source = name
                         break
 
+            bg_data: bytes | None = None
+
             if cover_source is not None:
                 with z.open(cover_source) as f:
                     bg_data = f.read()
-                    try:
-                        covers = await BeatmapsetUploadService._generate_covers(storage, beatmapset_id, bg_data)
-                        beatmapset.covers = covers
-                    except Exception as e:
-                        # sin portadas el set queda en negro para siempre (el fallback
-                        # apunta a una url de ppy que no existe), asi que al menos que
-                        # quede escrito por que fallo en vez de perderse en silencio.
-                        logger.warning(
-                            "no se pudieron generar las portadas del set {} desde {}: {}",
-                            beatmapset_id,
-                            cover_source,
-                            e,
-                        )
-            else:
-                logger.warning("el set {} no trae ninguna imagen: se queda sin portada", beatmapset_id)
+
+            try:
+                # sin imagen tambien se generan: un set sin portadas queda en negro para
+                # siempre, porque la respuesta cae a una url de ppy que no existe.
+                beatmapset.covers = await BeatmapsetUploadService._generate_covers(storage, beatmapset_id, bg_data)
+            except Exception as e:
+                logger.warning(
+                    "no se pudieron generar las portadas del set {} desde {}: {}",
+                    beatmapset_id,
+                    cover_source or "(sin imagen)",
+                    e,
+                )
 
             await db.commit()
             return updated_beatmap_ids
