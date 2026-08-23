@@ -83,6 +83,9 @@ _MAX_SETTINGS_CHARS = 8000
 class MapperatorinatorPresetPayload(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     settings: str = Field(min_length=2, max_length=_MAX_SETTINGS_CHARS)
+    # de que preset salio, si salio de alguno: el cliente lo sabe porque el mapa del que
+    # copiaste las opciones se lleva adentro con que preset se genero.
+    origin_preset_id: int | None = None
 
 
 class MapperatorinatorPreset(BaseModel):
@@ -90,19 +93,35 @@ class MapperatorinatorPreset(BaseModel):
     name: str
     settings: str
     updated_at: datetime
+    # de donde salio este preset...
+    origin_username: str | None = None
+    # ...y quienes se llevaron el tuyo.
+    forks: int = 0
+    forked_by: list[str] = Field(default_factory=list)
 
 
 class MapperatorinatorPresetList(BaseModel):
     presets: list[MapperatorinatorPreset]
 
 
-def _as_preset(row: ToriiMapperatorinatorPreset) -> MapperatorinatorPreset:
+def _as_preset(
+    row: ToriiMapperatorinatorPreset,
+    forks: int = 0,
+    forked_by: list[str] | None = None,
+) -> MapperatorinatorPreset:
     return MapperatorinatorPreset(
         id=row.id or 0,
         name=row.name,
         settings=row.settings,
         updated_at=row.updated_at,
+        origin_username=row.origin_username,
+        forks=forks,
+        forked_by=forked_by or [],
     )
+
+
+# cuantos nombres se muestran al pasar el mouse por el contador de forks.
+_MAX_FORK_NAMES = 20
 
 
 @router.get(
@@ -126,7 +145,52 @@ async def list_mapperatorinator_presets(
         )
     ).all()
 
-    return MapperatorinatorPresetList(presets=[_as_preset(row) for row in rows])
+    ids = [row.id for row in rows if row.id is not None]
+    forks: dict[int, list[str]] = {}
+
+    if ids:
+        # quien se llevo cada uno. Se traen los nombres directo: son pocos y sirven para
+        # el "te lo forkearon estos" al pasar el mouse.
+        taken = (
+            await db.exec(
+                select(
+                    ToriiMapperatorinatorPreset.origin_preset_id,
+                    ToriiMapperatorinatorPreset.user_id,
+                )
+                .where(
+                    col(ToriiMapperatorinatorPreset.origin_preset_id).in_(ids),
+                    ToriiMapperatorinatorPreset.user_id != user_id,
+                )
+            )
+        ).all()
+
+        user_ids = {row[1] for row in taken}
+        names: dict[int, str] = {}
+
+        if user_ids:
+            names = {
+                row[0]: row[1]
+                for row in (
+                    await db.exec(select(User.id, User.username).where(col(User.id).in_(user_ids)))
+                ).all()
+            }
+
+        for origin_id, forker_id in taken:
+            if origin_id is None:
+                continue
+
+            name = names.get(forker_id, f"user {forker_id}")
+            people = forks.setdefault(origin_id, [])
+
+            if name not in people:
+                people.append(name)
+
+    return MapperatorinatorPresetList(
+        presets=[
+            _as_preset(row, len(forks.get(row.id or 0, [])), forks.get(row.id or 0, [])[:_MAX_FORK_NAMES])
+            for row in rows
+        ]
+    )
 
 
 @router.put(
@@ -161,9 +225,27 @@ async def save_mapperatorinator_preset(
         )
     ).first()
 
+    origin_user_id: int | None = None
+    origin_username: str | None = None
+
+    if payload.origin_preset_id is not None:
+        source = await db.get(ToriiMapperatorinatorPreset, payload.origin_preset_id)
+
+        # forkear el tuyo propio no cuenta: es guardarlo de nuevo.
+        if source is not None and source.user_id != user_id:
+            origin_user_id = source.user_id
+            owner = await db.get(User, source.user_id)
+            origin_username = owner.username if owner is not None else None
+
     if existing is not None:
         existing.settings = payload.settings
         existing.updated_at = utcnow()
+
+        if origin_user_id is not None:
+            existing.origin_preset_id = payload.origin_preset_id
+            existing.origin_user_id = origin_user_id
+            existing.origin_username = origin_username
+
         db.add(existing)
         await db.commit()
         await db.refresh(existing)
@@ -183,7 +265,14 @@ async def save_mapperatorinator_preset(
             detail=f"You already have {_MAX_PRESETS_PER_USER} presets. Delete one first.",
         )
 
-    row = ToriiMapperatorinatorPreset(user_id=user_id, name=name, settings=payload.settings)
+    row = ToriiMapperatorinatorPreset(
+        user_id=user_id,
+        name=name,
+        settings=payload.settings,
+        origin_preset_id=payload.origin_preset_id if origin_user_id is not None else None,
+        origin_user_id=origin_user_id,
+        origin_username=origin_username,
+    )
     db.add(row)
     await db.commit()
     await db.refresh(row)

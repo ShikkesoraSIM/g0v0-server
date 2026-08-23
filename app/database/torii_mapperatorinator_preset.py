@@ -17,7 +17,7 @@ from datetime import datetime
 from app.utils import utcnow
 
 from sqlalchemy import Column, DateTime, Text, UniqueConstraint
-from sqlmodel import BigInteger, Field, SQLModel, VARCHAR
+from sqlmodel import BigInteger, Field, Integer, SQLModel, VARCHAR
 
 
 class ToriiMapperatorinatorPreset(SQLModel, table=True):
@@ -31,6 +31,13 @@ class ToriiMapperatorinatorPreset(SQLModel, table=True):
 
     # json del cliente, opaco para el server.
     settings: str = Field(sa_column=Column(Text, nullable=False))
+
+    # de donde salio, cuando salio de algun lado: un preset guardado desde el mapa de
+    # otra persona, o copiado de otro preset. El nombre va denormalizado para que la
+    # lista no tenga que joinear usuarios solo para decir "de quien lo sacaste".
+    origin_preset_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True, index=True))
+    origin_user_id: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    origin_username: str | None = Field(default=None, sa_column=Column(VARCHAR(32), nullable=True))
 
     created_at: datetime = Field(default_factory=utcnow, sa_column=Column(DateTime, nullable=False))
     updated_at: datetime = Field(default_factory=utcnow, sa_column=Column(DateTime, nullable=False))
