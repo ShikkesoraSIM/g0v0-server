@@ -7,6 +7,7 @@ from datetime import datetime
 
 from app.models.beatmapset_upload import BeatmapSetFile
 from app.database import Beatmapset, Beatmap, User
+from app.log import logger
 from app.models.beatmap import BeatmapRankStatus
 from app.models.score import GameMode
 from app.calculator import get_calculator
@@ -577,8 +578,18 @@ class BeatmapsetUploadService:
                     try:
                         covers = await BeatmapsetUploadService._generate_covers(storage, beatmapset_id, bg_data)
                         beatmapset.covers = covers
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # sin portadas el set queda en negro para siempre (el fallback
+                        # apunta a una url de ppy que no existe), asi que al menos que
+                        # quede escrito por que fallo en vez de perderse en silencio.
+                        logger.warning(
+                            "no se pudieron generar las portadas del set {} desde {}: {}",
+                            beatmapset_id,
+                            cover_source,
+                            e,
+                        )
+            else:
+                logger.warning("el set {} no trae ninguna imagen: se queda sin portada", beatmapset_id)
 
             await db.commit()
             return updated_beatmap_ids
