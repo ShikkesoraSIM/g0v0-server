@@ -22,7 +22,16 @@ if TYPE_CHECKING:
 
 # el archivo que el generador deja adentro del set con las opciones que uso.
 MAPPERATORINATOR_SIDECAR = "mapperatorinator.json"
-MAPPERATORINATOR_TAG = "mapperatorinator"
+
+# huellas de que el mapa lo escribio una maquina. Mapperatorinator es el que integramos
+# nosotros, pero el badge dice "IA", no "Mapperatorinator": un mapa hecho con otra
+# herramienta del mismo palo tambien es un mapa generado y merece el mismo cartel.
+AI_TAG_MARKERS = (
+    "mapperatorinator",
+    "mug diffusion",
+    "mugdiffusion",
+    "osumapper",
+)
 
 
 def _package_is_ai(z: "zipfile.ZipFile") -> bool:
@@ -48,7 +57,7 @@ def _package_is_ai(z: "zipfile.ZipFile") -> bool:
             continue
 
         for line in head.splitlines():
-            if line.startswith("tags:") and MAPPERATORINATOR_TAG in line:
+            if line.startswith("tags:") and any(marker in line for marker in AI_TAG_MARKERS):
                 return True
 
     return False
