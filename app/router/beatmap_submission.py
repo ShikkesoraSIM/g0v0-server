@@ -32,9 +32,52 @@ from app.models.beatmapset_upload import (
 )
 from app.service.beatmapset_upload_service import BeatmapsetUploadService
 from fastapi import APIRouter, File, Form, HTTPException, Path, Security, UploadFile
+from sqlalchemy import text
 from sqlmodel import col, select
 
 router = APIRouter(prefix="/beatmap-submission", tags=["beatmap submission"])
+
+async def _remove_beatmap(db, beatmap: Beatmap) -> None:
+    """Saca una diff de un set sin llevarse puesto lo que la gente ya jugo.
+
+    Una diff que estuvo arriba junta cosas colgando de ella: los tiempos donde la gente
+    falla, contadores de plays, tokens de score, y sobre todo SCORES. Borrar la fila a lo
+    bruto choca contra esas referencias y la subida entera muere con un 500 sin
+    explicacion (le paso a alguien juntando tres sets en uno).
+
+    Lo que es derivado se borra; lo que es historia de alguien no se toca: en ese caso la
+    diff se marca como borrada y deja de aparecer, pero los scores siguen existiendo.
+    """
+    # derivado: se puede regenerar o directamente no importa.
+    if beatmap.failtimes is not None:
+        await db.delete(beatmap.failtimes)
+
+    for table in ("beatmap_playcounts", "score_tokens"):
+        await db.exec(text(f"DELETE FROM {table} WHERE beatmap_id = :id").bindparams(id=beatmap.id))
+
+    # historia de la gente: si hay algo, la diff se esconde en vez de borrarse.
+    keeps_history = (
+        await db.exec(
+            text(
+                """
+                SELECT EXISTS (SELECT 1 FROM scores WHERE beatmap_id = :id)
+                    OR EXISTS (SELECT 1 FROM best_scores WHERE beatmap_id = :id)
+                    OR EXISTS (SELECT 1 FROM total_score_best_scores WHERE beatmap_id = :id)
+                    OR EXISTS (SELECT 1 FROM room_playlists WHERE beatmap_id = :id)
+                    OR EXISTS (SELECT 1 FROM matchmaking_pool_beatmaps WHERE beatmap_id = :id)
+                """
+            ).bindparams(id=beatmap.id)
+        )
+    ).one()
+
+    if keeps_history:
+        beatmap.deleted_at = datetime.utcnow()
+        db.add(beatmap)
+        logger.info("la diff {} tiene historia, se marca como borrada en vez de borrarla", beatmap.id)
+        return
+
+    await db.delete(beatmap)
+
 
 def _local_submission_status(target: str | None) -> BeatmapRankStatus:
     # Keep local uploads scoreable without granting full ranked semantics/rewards.
@@ -104,15 +147,7 @@ async def initialize_beatmapset_upload(
             deleted_ids = [b.id for b in to_delete]
 
             for b in to_delete:
-                # el failtime de la diff (los tiempos donde la gente falla) tiene el
-                # beatmap_id adentro de su clave primaria: si se borra el beatmap sin
-                # borrarlo antes, sqlalchemy intenta dejarselo en null y revienta con un
-                # AssertionError, que del lado del cliente es un 500 sin explicacion.
-                # Viene cargado con el beatmap (lazy="joined"), asi que no hay ida a la db.
-                if b.failtimes is not None:
-                    await db.delete(b.failtimes)
-
-                await db.delete(b)
+                await _remove_beatmap(db, b)
 
             own_ids = set(
                 (
