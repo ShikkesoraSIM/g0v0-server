@@ -44,7 +44,6 @@ from .chat import (
     ChatMessageDict,
     ChatMessageModel,
 )
-from .high_pp_whitelist import HighPpWhitelist
 from .counts import (
     CountResp,
     MonthlyPlaycounts,
@@ -92,6 +91,7 @@ from .statistics import (
 from .score_anticheat_analysis import ScoreAnticheatAnalysis
 from .suspicious_alert import SuspiciousAlert
 from .torii_replay_render import ToriiReplayRender
+from .torii_mapperatorinator_preset import ToriiMapperatorinatorPreset
 from .torii_score_note import ToriiScoreNote
 from .team import Team, TeamMember, TeamRequest, TeamResp
 from .torii_gifts import ToriiGift
@@ -187,6 +187,7 @@ __all__ = [
     "SearchBeatmapsetsResp",
     "SuspiciousAlert",
     "ToriiReplayRender",
+    "ToriiMapperatorinatorPreset",
     "ToriiScoreNote",
     "Team",
     "TeamMember",

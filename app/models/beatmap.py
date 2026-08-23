@@ -209,6 +209,14 @@ class SearchQueryModel(BaseModel):
         default=False,
         description="only maps generated with Mapperatorinator (implies is_local)",
     )
+    hide_local: bool = Field(
+        default=False,
+        description="leave out maps uploaded to Torii (they are mixed into the listing by default)",
+    )
+    hide_ai: bool = Field(
+        default=False,
+        description="leave out maps generated with Mapperatorinator, from here or from bancho",
+    )
     cursor_string: str | None = Field(
         default=None,
         description="游标字符串，用于分页",

@@ -331,6 +331,10 @@ class BeatmapsetFetcher(BaseFetcher):
 
         params = query.model_dump(exclude_none=True, exclude_unset=True, exclude_defaults=True)
 
+        # filtros nuestros: osu! no los conoce y no tienen por que llegarle.
+        for own in ("is_local", "ai", "hide_local", "hide_ai"):
+            params.pop(own, None)
+
         if query.cursor_string:
             params["cursor_string"] = query.cursor_string
         else:
@@ -417,6 +421,10 @@ class BeatmapsetFetcher(BaseFetcher):
             # 请求下一页数据
             params = next_query.model_dump(exclude_none=True, exclude_unset=True, exclude_defaults=True)
 
+            # filtros nuestros: osu! no los conoce y no tienen por que llegarle.
+            for own in ("is_local", "ai", "hide_local", "hide_ai"):
+                params.pop(own, None)
+
             for k, v in cursor.items():
                 params[f"cursor[{k}]"] = v
 
@@ -468,6 +476,10 @@ class BeatmapsetFetcher(BaseFetcher):
 
                 # 请求并缓存
                 params = query.model_dump(exclude_none=True, exclude_unset=True, exclude_defaults=True)
+
+                # filtros nuestros: osu! no los conoce y no tienen por que llegarle.
+                for own in ("is_local", "ai", "hide_local", "hide_ai"):
+                    params.pop(own, None)
 
                 api_response = await self.request_api(
                     "https://osu.ppy.sh/api/v2/beatmapsets/search",

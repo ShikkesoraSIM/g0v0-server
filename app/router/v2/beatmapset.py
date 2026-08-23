@@ -1,7 +1,5 @@
 import asyncio
-import io
 import os
-import zipfile
 import re
 from typing import Annotated, Literal
 from urllib.parse import parse_qs
@@ -41,9 +39,9 @@ from fastapi import (
     Security,
 )
 from fastapi.responses import RedirectResponse
-from httpx import HTTPError, HTTPStatusError
+from httpx import HTTPError
 from sqlalchemy import or_
-from sqlmodel import col, func, select
+from sqlmodel import col, select
 
 import httpx
 import logging
@@ -81,11 +79,44 @@ async def _search_local_beatmapsets(
     query: SearchQueryModel,
     current_user: User | None,
 ) -> SearchBeatmapsetsResp:
+    data = await _local_sets(db, query, current_user, limit=50)
+    return SearchBeatmapsetsResp(total=len(data), beatmapsets=data)
+
+
+def _is_ai(item: dict) -> bool:
+    """El marcador que el cliente estampa en Tags de todo mapa generado con IA.
+
+    Sirve igual para los mapas de bancho: si su autor genero el mapa con la tool y
+    dejo el tag puesto, el listado lo trata como IA como corresponde.
+    """
+    return "mapperatorinator" in (item.get("tags") or "").lower()
+
+
+def _listing_date(item: dict) -> str:
+    """La fecha con la que un set entra en un listado "lo ultimo".
+
+    Los sets subidos aca no tienen ranked_date (nunca pasaron por el proceso de
+    ranking de osu!), asi que se cae a last_updated, que es la que tienen.
+    """
+    for key in ("ranked_date", "last_updated", "submitted_date"):
+        value = item.get(key)
+        if value:
+            return str(value)
+
+    return ""
+
+
+async def _local_sets(
+    db: Database,
+    query: SearchQueryModel,
+    current_user: User | None,
+    limit: int,
+) -> list:
     stmt = (
         select(Beatmapset)
         .where(col(Beatmapset.is_local).is_(True))
         .order_by(col(Beatmapset.last_updated).desc(), col(Beatmapset.id).desc())
-        .limit(50)
+        .limit(limit)
     )
 
     if query.q:
@@ -114,7 +145,7 @@ async def _search_local_beatmapsets(
             mode = GameMode.from_int(query.m)
             stmt = stmt.where(Beatmapset.beatmaps.any(Beatmap.mode == mode))
         except Exception:
-            return SearchBeatmapsetsResp(total=0, beatmapsets=[])
+            return []
 
     beatmapsets = (await db.exec(stmt)).all()
     includes = _beatmapset_includes_for_user(current_user)
@@ -132,7 +163,63 @@ async def _search_local_beatmapsets(
         for item in data:
             item["tags"] = tags_by_id.get(item.get("id"), item.get("tags") or "")
 
-    return SearchBeatmapsetsResp(total=len(data), beatmapsets=data)
+    if query.hide_ai:
+        data = [item for item in data if not _is_ai(item)]
+
+    return data
+
+
+async def _mix_in_local(
+    db: Database,
+    query: SearchQueryModel,
+    current_user: User | None,
+    remote: SearchBeatmapsetsResp,
+    first_page: bool,
+) -> SearchBeatmapsetsResp:
+    """Mete los mapas subidos aca en el listado que viene de osu!.
+
+    El listado por defecto es un proxy a osu.ppy.sh, que obviamente no conoce
+    nada de lo que se sube a Torii: por eso los mapas de la gente de aca no
+    aparecian nunca. Se mezclan en la primera pagina (las siguientes son cursores
+    de osu!, ahi no hay donde meterlos sin romper la paginacion).
+    """
+    items = list(remote.beatmapsets)
+
+    if query.hide_ai:
+        items = [item for item in items if not _is_ai(item)]
+
+    if query.hide_local or not first_page:
+        return SearchBeatmapsetsResp(
+            total=remote.total if not query.hide_ai else len(items),
+            beatmapsets=items,
+            cursor=remote.cursor,
+            cursor_string=remote.cursor_string,
+        )
+
+    local = await _local_sets(db, query, current_user, limit=24)
+
+    if not local:
+        return SearchBeatmapsetsResp(
+            total=remote.total if not query.hide_ai else len(items),
+            beatmapsets=items,
+            cursor=remote.cursor,
+            cursor_string=remote.cursor_string,
+        )
+
+    # con un orden por fecha se intercalan donde les toca; con cualquier otro
+    # (relevancia, dificultad, popularidad) no hay clave comparable entre las dos
+    # fuentes, asi que van primero y listo.
+    if (query.sort or "").startswith(("ranked", "updated")) or not query.sort:
+        merged = sorted(local + items, key=_listing_date, reverse=True)
+    else:
+        merged = local + items
+
+    return SearchBeatmapsetsResp(
+        total=(remote.total or 0) + len(local),
+        beatmapsets=merged,
+        cursor=remote.cursor,
+        cursor_string=remote.cursor_string,
+    )
 
 
 def _beatmapset_includes_for_user(user: User | None) -> list[str]:
@@ -211,22 +298,21 @@ async def search_beatmapset(
     cursor_hash = generate_hash(cursor)
 
     # 尝试从缓存获取搜索结果
+    # la parte de osu! se cachea sola; los mapas de aca se mezclan despues, sin
+    # cache, asi que una subida nueva aparece en el listado al instante.
+    first_page = not cursor and not query.cursor_string
+
     cached_result = await cache_service.get_search_from_cache(query_hash, cursor_hash)
     if cached_result:
         sets = SearchBeatmapsetsResp(**cached_result)
-        return sets
+        return await _mix_in_local(db, query, current_user, sets, first_page)
 
     try:
         sets = await fetcher.search_beatmapset(query, cursor, redis)
 
         # 缓存搜索结果
         await cache_service.cache_search_result(query_hash, cursor_hash, sets.model_dump())
-        return sets
-    except HTTPStatusError as e:
-        # ppy tira 4xx con ciertas queries; para el que busca eso es 'no hay nada'
-        if 400 <= e.response.status_code < 500:
-            return SearchBeatmapsetsResp(beatmapsets=[], total=0)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        return await _mix_in_local(db, query, current_user, sets, first_page)
     except HTTPError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -479,82 +565,6 @@ async def _cached_osz_looks_valid(storage, cache_path: str) -> bool:
         return True
 
 
-async def _cached_osz_is_complete(storage, cache_path: str, beatmapset_id: int) -> bool:
-    """El .osz cacheado, ¿trae al menos tantas dificultades como sabemos que el set tiene?
-
-    El validador de arriba solo pregunta "¿es un zip sano?", nunca "¿es el zip correcto?". Con eso
-    un set al que el mapper le agrega diffs se queda servido en su version vieja para siempre:
-    paso con "osu! MEGAMIX 2", cacheado el 29 de julio con 5 diffs cuando el set ya tenia 8, y el
-    que entraba al daily challenge se bajaba un archivo SIN la dificultad del challenge.
-
-    Se compara la CANTIDAD y no los nombres, aunque los nombres parezcan mas precisos. Los
-    mappers renombran diffs (en ese mismo set, "Memories" paso a ser "[4K] Memories"), asi que
-    por nombre cualquier renombre daria "falta una"; y si el mirror todavia sirve la version
-    vieja, se entra en un loop de bajar y descartar en cada pedido. La cantidad no se mueve con
-    un renombre y detecta igual el caso que importa, que es que falten diffs.
-
-    Asimetrico a proposito: solo se descarta si el zip trae MENOS. Un zip con diffs de mas es
-    simplemente mas nuevo que nuestra base y sirve igual.
-
-    Leer los nombres de un zip es leer su directorio central, no el archivo: son unos pocos KB
-    aunque el .osz pese 40 MB.
-    """
-    try:
-        async with with_db() as db:
-            en_base = (
-                await db.exec(
-                    select(func.count()).where(col(Beatmap.beatmapset_id) == beatmapset_id)
-                )
-            ).one()
-
-        # Sin nada en la base no hay con que comparar: se sirve lo que hay.
-        if not en_base:
-            return True
-
-        get_path = getattr(storage, "_get_file_path", None)
-        if get_path is None:
-            return True
-
-        with zipfile.ZipFile(get_path(cache_path)) as z:
-            en_zip = sum(1 for n in z.namelist() if n.lower().endswith(".osu"))
-
-        if en_zip < en_base:
-            logger.warning(
-                f"[beatmap dl] el osz cacheado de {beatmapset_id} tiene {en_zip} diffs y la base "
-                f"conoce {en_base}; se descarta y se vuelve a bajar"
-            )
-            return False
-        return True
-    except Exception as e:
-        # Ante la duda no rompemos la descarga: se sirve lo que hay.
-        logger.warning(f"[beatmap dl] no se pudo chequear completitud de {cache_path}: {e}")
-        return True
-
-
-async def _payload_has_all_known_diffs(payload: bytes, beatmapset_id: int) -> bool:
-    """¿El .osz recien bajado trae al menos tantas diffs como sabemos que el set tiene?
-
-    Mismo criterio que _cached_osz_is_complete (cantidad y no nombres, y asimetrico), pero sobre
-    los bytes en memoria, antes de escribirlos al cache.
-    """
-    try:
-        async with with_db() as db:
-            en_base = (
-                await db.exec(
-                    select(func.count()).where(col(Beatmap.beatmapset_id) == beatmapset_id)
-                )
-            ).one()
-        if not en_base:
-            return True
-
-        with zipfile.ZipFile(io.BytesIO(payload)) as z:
-            en_zip = sum(1 for n in z.namelist() if n.lower().endswith(".osu"))
-        return en_zip >= en_base
-    except Exception as e:
-        logger.warning(f"[beatmap dl] no se pudo chequear el payload de {beatmapset_id}: {e}")
-        return True
-
-
 async def _close_response(resp: httpx.Response | None) -> None:
     """Best-effort cleanup of a streaming httpx response and its owned client."""
     if resp is None:
@@ -708,9 +718,7 @@ async def download_beatmapset(
     # ── Layer 1: opportunistic cache from a previous proxy success.
     cache_path = f"cache/beatmapsets/{beatmapset_id}.osz"
     if await storage.is_exists(cache_path):
-        if await _cached_osz_looks_valid(storage, cache_path) and await _cached_osz_is_complete(
-            storage, cache_path, beatmapset_id
-        ):
+        if await _cached_osz_looks_valid(storage, cache_path):
             cached_url = await storage.get_file_url(cache_path)
             logger.info(f"[beatmap dl] cache hit {beatmapset_id} -> {cached_url}")
             return RedirectResponse(url=cached_url, status_code=307)
@@ -718,7 +726,7 @@ async def download_beatmapset(
         # de validacion): lo borramos y seguimos a la cadena de mirrors como si
         # nunca hubiera existido. Self-heal automatico, sin intervencion manual.
         logger.warning(
-            f"[beatmap dl] el osz cacheado de {beatmapset_id} esta envenenado o incompleto; se purga y se re-baja"
+            f"[beatmap dl] cached osz for {beatmapset_id} is invalid (poisoned); purging and refetching"
         )
         try:
             await storage.delete_file(cache_path)
@@ -728,7 +736,7 @@ async def download_beatmapset(
     # ── Negative cache: avoid spamming mirrors when we already proved this
     # map is unavailable everywhere. The lazer client retries failed
     # downloads automatically; without this short-circuit each retry would
-    # walk the entire mirror chain again. 60s TTL gives mirrors time
+    # walk the entire mirror chain again. 5-minute TTL gives mirrors time
     # to refresh their indexes if it's a transient gap.
     neg_cache_key = f"dl_failed:{beatmapset_id}"
     try:
@@ -874,7 +882,7 @@ async def download_beatmapset(
             detail=(
                 "All download mirrors failed. The map either doesn't exist on "
                 "Nerinyan, osu.direct, Gatari, or BeatConnect, or every mirror "
-                "is currently rate-limiting/down. Try again in a minute."
+                "is currently rate-limiting/down. Cached this status for 5 minutes."
             ),
         )
 
@@ -905,7 +913,7 @@ async def download_beatmapset(
             await _mark_unavailable("all-mirrors-non-osz")
             raise HTTPException(
                 status_code=503,
-                detail="All mirrors returned invalid (non-osz) responses. Try again in a minute.",
+                detail="All mirrors returned invalid (non-osz) responses. Cached this status for 5 minutes.",
             )
 
     content_length = chosen.headers.get("Content-Length")
@@ -958,19 +966,6 @@ async def download_beatmapset(
                         f"[beatmap dl] NOT caching {beatmapset_id} from {chosen_label}: "
                         f"payload failed osz integrity check ({total} bytes, "
                         f"content-length={content_length})"
-                    )
-                elif not await _payload_has_all_known_diffs(payload, beatmapset_id):
-                    # Se sirve igual (algo es mejor que nada) pero NO se cachea, asi que el
-                    # proximo pedido vuelve a preguntarle a los mirrors en vez de quedarse pegado
-                    # a la version corta durante dias.
-                    #
-                    # Los mirrors no se actualizan todos a la vez: para el set 2593652, medido,
-                    # osu.direct y nerinyan tenian las 8 diffs mientras otro todavia servia 5.
-                    # Sin este chequeo alcanzaba con que el primero de la cadena fuera el atrasado
-                    # para volver a guardar el archivo viejo apenas lo purgabamos.
-                    logger.warning(
-                        f"[beatmap dl] NO se cachea {beatmapset_id} de {chosen_label}: "
-                        f"le faltan dificultades respecto de lo que sabemos del set"
                     )
                 else:
                     async def _flush_cache():
