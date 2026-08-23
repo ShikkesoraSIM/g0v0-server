@@ -225,6 +225,9 @@ class BeatmapFetcher(BaseFetcher):
         beatmapset = payload.get("beatmapset")
         if isinstance(beatmapset, dict):
             beatmapset.setdefault("is_local", False)
+            # idem para "generado con IA": el tag del autor es lo unico que hay para un
+            # mapa de bancho, y sin la clave la validacion rebota entera.
+            beatmapset.setdefault("ai", "mapperatorinator" in (beatmapset.get("tags") or "").lower())
         return payload
 
     async def get_beatmap(self, beatmap_id: int | None = None, beatmap_checksum: str | None = None) -> BeatmapDict:

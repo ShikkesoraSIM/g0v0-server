@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated
 
-from app.database import Beatmap, Beatmapset, User
+from app.database import Beatmap, Beatmapset, FailTime, User
 from app.database.beatmap import clear_cached_beatmap_raws
 # NOTE: the previous parameter annotation was
 #   Annotated[ClientUser, Security(get_current_user, scopes=["public"])]
@@ -32,7 +32,8 @@ from app.models.beatmapset_upload import (
 )
 from app.service.beatmapset_upload_service import BeatmapsetUploadService
 from fastapi import APIRouter, File, Form, HTTPException, Path, Security, UploadFile
-from sqlmodel import select
+from sqlalchemy import delete
+from sqlmodel import col, select
 
 router = APIRouter(prefix="/beatmap-submission", tags=["beatmap submission"])
 
@@ -96,14 +97,20 @@ async def initialize_beatmapset_upload(
         foreign_keep = 0
 
         if req.beatmaps_to_keep is not None:
-            from sqlmodel import col
-
             stmt = select(Beatmap).where(
                 Beatmap.beatmapset_id == beatmapset.id,
                 ~col(Beatmap.id).in_(req.beatmaps_to_keep),
             )
             to_delete = (await db.exec(stmt)).all()
             deleted_ids = [b.id for b in to_delete]
+
+            if deleted_ids:
+                # los failtime cuelgan del beatmap con el id adentro de su primary key:
+                # sqlalchemy intenta dejarles el beatmap_id en null en vez de borrarlos y
+                # revienta con un AssertionError, que del lado del cliente es un 500 sin
+                # explicacion al subir. Se borran antes, a mano.
+                await db.exec(delete(FailTime).where(col(FailTime.beatmap_id).in_(deleted_ids)))
+
             for b in to_delete:
                 await db.delete(b)
 

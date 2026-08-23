@@ -210,6 +210,9 @@ class BeatmapsetFetcher(BaseFetcher):
         beatconnect_payload = await self._get_beatmapset_from_beatconnect(beatmap_set_id)
         if beatconnect_payload is not None:
             await self._enrich_set_with_osu_direct_checksums(beatmap_set_id, beatconnect_payload)
+            # el espejo tampoco sabe nada de nuestros campos: sin esto la validacion
+            # rebota y la pagina del set devuelve 500.
+            beatconnect_payload = self._ensure_local_flags(beatconnect_payload)
             return adapter.validate_python(beatconnect_payload)  # pyright: ignore[reportReturnType]
 
         try:
@@ -325,6 +328,10 @@ class BeatmapsetFetcher(BaseFetcher):
             logger.opt(colors=True).debug(f"Cache hit for key: <y>{cache_key}</y>")
             try:
                 cached_data = json.loads(cached_result)
+                for beatmapset in cached_data.get("beatmapsets") or []:
+                    if isinstance(beatmapset, dict):
+                        self._ensure_local_flags(beatmapset)
+
                 return SearchBeatmapsetsResp.model_validate(cached_data)
             except Exception as e:
                 logger.warning(f"Cache data invalid, fetching from API: {e}")
@@ -362,6 +369,10 @@ class BeatmapsetFetcher(BaseFetcher):
         await redis_client.set(cache_key, json.dumps(api_response, separators=(",", ":")), ex=cache_ttl)
 
         logger.opt(colors=True).debug(f"Cached result for key: <y>{cache_key}</y> (TTL: {cache_ttl}s)")
+
+        for beatmapset in api_response.get("beatmapsets") or []:
+            if isinstance(beatmapset, dict):
+                self._ensure_local_flags(beatmapset)
 
         resp = SearchBeatmapsetsResp.model_validate(api_response)
 
