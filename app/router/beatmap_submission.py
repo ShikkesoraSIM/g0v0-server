@@ -1,7 +1,8 @@
 from datetime import datetime
 from typing import Annotated
 
-from app.database import Beatmap, Beatmapset, FailTime, User
+from app.database import Beatmap, Beatmapset, User
+from app.database.failtime import FailTime
 from app.database.beatmap import clear_cached_beatmap_raws
 # NOTE: the previous parameter annotation was
 #   Annotated[ClientUser, Security(get_current_user, scopes=["public"])]
