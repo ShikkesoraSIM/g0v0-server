@@ -84,11 +84,17 @@ async def _search_local_beatmapsets(
 
 
 def _is_ai(item: dict) -> bool:
-    """El marcador que el cliente estampa en Tags de todo mapa generado con IA.
+    """Si el set salio de una generacion.
 
-    Sirve igual para los mapas de bancho: si su autor genero el mapa con la tool y
-    dejo el tag puesto, el listado lo trata como IA como corresponde.
+    Para los de aca manda la columna, que se escribe en la subida mirando el archivo
+    que el generador deja adentro del set y no se puede perder editando la metadata.
+    Para los de bancho no hay columna que valga, asi que queda el tag: si su autor
+    genero el mapa con la tool y dejo el tag puesto, se marca igual, que es lo que
+    corresponde.
     """
+    if item.get("ai"):
+        return True
+
     return "mapperatorinator" in (item.get("tags") or "").lower()
 
 
@@ -132,9 +138,14 @@ async def _local_sets(
             )
         )
 
-    # el marcador que el cliente estampa en Tags de todo mapa generado con IA.
+    # la columna la escribe la subida; el tag queda de respaldo para lo viejo.
     if query.ai:
-        stmt = stmt.where(col(Beatmapset.tags).ilike("%mapperatorinator%"))
+        stmt = stmt.where(
+            or_(
+                col(Beatmapset.ai).is_(True),
+                col(Beatmapset.tags).ilike("%mapperatorinator%"),
+            )
+        )
 
     status_filters = _status_filters_from_query(query.s)
     if status_filters:
@@ -160,8 +171,14 @@ async def _local_sets(
             row[0]: row[1] or ""
             for row in (await db.exec(select(Beatmapset.id, Beatmapset.tags).where(col(Beatmapset.id).in_(ids)))).all()
         }
+        ai_by_id = {
+            row[0]: bool(row[1])
+            for row in (await db.exec(select(Beatmapset.id, Beatmapset.ai).where(col(Beatmapset.id).in_(ids)))).all()
+        }
+
         for item in data:
             item["tags"] = tags_by_id.get(item.get("id"), item.get("tags") or "")
+            item["ai"] = ai_by_id.get(item.get("id"), bool(item.get("ai")))
 
     if query.hide_ai:
         data = [item for item in data if not _is_ai(item)]

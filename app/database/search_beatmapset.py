@@ -5,7 +5,7 @@ from sqlmodel import SQLModel
 
 # tags va aca porque el cliente y la web lo miran para el badge de mapas hechos
 # con IA; sin declararlo, la respuesta lo descarta aunque lo llenemos.
-SearchBeatmapset = BeatmapsetModel.generate_typeddict(("beatmaps.max_combo", "pack_tags", "tags"))
+SearchBeatmapset = BeatmapsetModel.generate_typeddict(("beatmaps.max_combo", "pack_tags", "tags", "ai"))
 
 
 class SearchBeatmapsetsResp(SQLModel):

@@ -88,6 +88,9 @@ class BeatmapsetFetcher(BaseFetcher):
     def _ensure_local_flags(beatmapset: dict) -> dict:
         """Normalize remote payloads that do not contain local-only fields."""
         beatmapset.setdefault("is_local", False)
+        # osu! no sabe nada de esto, pero el tag lo pone el autor del mapa: un mapa de
+        # bancho generado con la tool se marca igual que uno de aca.
+        beatmapset.setdefault("ai", "mapperatorinator" in (beatmapset.get("tags") or "").lower())
         for beatmap in beatmapset.get("beatmaps") or []:
             if isinstance(beatmap, dict):
                 beatmap.setdefault("is_local", False)

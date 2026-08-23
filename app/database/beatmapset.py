@@ -295,6 +295,11 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
     video: bool = Field(sa_column=Column(Boolean, index=True))
     is_local: bool = Field(default=False)
 
+    # generado con Mapperatorinator. Se marca en la subida (por el sidecar que el
+    # generador deja adentro del set, o por el tag en cualquier diff) y NO se
+    # desmarca: editarle patrones a un mapa generado no lo hace hecho a mano.
+    ai: bool = Field(default=False, index=True)
+
     # optional
     # converts: list[Beatmap] = Relationship(back_populates="beatmapset")
     current_nominations: OnDemand[list[BeatmapNomination] | None] = Field(None, sa_column=Column(JSON))

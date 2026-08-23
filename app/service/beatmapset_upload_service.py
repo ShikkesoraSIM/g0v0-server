@@ -19,6 +19,40 @@ if TYPE_CHECKING:
     from app.storage.base import StorageService
     from sqlmodel.ext.asyncio.session import AsyncSession
 
+# el archivo que el generador deja adentro del set con las opciones que uso.
+MAPPERATORINATOR_SIDECAR = "mapperatorinator.json"
+MAPPERATORINATOR_TAG = "mapperatorinator"
+
+
+def _package_is_ai(z: "zipfile.ZipFile") -> bool:
+    """Si el paquete trae la firma de una generacion.
+
+    Se mira el sidecar (que sobrevive a editar el mapa) y, por las dudas, el tag en
+    CUALQUIER .osu del set, no solo en el primero: un set con tres diffs a mano y una
+    generada es un set con IA adentro.
+    """
+    names = z.namelist()
+
+    if any(n.rsplit("/", 1)[-1].lower() == MAPPERATORINATOR_SIDECAR for n in names):
+        return True
+
+    for name in names:
+        if not name.endswith(".osu"):
+            continue
+
+        try:
+            with z.open(name) as f:
+                head = f.read(4096).decode("utf-8", errors="ignore").lower()
+        except Exception:
+            continue
+
+        for line in head.splitlines():
+            if line.startswith("tags:") and MAPPERATORINATOR_TAG in line:
+                return True
+
+    return False
+
+
 # rango propio para las diffs subidas aca, fuera del espacio de ids de bancho.
 LOCAL_BEATMAP_ID_BASE = 900000000
 
@@ -200,6 +234,15 @@ class BeatmapsetUploadService:
             if not osu_files:
                 return []
             processed_osu_files: set[str] = set()
+
+            # "esto lo hizo la IA" no puede depender de un tag: el tag del SET sale de
+            # un solo .osu (en un set con diffs a mano, de una de esas), y ademas
+            # cualquiera lo borra editando la metadata en el editor. El archivo que deja
+            # el generador adentro del set no se toca al editar, asi que es el que vale.
+            # Una vez marcado, no se desmarca: editarle patrones a un mapa generado no
+            # lo convierte en hecho a mano.
+            if _package_is_ai(z):
+                beatmapset.ai = True
 
             bg_filename = None
 
