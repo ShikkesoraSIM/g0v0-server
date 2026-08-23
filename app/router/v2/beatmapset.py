@@ -196,7 +196,9 @@ async def _mix_in_local(
             cursor_string=remote.cursor_string,
         )
 
-    local = await _local_sets(db, query, current_user, limit=24)
+    # buscando algo puntual conviene traer varios; en el listado pelado, un puñado,
+    # que si no los de aca (que son los mas nuevos) tapan toda la primera pagina.
+    local = await _local_sets(db, query, current_user, limit=24 if query.q else 8)
 
     if not local:
         return SearchBeatmapsetsResp(
