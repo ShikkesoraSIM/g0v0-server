@@ -89,6 +89,11 @@ async def initialize_beatmapset_upload(
 
         # Delete beatmaps not in beatmaps_to_keep
         deleted_ids: list[int] = []
+        # ids que el cliente quiere conservar pero que no son de este set: una diff que
+        # ya se subio suelta y ahora la meten adentro del set. no se le puede mudar el id
+        # (seria robarselo al mapa original junto con sus scores), asi que se le reserva
+        # uno nuevo, que es lo que el cliente le va a terminar poniendo.
+        foreign_keep = 0
 
         if req.beatmaps_to_keep is not None:
             from sqlmodel import col
@@ -102,15 +107,26 @@ async def initialize_beatmapset_upload(
             for b in to_delete:
                 await db.delete(b)
 
+            own_ids = set(
+                (
+                    await db.exec(
+                        select(Beatmap.id).where(Beatmap.beatmapset_id == beatmapset.id)
+                    )
+                ).all()
+            )
+            foreign_keep = len([i for i in req.beatmaps_to_keep if i not in own_ids])
+
         # Update status if target is provided
         beatmapset.beatmap_status = _local_submission_status(req.target)
 
         existing_files = await BeatmapsetUploadService.get_beatmapset_files(storage, beatmapset.id)
 
         # Allocate new beatmaps if needed
-        if req.beatmaps_to_create > 0:
+        to_create = req.beatmaps_to_create + foreign_keep
+
+        if to_create > 0:
             await BeatmapsetUploadService.allocate_beatmaps(
-                db, beatmapset.id, current_user.id, req.beatmaps_to_create
+                db, beatmapset.id, current_user.id, to_create
             )
 
         beatmapset_id = beatmapset.id
