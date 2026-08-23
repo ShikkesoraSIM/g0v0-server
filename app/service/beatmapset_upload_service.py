@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     from app.storage.base import StorageService
     from sqlmodel.ext.asyncio.session import AsyncSession
 
+# rango propio para las diffs subidas aca, fuera del espacio de ids de bancho.
+LOCAL_BEATMAP_ID_BASE = 900000000
+
+
 class BeatmapsetUploadService:
     @staticmethod
     def _extract_background_filename(osu_content: str) -> str | None:
@@ -101,8 +105,20 @@ class BeatmapsetUploadService:
         beatmap_ids = []
         beatmapset = await db.get(Beatmapset, beatmapset_id)
         status = beatmapset.beatmap_status if beatmapset is not None else BeatmapRankStatus.WIP
+
+        # los ids locales salen de su propio rango, igual que los sets (800.000.000+).
+        # dejarlos al AUTO_INCREMENT de la tabla los ponia adentro del rango de ids que
+        # bancho todavia esta repartiendo (la tabla guarda tambien los mapas espejados),
+        # asi que tarde o temprano un mapa nuevo de bancho choca con una subida local.
+        from sqlmodel import func
+
+        stmt = select(func.max(Beatmap.id)).where(Beatmap.id >= LOCAL_BEATMAP_ID_BASE)
+        next_id = max(LOCAL_BEATMAP_ID_BASE, (await db.exec(stmt)).first() or LOCAL_BEATMAP_ID_BASE)
+
         for _ in range(count):
+            next_id += 1
             beatmap = Beatmap(
+                id=next_id,
                 beatmapset_id=beatmapset_id,
                 user_id=user_id,
                 mode=GameMode.OSU, # Default
