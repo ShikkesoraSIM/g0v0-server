@@ -19,6 +19,7 @@ from sqlmodel import col, select
 from app.database import ToriiMapperatorinatorPreset, User
 from app.dependencies.database import Database, Redis
 from app.dependencies.user import get_current_user
+from app.models.model import UTCBaseModel
 from app.service.discord_feed import notify_mapperatorinator_map
 from app.utils import utcnow
 
@@ -108,7 +109,7 @@ class MapperatorinatorPresetPatch(BaseModel):
     settings: str | None = Field(default=None, min_length=2, max_length=_MAX_SETTINGS_CHARS)
 
 
-class MapperatorinatorPreset(BaseModel):
+class MapperatorinatorPreset(UTCBaseModel):
     id: int
     name: str
     settings: str
@@ -355,7 +356,10 @@ async def save_mapperatorinator_preset(
     ).first()
 
     if existing is not None and not payload.overwrite:
-        raise HTTPException(status_code=409, detail=f'You already have a preset called "{name}".')
+        # el nombre que se muestra es el GUARDADO y no el que se pidio: la collation es
+        # ciega a mayusculas, asi que el cuadro decia "Stream" mientras en la lista dice
+        # "stream", y parecia que estaba hablando de otro.
+        raise HTTPException(status_code=409, detail=f'You already have a preset called "{existing.name}".')
 
     origin_preset_id, origin_user_id, origin_username = await _resolve_origin(db, user_id, payload)
 
@@ -366,7 +370,7 @@ async def save_mapperatorinator_preset(
         # la atribucion sigue a los settings: si lo que se guarda encima no viene de
         # ningun lado, el "taken from X" de antes ya no describe nada de lo que hay
         # adentro, y a X le seguia contando un fork para siempre.
-        existing.origin_preset_id = origin_preset_id
+        existing.origin_preset_id = origin_preset_id if origin_user_id is not None else None
         existing.origin_user_id = origin_user_id
         existing.origin_username = origin_username
 
@@ -522,7 +526,16 @@ async def delete_mapperatorinator_preset(
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
 ) -> None:
     user_id = current_user.id
-    row = await db.get(ToriiMapperatorinatorPreset, preset_id)
+    # lockeada, no db.get: el guardado de una copia lee esta misma fila para heredarle
+    # la atribucion, y sin lock de los dos lados esa copia puede nacer justo despues de
+    # que juntamos los hijos, apuntando a una fila que se borra un instante despues.
+    row = (
+        await db.exec(
+            select(ToriiMapperatorinatorPreset)
+            .where(col(ToriiMapperatorinatorPreset.id) == preset_id)
+            .with_for_update()
+        )
+    ).first()
 
     if row is None or row.user_id != user_id:
         raise HTTPException(status_code=404, detail="That preset isn't yours or doesn't exist.")
