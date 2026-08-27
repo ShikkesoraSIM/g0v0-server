@@ -571,6 +571,55 @@ class SuspiciousAlertService:
             },
         )
 
+    @classmethod
+    async def alert_custom_rulesets(
+        cls,
+        session: AsyncSession,
+        *,
+        username: str,
+        rulesets: list[str],
+        client_hash: str | None,
+        ip_address: str | None,
+        user_id: int | None = None,
+    ) -> AlertResult:
+        """Avisa que alguien intento entrar con rulesets ajenos cargados.
+
+        Severidad critical a proposito: esto SI pinguea. Un ruleset es codigo con
+        permisos totales dentro del juego (relax, aim assist, lo que sea), asi
+        que no es algo para mirar cuando alguien pase por el canal.
+
+        Lo reporta el propio cliente antes de rendirse, o sea que el contenido es
+        de afuera y no se puede confiar: el nombre de usuario puede no existir y
+        los nombres de ruleset son texto libre. Se recorta y se guarda como dato,
+        nunca se usa para decidir nada.
+
+        Deduplicado por usuario + lista de rulesets: reintentar la conexion no
+        vuelve a pinguear, pero cambiar de ruleset si.
+        """
+        limpios = [str(r)[:64] for r in rulesets][:10]
+        lista = ", ".join(limpios) or "(sin nombre)"
+        fingerprint = cls._fingerprint("custom_rulesets", username.lower(), "|".join(sorted(limpios)))
+
+        return await cls._create_alert(
+            session,
+            kind="custom_rulesets",
+            severity="critical",
+            fingerprint=fingerprint,
+            title=f"Custom rulesets: {username}"[:200],
+            body=(
+                f"{username} tried to connect with custom rulesets loaded and was blocked. "
+                f"Rulesets: {lista}"
+            ),
+            user_id=user_id,
+            payload={
+                "username": username,
+                "user_id": user_id,
+                "rulesets": limpios,
+                "client_hash": client_hash,
+                "ip_address": ip_address,
+            },
+        )
+
     @staticmethod
     async def get_pending_alerts(session: AsyncSession, limit: int = 10) -> list[SuspiciousAlert]:
         return (
