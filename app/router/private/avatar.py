@@ -99,10 +99,25 @@ async def _clear_avatar(
         raise HTTPException(status_code=403, detail="Your account is restricted and cannot perform this action.")
 
     url = user.avatar_url
+    path = None
     if url:
         path = storage.get_file_name_by_url(url)
         if path:
             await storage.delete_file(path)
+
+    # Sacar la foto tambien la saca de la cola de revision. Antes no se hacia y
+    # la fila quedaba pendiente para siempre apuntando a un archivo borrado: el
+    # mod la abria, no habia nada, y no se iba nunca de la lista.
+    if path:
+        await record_media_upload(
+            session,
+            user_id=user.id,
+            media_type=MEDIA_AVATAR,
+            url=url,
+            storage_path=path,
+            filehash=None,
+            is_nsfw=False,
+        )
 
     # Back to the "no custom avatar" sentinel; the transform resolver then hands
     # out a default (the AI set, or the plain logo if the user opted out).
@@ -193,6 +208,85 @@ async def upload_avatar_from_web(
     _validate_web_token(x_torii_web_token)
     user = await _web_target_user(session, user_id)
     return await _replace_avatar(session, user, content, is_nsfw, storage, cache_service)
+
+
+@router.post("/web/avatar/nsfw", name="标记头像 nsfw (torii-web)", tags=["用户", "g0v0 API"])
+async def set_avatar_nsfw_from_web(
+    session: Database,
+    storage: StorageService,
+    cache_service: UserCacheService,
+    user_id: Annotated[int, Form()],
+    is_nsfw: Annotated[bool, Form()],
+    x_torii_web_token: Annotated[str | None, Header(alias="X-Torii-Web-Token")] = None,
+):
+    """Marca o desmarca como nsfw el avatar que el usuario YA tiene puesto.
+
+    El cliente solo puede decidirlo al subir, asi que para corregir una foto mal
+    etiquetada hay que volver a subirla. Desde el sitio se puede hacer bien: es
+    una casilla que se guarda sola. Pasa por record_media_upload igual que una
+    subida, asi marcarla la mete en la cola de revision y desmarcarla la saca.
+    """
+    _validate_web_token(x_torii_web_token)
+    user = await _web_target_user(session, user_id)
+    if await user.is_restricted(session):
+        raise HTTPException(status_code=403, detail="Your account is restricted and cannot perform this action.")
+
+    user.avatar_nsfw = is_nsfw
+
+    url = user.avatar_url
+    storage_path = storage.get_file_name_by_url(url) if url else None
+    has_custom = bool(url) and url != User.DEFAULT_AVATAR_URL and bool(storage_path)
+
+    # Sin foto propia la casilla igual se guarda: asi se puede tildar ANTES de
+    # subir y la subida sale ya marcada, que es el orden natural cuando ya sabes
+    # que la foto es subida de tono. Lo que no se hace es meterla en la cola de
+    # revision ni avisarle a nadie, porque todavia no hay nada que revisar.
+    if has_custom:
+        # avatars/{id}_{sha256}.png: el hash es lo que va entre el guion bajo y
+        # la extension. Se saca de ahi para no releer el archivo entero solo
+        # para tocar un booleano.
+        filehash = storage_path.rsplit("/", 1)[-1].rsplit(".", 1)[0].split("_", 1)[-1] or None
+        await record_media_upload(
+            session,
+            user_id=user.id,
+            media_type=MEDIA_AVATAR,
+            url=url,
+            storage_path=storage_path,
+            filehash=filehash,
+            is_nsfw=is_nsfw,
+        )
+    if is_nsfw and has_custom:
+        try:
+            await SuspiciousAlertService.alert_nsfw_media_upload(
+                session,
+                user_id=user.id,
+                username=user.username,
+                media_type=MEDIA_AVATAR,
+                url=url,
+                filehash=filehash,
+            )
+        except Exception:
+            logger.warning(f"failed to enqueue NSFW media alert for user {user.id}", exc_info=True)
+    await cache_service.invalidate_user_cache(user.id)
+    await session.commit()
+
+    return {"is_nsfw": is_nsfw}
+
+
+@router.get("/web/avatar/state", name="estado del avatar (torii-web)", tags=["用户", "g0v0 API"])
+async def get_avatar_state_from_web(
+    session: Database,
+    user_id: int,
+    x_torii_web_token: Annotated[str | None, Header(alias="X-Torii-Web-Token")] = None,
+):
+    """Lo que el sitio necesita para dibujar la casilla: si hay foto propia y como esta marcada."""
+    _validate_web_token(x_torii_web_token)
+    user = await _web_target_user(session, user_id)
+    url = user.avatar_url
+    return {
+        "has_custom_avatar": bool(url) and url != User.DEFAULT_AVATAR_URL,
+        "is_nsfw": bool(user.avatar_nsfw),
+    }
 
 
 @router.delete("/web/avatar", name="删除头像 (torii-web)", tags=["用户", "g0v0 API"], status_code=204)
