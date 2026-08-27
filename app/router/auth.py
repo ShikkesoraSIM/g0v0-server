@@ -667,6 +667,36 @@ async def oauth_token(
                     user_id=user_id,
                     source="oauth_token",
                 )
+
+            # torii: con la verificacion prendida, un cliente que no reconocemos no entra.
+            # Antes esto solo se miraba al mandar un score, asi que se podia jugar toda una
+            # sesion con un cliente cualquiera y enterarse recien al final.
+            #
+            # Es la mitad que le falta a la guarda de rulesets del cliente: esa vive en la
+            # maquina del jugador y se saca compilando tu propio build, pero hacerlo cambia
+            # el hash de osu.Game.dll y entonces se cae aca. Una sin la otra no sirve.
+            #
+            # No aplica al sitio web, que no manda hash de version.
+            if settings.check_client_version and not validation.is_valid:
+                await LoginLogService.record_failed_login(
+                    db=db,
+                    request=request,
+                    attempted_username=username,
+                    login_method="password",
+                    user_agent=raw_user_agent,
+                    client_hash=normalized_version_hash,
+                    client_label=client_label_for_log,
+                    notes="Unrecognised client build",
+                )
+
+                return create_oauth_error_response(
+                    error="invalid_client",
+                    description=(
+                        "This client build is not recognised by Torii. Please download the "
+                        "official client, and remove any custom rulesets from your rulesets folder."
+                    ),
+                    hint="unrecognised client hash",
+                )
             try:
                 await redis.set(
                     LAST_CLIENT_HASH_KEY.format(user_id=user_id),
