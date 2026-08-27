@@ -252,9 +252,16 @@ _rank_memo: "WeakKeyDictionary[AsyncSession, dict]" = WeakKeyDictionary()
 # Active-only ranking windows (osu-style, shorter threshold). A player whose
 # last passed play in a mode is older than ACTIVE_DAYS is dropped from that
 # mode's ranking entirely (dense renumber, those below move up) until they play
-# again; 15-30d is still ranked but flagged inactive so clients grey the row.
+# again.
+#
+# 2026-08: GREY_DAYS == ACTIVE_DAYS a proposito. Con los dos iguales la ventana
+# gris queda VACIA y is_inactive nunca da True, asi que los rankings muestran
+# solo gente que jugo dentro de ACTIVE_DAYS, sin filas atenuadas. Para volver a
+# tener grises alcanza con bajar GREY_DAYS (ej. 10) y los de 10-15d se marcan.
+# De referencia: osu oficial desrankea a los 90 dias; somos mucho mas estrictos
+# a proposito, para que el board refleje quien juega HOY.
 # These are the single source of truth for the thresholds.
-ACTIVE_DAYS = 30
+ACTIVE_DAYS = 15
 GREY_DAYS = 15
 
 

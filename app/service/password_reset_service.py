@@ -78,11 +78,7 @@ class PasswordResetService:
             user = result.first()
 
             if not user:
-                logger.info(
-                    "Password reset requested for unknown email %s from IP %s",
-                    normalized_email,
-                    ip_address,
-                )
+                logger.info(f"Password reset requested for unknown email {normalized_email} from IP {ip_address}")
                 return True, self.SUCCESS_REQUEST_MESSAGE
 
             reset_code = self.generate_reset_code()
@@ -108,15 +104,10 @@ class PasswordResetService:
 
             if not email_sent:
                 await redis.delete(reset_code_key)
-                logger.warning("Password reset email enqueue failed for %s", normalized_email)
+                logger.warning(f"Password reset email enqueue failed for {normalized_email}")
                 return False, "Failed to send reset email. Please try again."
 
-            logger.info(
-                "Password reset code generated for user_id=%s email=%s ip=%s",
-                user.id,
-                normalized_email,
-                ip_address,
-            )
+            logger.info(f"Password reset code generated for user_id={user.id} email={normalized_email} ip={ip_address}")
             return True, self.SUCCESS_REQUEST_MESSAGE
 
     async def send_password_reset_email(self, email: str, code: str, username: str) -> bool:
@@ -199,7 +190,7 @@ class PasswordResetService:
                 html_content=html_content,
                 metadata={"type": "password_reset", "email": email},
             )
-            logger.info("Password reset email queued for %s", email)
+            logger.info(f"Password reset email queued for {email}")
             return True
         except Exception:
             logger.exception("Failed to queue password reset email")
@@ -286,17 +277,13 @@ class PasswordResetService:
                 await redis.delete(attempts_key)
 
                 logger.info(
-                    "Password reset success for user_id=%s email=%s ip=%s ua=%s invalidated_tokens=%s",
-                    user_id,
-                    normalized_email,
-                    ip_address,
-                    user_agent[:200],
-                    tokens_deleted,
+                    f"Password reset success for user_id={user_id} email={normalized_email} "
+                    f"ip={ip_address} ua={user_agent[:200]} invalidated_tokens={tokens_deleted}"
                 )
                 return True, "Password reset successful. All active sessions were signed out."
             except Exception:
                 await session.rollback()
-                logger.exception("Failed to reset password for %s", normalized_email)
+                logger.exception(f"Failed to reset password for {normalized_email}")
                 return False, "Failed to reset password. Please try again."
 
     async def get_reset_attempts_count(self, email: str, redis: Redis) -> int:
