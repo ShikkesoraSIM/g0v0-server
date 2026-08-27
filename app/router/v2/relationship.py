@@ -9,6 +9,7 @@ from app.database.user import User, UserModel
 from app.dependencies.api_version import APIVersion
 from app.dependencies.database import Database
 from app.dependencies.user import ClientUser, get_current_user
+from app.service.owner_friend_service import owner_user_id
 from app.utils import api_doc
 
 from .router import router
@@ -19,7 +20,6 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import col, exists, select
 
 FRIEND_TARGET_INCLUDES = [*User.CARD_INCLUDES, "support_level"]
-DEFAULT_OWNER_FRIEND_USER_ID = 3
 
 
 class RelationshipTargetBody(BaseModel):
@@ -127,13 +127,13 @@ async def _upsert_relationship(
 
     if (
         relationship_type == RelationshipType.FOLLOW
-        and target == DEFAULT_OWNER_FRIEND_USER_ID
-        and current_user_id != DEFAULT_OWNER_FRIEND_USER_ID
+        and target == owner_user_id()
+        and current_user_id != owner_user_id()
     ):
         owner_follow = (
             await db.exec(
                 select(RelationshipTable).where(
-                    RelationshipTable.user_id == DEFAULT_OWNER_FRIEND_USER_ID,
+                    RelationshipTable.user_id == owner_user_id(),
                     RelationshipTable.target_id == current_user_id,
                 )
             )
@@ -142,7 +142,7 @@ async def _upsert_relationship(
         if owner_follow is None:
             db.add(
                 RelationshipTable(
-                    user_id=DEFAULT_OWNER_FRIEND_USER_ID,
+                    user_id=owner_user_id(),
                     target_id=current_user_id,
                     type=RelationshipType.FOLLOW,
                 )

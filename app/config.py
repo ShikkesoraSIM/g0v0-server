@@ -819,6 +819,19 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="Token privado de ToriiHalo para canjear coins por puntos"),
         "torii",
     ]
+    # torii: el dueño del server. 0 => se usa el default historico (3).
+    torii_owner_user_id: Annotated[
+        int,
+        Field(default=0, description="Id del dueño del server, para la amistad automatica"),
+        "torii",
+    ]
+    # Que el dueño siga a todo el que se registre, sin esperar a que lo agreguen
+    # a el. Es en un solo sentido: la lista de amigos del otro no cambia.
+    torii_owner_follows_everyone: Annotated[
+        bool,
+        Field(default=False, description="El dueño sigue automaticamente a cada usuario nuevo"),
+        "torii",
+    ]
     # torii: secreto que usa torii-web para hacer cosas en nombre de un usuario
     # que el sitio ya autentico. Otra vez uno propio y no el de mod-alerts: cada
     # credencial tiene que poder revocarse sola. Vacio => 503 y las rutas /web/

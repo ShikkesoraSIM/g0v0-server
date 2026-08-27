@@ -33,6 +33,7 @@ from app.models.oauth import (
 )
 from app.models.score import GameMode
 from app.service.login_log_service import LoginLogService
+from app.service.owner_friend_service import owner_follows
 from app.service.password_reset_service import password_reset_service
 from app.service.suspicious_alert_service import SuspiciousAlertService
 from app.service.turnstile_service import turnstile_service
@@ -370,6 +371,25 @@ async def register_user(
             db.add(statistics_ap)
         daily_challenge_user_stats = DailyChallengeStats(user_id=new_user.id)
         db.add(daily_challenge_user_stats)
+
+        # El dueño del server se agrega a si mismo al recien llegado, sin
+        # esperar a que lo agreguen a el. Es en un solo sentido: la lista de
+        # amigos del nuevo no se toca, lo unico que ve es un seguidor mas.
+        #
+        # Best-effort a proposito: que falle no puede voltear un registro. Es
+        # preferible una cuenta creada sin el seguimiento que un jugador que no
+        # puede entrar por algo puramente cosmetico.
+        #
+        # El id se guarda en una variable ANTES del try por lo que avisa el
+        # comentario largo de mas abajo: leer new_user.id adentro de un except
+        # puede disparar una recarga lazy que vuelve a fallar, y ahi el error se
+        # come el registro entero. Con el id ya en la mano eso no puede pasar.
+        new_user_id = new_user.id
+        try:
+            await owner_follows(db, new_user_id)
+        except Exception:
+            logger.warning(f"could not add owner follow for new user {new_user_id}", exc_info=True)
+
         await db.commit()
 
         # The commit above expires every attribute on `new_user`
