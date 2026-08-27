@@ -677,7 +677,12 @@ async def oauth_token(
             # el hash de osu.Game.dll y entonces se cae aca. Una sin la otra no sirve.
             #
             # No aplica al sitio web, que no manda hash de version.
-            if settings.check_client_version and not validation.is_valid:
+            exempt = user_id in settings.client_check_exempt_user_ids
+
+            if exempt and not validation.is_valid:
+                logger.info(f"client check skipped for exempt user {user_id} (hash {normalized_version_hash})")
+
+            if settings.check_client_version and not validation.is_valid and not exempt:
                 await LoginLogService.record_failed_login(
                     db=db,
                     request=request,

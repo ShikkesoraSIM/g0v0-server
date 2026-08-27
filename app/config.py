@@ -837,6 +837,17 @@ CALCULATOR_CONFIG='{}'
     # credencial tiene que poder revocarse sola. Vacio => 503 y las rutas /web/
     # no funcionan, que es el default correcto en cualquier instancia que no
     # tenga el sitio al lado.
+    # torii: cuentas que pueden entrar con cualquier build. Es para las cuentas de
+    # prueba propias, que corren clientes compilados a mano y por definicion tienen
+    # un hash que no esta registrado.
+    #
+    # Lista chica y a mano a proposito: si esto crece, lo que hay que arreglar es el
+    # registro de hashes, no seguir agregando excepciones.
+    client_check_exempt_user_ids: Annotated[
+        list[int],
+        Field(default_factory=list, description="Usuarios que pueden entrar con cualquier cliente"),
+        "torii",
+    ]
     torii_web_token: Annotated[
         str,
         Field(default="", description="Token privado de torii-web para actuar en nombre de un usuario"),

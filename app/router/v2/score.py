@@ -919,11 +919,13 @@ async def create_solo_score(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid ruleset ID")
 
-    if not (
-        client_version := await verification_service.validate_client_version(
-            version_hash,
-        )
-    ):
+    client_version = await verification_service.validate_client_version(version_hash)
+
+    # torii: las cuentas de prueba propias corren builds compilados a mano, o sea
+    # con un hash que por definicion no esta registrado. Se las exime aca tambien y
+    # no solo en el login, si no entrarian pero no podrian mandar un score, que es
+    # justo lo que hay que poder probar.
+    if not client_version and user_id not in settings.client_check_exempt_user_ids:
         if version_hash:
             await verification_service.record_unknown_hash(
                 version_hash,
