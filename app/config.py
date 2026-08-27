@@ -819,6 +819,16 @@ CALCULATOR_CONFIG='{}'
         Field(default="", description="Token privado de ToriiHalo para canjear coins por puntos"),
         "torii",
     ]
+    # torii: secreto que usa torii-web para hacer cosas en nombre de un usuario
+    # que el sitio ya autentico. Otra vez uno propio y no el de mod-alerts: cada
+    # credencial tiene que poder revocarse sola. Vacio => 503 y las rutas /web/
+    # no funcionan, que es el default correcto en cualquier instancia que no
+    # tenga el sitio al lado.
+    torii_web_token: Annotated[
+        str,
+        Field(default="", description="Token privado de torii-web para actuar en nombre de un usuario"),
+        "torii",
+    ]
     suspicious_alert_pp_threshold: Annotated[
         float,
         Field(default=1200.0, description="è¾¾åˆ°è¯¥ pp åŽç›´æŽ¥å‘Šè­¦"),

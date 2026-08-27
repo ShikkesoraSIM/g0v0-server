@@ -1,6 +1,8 @@
 import hashlib
+import secrets
 from typing import Annotated
 
+from app.config import settings
 from app.database.profile_media_review import MEDIA_AVATAR
 from app.database.user import User
 from app.dependencies.cache import UserCacheService
@@ -14,9 +16,100 @@ from app.utils import check_image
 
 from .router import router
 
-from fastapi import File, Form, HTTPException
+from fastapi import File, Form, Header, HTTPException
 
 logger = log("Avatar")
+
+
+async def _replace_avatar(
+    session: Database,
+    user: User,
+    content: bytes,
+    is_nsfw: bool,
+    storage: StorageService,
+    cache_service: UserCacheService,
+) -> dict:
+    """Guarda el avatar de un usuario y devuelve la url nueva.
+
+    Vive aparte de la ruta porque hay dos formas de llegar: el cliente con su
+    token, y torii-web con el token de servicio. Todo lo que importa (validar la
+    imagen, borrar la anterior, dejar el rastro para moderacion, avisar si es
+    nsfw, invalidar el cache) tiene que pasar igual por las dos, asi que se
+    escribe una sola vez.
+    """
+    if await user.is_restricted(session):
+        raise HTTPException(status_code=403, detail="Your account is restricted and cannot perform this action.")
+
+    # check file
+    format_ = check_image(content, 5 * 1024 * 1024, 256, 256)
+
+    if url := user.avatar_url:
+        path = storage.get_file_name_by_url(url)
+        if path:
+            await storage.delete_file(path)
+
+    filehash = hashlib.sha256(content).hexdigest()
+    storage_path = f"avatars/{user.id}_{filehash}.png"
+    if not await storage.is_exists(storage_path):
+        await storage.write_file(storage_path, content, f"image/{format_}")
+    url = await storage.get_file_url(storage_path)
+    user.avatar_url = url
+    user.avatar_nsfw = is_nsfw
+    await record_media_upload(
+        session,
+        user_id=user.id,
+        media_type=MEDIA_AVATAR,
+        url=url,
+        storage_path=storage_path,
+        filehash=filehash,
+        is_nsfw=is_nsfw,
+    )
+    if is_nsfw:
+        # Best-effort: a failure here must never block the upload itself.
+        try:
+            await SuspiciousAlertService.alert_nsfw_media_upload(
+                session,
+                user_id=user.id,
+                username=user.username,
+                media_type=MEDIA_AVATAR,
+                url=url,
+                filehash=filehash,
+            )
+        except Exception:
+            logger.warning(f"failed to enqueue NSFW media alert for user {user.id}", exc_info=True)
+    await cache_service.invalidate_user_cache(user.id)
+    await session.commit()
+
+    return {
+        "url": url,
+        "avatar_url": url,
+        "is_nsfw": is_nsfw,
+        "filehash": filehash,
+    }
+
+
+async def _clear_avatar(
+    session: Database,
+    user: User,
+    storage: StorageService,
+    cache_service: UserCacheService,
+) -> None:
+    """Borra el avatar subido y deja al usuario con el que le toca por defecto."""
+    if await user.is_restricted(session):
+        raise HTTPException(status_code=403, detail="Your account is restricted and cannot perform this action.")
+
+    url = user.avatar_url
+    if url:
+        path = storage.get_file_name_by_url(url)
+        if path:
+            await storage.delete_file(path)
+
+    # Back to the "no custom avatar" sentinel; the transform resolver then hands
+    # out a default (the AI set, or the plain logo if the user opted out).
+    user.avatar_url = User.DEFAULT_AVATAR_URL
+    user.avatar_nsfw = False
+    await cache_service.invalidate_user_cache(user.id)
+    await session.commit()
 
 
 @router.post("/avatar/upload", name="上传头像", tags=["用户", "g0v0 API"])
@@ -40,55 +133,7 @@ async def upload_avatar(
     返回:
     - 头像 URL 和文件哈希值
     """
-    if await current_user.is_restricted(session):
-        raise HTTPException(status_code=403, detail="Your account is restricted and cannot perform this action.")
-
-    # check file
-    format_ = check_image(content, 5 * 1024 * 1024, 256, 256)
-
-    if url := current_user.avatar_url:
-        path = storage.get_file_name_by_url(url)
-        if path:
-            await storage.delete_file(path)
-
-    filehash = hashlib.sha256(content).hexdigest()
-    storage_path = f"avatars/{current_user.id}_{filehash}.png"
-    if not await storage.is_exists(storage_path):
-        await storage.write_file(storage_path, content, f"image/{format_}")
-    url = await storage.get_file_url(storage_path)
-    current_user.avatar_url = url
-    current_user.avatar_nsfw = is_nsfw
-    await record_media_upload(
-        session,
-        user_id=current_user.id,
-        media_type=MEDIA_AVATAR,
-        url=url,
-        storage_path=storage_path,
-        filehash=filehash,
-        is_nsfw=is_nsfw,
-    )
-    if is_nsfw:
-        # Best-effort: a failure here must never block the upload itself.
-        try:
-            await SuspiciousAlertService.alert_nsfw_media_upload(
-                session,
-                user_id=current_user.id,
-                username=current_user.username,
-                media_type=MEDIA_AVATAR,
-                url=url,
-                filehash=filehash,
-            )
-        except Exception:
-            logger.warning(f"failed to enqueue NSFW media alert for user {current_user.id}", exc_info=True)
-    await cache_service.invalidate_user_cache(current_user.id)
-    await session.commit()
-
-    return {
-        "url": url,
-        "avatar_url": url,
-        "is_nsfw": is_nsfw,
-        "filehash": filehash,
-    }
+    return await _replace_avatar(session, current_user, content, is_nsfw, storage, cache_service)
 
 
 @router.delete("/avatar", name="删除头像", tags=["用户", "g0v0 API"], status_code=204)
@@ -103,18 +148,61 @@ async def delete_avatar(
     Operates on the stored column value (never the emit-time default-N.png URL),
     so it only ever deletes a real custom upload, never a shared default image.
     """
-    if await current_user.is_restricted(session):
-        raise HTTPException(status_code=403, detail="Your account is restricted and cannot perform this action.")
+    await _clear_avatar(session, current_user, storage, cache_service)
 
-    url = current_user.avatar_url
-    if url:
-        path = storage.get_file_name_by_url(url)
-        if path:
-            await storage.delete_file(path)
 
-    # Back to the "no custom avatar" sentinel; the transform resolver then hands
-    # out a default (the AI set, or the plain logo if the user opted out).
-    current_user.avatar_url = User.DEFAULT_AVATAR_URL
-    current_user.avatar_nsfw = False
-    await cache_service.invalidate_user_cache(current_user.id)
-    await session.commit()
+# -- torii-web -----------------------------------------------------------------
+# torii-web (el osu-web nuestro) no puede pedir un token del usuario: el password
+# grant exige turnstile para todo lo que no sea el cliente del juego, y meter un
+# captcha en el login del sitio solo para poder subir una foto no tiene sentido.
+# Pero el sitio YA autentica al usuario por su cuenta y YA escribe en lazer_users
+# a traves de sus vistas, asi que confiar en el no agrega permisos que no tuviera.
+#
+# Entonces mismo trato que el bot de discord: un secreto compartido en el header
+# y el id del usuario explicito en el cuerpo. Lo importante es que estas rutas no
+# duplican nada, llaman a las mismas funciones que el cliente, asi que la imagen
+# se valida igual, el rastro de moderacion queda igual y el cache se invalida
+# igual. Si esto lo hiciera el sitio escribiendo el archivo a mano se perderia
+# todo eso sin que nadie se entere.
+def _validate_web_token(token: str | None) -> None:
+    expected = (settings.torii_web_token or "").strip()
+    provided = (token or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="torii-web token is not configured")
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="invalid torii-web token")
+
+
+async def _web_target_user(session: Database, user_id: int) -> User:
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    return user
+
+
+@router.post("/web/avatar/upload", name="上传头像 (torii-web)", tags=["用户", "g0v0 API"])
+async def upload_avatar_from_web(
+    session: Database,
+    storage: StorageService,
+    cache_service: UserCacheService,
+    content: Annotated[bytes, File(...)],
+    user_id: Annotated[int, Form()],
+    is_nsfw: Annotated[bool, Form()] = False,
+    x_torii_web_token: Annotated[str | None, Header(alias="X-Torii-Web-Token")] = None,
+):
+    _validate_web_token(x_torii_web_token)
+    user = await _web_target_user(session, user_id)
+    return await _replace_avatar(session, user, content, is_nsfw, storage, cache_service)
+
+
+@router.delete("/web/avatar", name="删除头像 (torii-web)", tags=["用户", "g0v0 API"], status_code=204)
+async def delete_avatar_from_web(
+    session: Database,
+    storage: StorageService,
+    cache_service: UserCacheService,
+    user_id: int,
+    x_torii_web_token: Annotated[str | None, Header(alias="X-Torii-Web-Token")] = None,
+):
+    _validate_web_token(x_torii_web_token)
+    user = await _web_target_user(session, user_id)
+    await _clear_avatar(session, user, storage, cache_service)
