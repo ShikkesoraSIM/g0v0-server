@@ -21,7 +21,7 @@ from typing import Annotated
 
 from fastapi import HTTPException, Query, Security
 from pydantic import BaseModel
-from sqlmodel import select
+from sqlmodel import col, select
 
 from app.config import settings
 from app.database import MatchmakingPool, MatchmakingUserStats, User
@@ -63,6 +63,56 @@ async def _get_pick(db, user_id: int, ruleset_base: int, season: str) -> ToriiCo
             )
         )
     ).first()
+
+
+@router.get("/torii/comfort-pick/bulk")
+async def get_comfort_picks_bulk(
+    db: Database,
+    current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
+    user_ids: str = Query(..., description="Ids separados por coma"),
+    ruleset_id: int = Query(0),
+):
+    """El star rating elegido de varios jugadores de una.
+
+    Lo usa el panel de ranked play del toolbar para poner "Fulano 7.5" al lado de
+    cada nombre en la cola. De a uno serian N pedidos para dibujar una lista de
+    ocho, asi que van todos juntos.
+
+    Es dato publico: el pick de cada uno ya se ve al enfrentarlo, y el punto de
+    mostrarlo en la cola es justamente poder decidir si entrar.
+    """
+    mode = GameMode.from_int(ruleset_id).to_base_ruleset()
+    season = settings.matchmaking_current_season
+
+    ids: list[int] = []
+    for parte in user_ids.split(","):
+        parte = parte.strip()
+        if parte.isdigit():
+            ids.append(int(parte))
+
+    # Tope duro: esto lo llama una pantalla que muestra ocho nombres. Sin limite,
+    # un id repetido mil veces convierte un dibujo de lista en un scan de tabla.
+    ids = list(dict.fromkeys(ids))[:50]
+
+    if not ids:
+        return {"season_id": season, "picks": {}}
+
+    filas = (
+        await db.exec(
+            select(ToriiComfortPick).where(
+                col(ToriiComfortPick.user_id).in_(ids),
+                ToriiComfortPick.ruleset_id == int(mode),
+                ToriiComfortPick.season_id == season,
+            )
+        )
+    ).all()
+
+    # Los que todavia no eligieron simplemente no aparecen; el cliente muestra el
+    # nombre solo. Devolver un 0 seria peor: se leeria como "elegio cero estrellas".
+    return {
+        "season_id": season,
+        "picks": {str(f.user_id): round(f.picked_star_rating, 2) for f in filas},
+    }
 
 
 @router.get("/torii/comfort-pick/floor")
