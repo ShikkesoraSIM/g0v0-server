@@ -355,6 +355,11 @@ async def register_user(
             # the column directly via SQL/SQLAlchemy) from being misled.
             is_supporter=False,
             support_level=0,
+            # De aca en adelante, todo el que se registra tiene el saludo pendiente.
+            # No se manda ACA: registrarse y entrar al juego no son el mismo momento
+            # (te podes anotar por la web y abrir Torii al otro dia), y un mensaje de
+            # chat mandado a alguien que todavia no esta adentro no lo ve nadie.
+            torii_welcome_pending=True,
         )
         db.add(new_user)
         await db.commit()
@@ -716,6 +721,23 @@ async def oauth_token(
                 f"user_id={user_id} client_id={client_id} ua={raw_user_agent!r} "
                 f"hint_keys={observed_hint_keys} version_hint={request_version_hint!r}",
             )
+
+        # El saludo que quedo pendiente del registro se entrega ACA, en el primer
+        # login desde el cliente: asi el que se anoto por la web tambien lo recibe.
+        #
+        # Va DESPUES de la cadena de arriba y no adentro: metido en el medio partia
+        # el if/elif en dos y el log de "client login without version hash" pasaba a
+        # dispararse tambien cuando SI habia hash.
+        #
+        # user_agent.is_client y no el hash: el hash puede faltar (justo por eso
+        # existe ese log) y en ese caso igual entro por el cliente.
+        if user_agent.is_client and user.torii_welcome_pending:
+            try:
+                from app.service.torii_welcome import schedule_pending_welcome
+
+                schedule_pending_welcome(user_id)
+            except Exception as e:
+                logger.warning(f"Failed to schedule welcome PM for user {user_id}: {e}")
 
         # ç”Ÿæˆä»¤ç‰Œ
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)

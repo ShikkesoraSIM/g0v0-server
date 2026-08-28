@@ -151,6 +151,23 @@ async def _upsert_relationship(
             owner_follow.type = RelationshipType.FOLLOW
 
     await db.commit()
+
+    # Te hiciste amigo del fundador: te contesta el y te cae el regalo. Va DESPUES
+    # del commit para que la amistad quede guardada aunque el regalo falle, y es
+    # idempotente por usuario, asi que agregar y sacar en loop no paga de nuevo.
+    if (
+        relationship_type == RelationshipType.FOLLOW
+        and target == owner_user_id()
+        and current_user_id != owner_user_id()
+    ):
+        try:
+            from app.service.torii_welcome import handle_founder_friend
+
+            await handle_founder_friend(db, current_user)
+            await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed founder friend gift for user {current_user_id}: {e}")
+
     return await _transform_user_relation(db, relationship_type, current_user_id, target, current_user_ruleset)
 
 

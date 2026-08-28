@@ -2640,13 +2640,13 @@ async def process_user(
                 ),
                 "fl_non_vanilla": (
                     "Your score gave 0pp! You changed Flashlight settings. "
-                    "Only default Flashlight settings earn pp \u2014 "
-                    "set size, delay and combo-based size back to their defaults."
+                    "Only default Flashlight settings earn pp. "
+                    "Set size, delay and combo-based size back to their defaults."
                 ),
             }
             _pm_text = _pm_msgs.get(
                 _reason_code,
-                "Your score gave 0pp \u2014 it did not meet the requirements to earn pp.",
+                "Your score gave 0pp. It did not meet the requirements to earn pp.",
             )
             async with _with_db() as _pm_session:
                 _pm_user = await _pm_session.get(_User, user_id)

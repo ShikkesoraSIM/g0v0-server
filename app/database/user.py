@@ -411,6 +411,12 @@ class UserModel(DatabaseModel[UserDict]):
     profile_colour: str | None = None
     username: str = Field(max_length=32, unique=True, index=True)
 
+    # El saludo de bienvenida todavia no se entrego. Lo prende el registro y lo apaga
+    # el primer login DESDE EL CLIENTE, no el registro mismo: si no, el que se anota
+    # por la web y entra al juego recien al otro dia nunca lo ve. Arranca en False,
+    # asi que las cuentas que ya existen no tienen nada pendiente.
+    torii_welcome_pending: bool = False
+
     page: OnDemand[Page] = Field(sa_column=Column(JSON), default=Page(html="", raw=""))
     previous_usernames: OnDemand[list[str]] = Field(default_factory=list, sa_column=Column(JSON))
     support_level: OnDemand[int] = Field(default=0)
