@@ -77,9 +77,16 @@ async def _send_pm_from(sender_id: int, session: AsyncSession, user: User, text:
         return False
 
 
-# Cuanto espera el saludo desde que entras. Cae con la sesion ya arrancada en vez de
-# encima de la pantalla de login, que es cuando nadie mira el chat.
-WELCOME_DELAY_SECONDS = 12.0
+# Respiro DESPUES de que el chat del jugador ya esta escuchando. No se cuenta desde
+# el login: a los 12 segundos de loguearse el cliente todavia esta armando la
+# conexion, y meterlo a un canal nuevo en ese momento le tiraba dos errores en la
+# cara ("Failed to join channel" y una excepcion de SignalR). Un mensaje de
+# bienvenida que aterriza junto a dos carteles rojos asusta mas de lo que saluda.
+WELCOME_DELAY_SECONDS = 8.0
+
+# Hasta cuando esperamos que el chat conecte antes de rendirnos. Si no llega, el flag
+# queda pendiente y se reintenta en el proximo login.
+WELCOME_CONNECT_TIMEOUT_SECONDS = 120.0
 
 # Los ids que ya tienen un saludo en camino. asyncio no guarda referencia fuerte a las
 # tareas sueltas (se las puede llevar el recolector a mitad de la espera), y de paso
@@ -96,6 +103,25 @@ def schedule_pending_welcome(user_id: int) -> None:
     tarea.add_done_callback(lambda _: _en_camino.pop(user_id, None))
 
 
+async def _wait_for_chat(user_id: int) -> bool:
+    """Espera a que el chat del jugador este escuchando de verdad.
+
+    `connect_client` tiene los websockets de chat abiertos por usuario. Mientras no
+    haya ninguno, mandarle un PM significa crearle un canal y empujarle un mensaje a
+    alguien que todavia no puede recibirlos: el cliente responde con "Failed to join
+    channel" y le queda el cartel de error puesto.
+    """
+    from app.router.notification.server import server
+
+    esperado = 0.0
+    while esperado < WELCOME_CONNECT_TIMEOUT_SECONDS:
+        if server.connect_client.get(user_id):
+            return True
+        await asyncio.sleep(1.0)
+        esperado += 1.0
+    return False
+
+
 async def _deliver_pending_welcome(user_id: int) -> None:
     """Espera, y recien ahi manda el saludo si sigue pendiente.
 
@@ -104,6 +130,10 @@ async def _deliver_pending_welcome(user_id: int) -> None:
     desde el cliente. Preferimos que llegue tarde a que se pierda.
     """
     try:
+        if not await _wait_for_chat(user_id):
+            logger.info(f"torii_welcome: {user_id} nunca conecto el chat, queda pendiente")
+            return
+
         await asyncio.sleep(WELCOME_DELAY_SECONDS)
 
         from app.dependencies.database import with_db
