@@ -9,6 +9,7 @@ from app.database.user import User, UserModel
 from app.dependencies.api_version import APIVersion
 from app.dependencies.database import Database
 from app.dependencies.user import ClientUser, get_current_user
+from app.log import logger
 from app.service.owner_friend_service import owner_user_id
 from app.utils import api_doc
 
@@ -165,8 +166,17 @@ async def _upsert_relationship(
 
             await handle_founder_friend(db, current_user)
             await db.commit()
-        except Exception as e:
-            logger.warning(f"Failed founder friend gift for user {current_user_id}: {e}")
+        except Exception:
+            # exception() y no warning(): sin el traceback, un error aca solo dice que
+            # algo fallo. Y ademas la sesion puede quedar sucia despues de un fallo a
+            # mitad de transaccion, asi que se limpia antes de seguir: si no, la
+            # consulta que arma la respuesta de abajo hereda el estado roto y el que
+            # agrego al fundador se come un 500 aunque la amistad ya haya quedado.
+            logger.exception(f"Failed founder friend gift for user {current_user_id}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
     return await _transform_user_relation(db, relationship_type, current_user_id, target, current_user_ruleset)
 
