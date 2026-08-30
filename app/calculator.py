@@ -181,6 +181,23 @@ async def calculate_pp(
     db_beatmap = await session.get(Beatmap, score.beatmap_id)
     is_local_beatmap = bool(db_beatmap and db_beatmap.is_local)
 
+    # Torii: osu!autopilot solo puntua en mapsets rankeados de osu! de verdad.
+    #
+    # Torii corre con enable_all_beatmap_pp prendido, o sea que por defecto CUALQUIER mapa da
+    # pp: graveyard, loved, pending, WIP y los que se suben aca. Para el resto de los modos eso
+    # esta bien, pero con autopilot dejo de cerrar: sacado el aim, el pp queda colgado casi solo
+    # del tapping, asi que con un mapa hecho a medida (o directamente uno propio) mas hardware
+    # de muchas teclas o macros se llega a cualquier numero.
+    #
+    # Ojo con el alcance: esto mira gamemode == OSUAP y NADA mas. Vanilla, relax, taiko, mania y
+    # catch siguen exactamente igual, con el override global intacto.
+    #
+    # Sin mapa en la base devolvemos 0 a proposito: si no sabemos el estado, no es rankeado.
+    if score.gamemode == GameMode.OSUAP:
+        ap_status = db_beatmap.beatmap_status if db_beatmap is not None else None
+        if ap_status is None or not ap_status.has_pp():
+            return 0
+
     if settings.suspicious_score_check and not is_local_beatmap:
         beatmap_banned = (
             await session.exec(select(exists()).where(col(BannedBeatmaps.beatmap_id) == score.beatmap_id))
