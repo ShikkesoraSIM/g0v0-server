@@ -164,7 +164,7 @@ async def _upsert_relationship(
         try:
             from app.service.torii_welcome import handle_founder_friend
 
-            await handle_founder_friend(db, current_user)
+            await handle_founder_friend(db, current_user_id)
             await db.commit()
         except Exception:
             # exception() y no warning(): sin el traceback, un error aca solo dice que

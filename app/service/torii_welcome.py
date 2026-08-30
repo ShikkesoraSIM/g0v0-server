@@ -155,7 +155,7 @@ async def _deliver_pending_welcome(user_id: int) -> None:
         logger.warning(f"torii_welcome: no pude entregar el saludo a {user_id}: {e}")
 
 
-async def handle_founder_friend(session: AsyncSession, user: User) -> bool:
+async def handle_founder_friend(session: AsyncSession, user_id: int) -> bool:
     """Alguien agrego al fundador: le contesta y le regala puntos. Una sola vez.
 
     El regalo manda: si `award` dice que no lo aplico (ya lo habia cobrado antes),
@@ -163,7 +163,11 @@ async def handle_founder_friend(session: AsyncSession, user: User) -> bool:
     no puede pasar que reciba el texto del regalo sin el regalo, ni que le llegue
     de nuevo por agregar y sacar al fundador en loop.
     """
-    user_id = user.id
+    # Recibe el ID y no el objeto User a proposito. El router commitea la amistad justo
+    # antes de llamar aca, y las sesiones se arman con expire_on_commit en True (el
+    # default, ver app/dependencies/database.py): despues de ese commit CUALQUIER atributo
+    # del User queda expirado, y leerlo dispara un refresh lazy que en async revienta.
+    # Con el objeto, esto se caia en el propio `user.id` y nadie cobraba el regalo.
     founder_id = _founder_user_id()
     if user_id is None or user_id == founder_id:
         return False
@@ -177,6 +181,11 @@ async def handle_founder_friend(session: AsyncSession, user: User) -> bool:
         idempotency_key=f"founder_friend_gift:{user_id}",
     )
     if not otorgado:
+        return False
+
+    # Recien aca cargamos el User, ya con la sesion de este scope, para los mensajes.
+    user = await session.get(User, user_id)
+    if user is None:
         return False
 
     await _send_pm_from(founder_id, session, user, FOUNDER_FRIEND_MESSAGE)
