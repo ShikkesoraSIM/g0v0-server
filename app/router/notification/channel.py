@@ -252,8 +252,15 @@ async def get_channel(
                     try:
                         await session.commit()
                         await session.refresh(db_channel)
-                        # el commit expira current_user y el transform de abajo lo usa
+                        # El commit expira a los DOS usuarios de la lista, no solo a
+                        # current_user, y el transform de abajo los serializa a ambos.
+                        # Refrescando uno solo, el otro salia como {} y la respuesta
+                        # entera moria con un ValidationError de UserModel: el cliente
+                        # lo mostraba como "Failed to join channel". Se veia solo la
+                        # primera vez, porque despues el nombre ya queda normalizado y
+                        # no se vuelve a commitear aca.
                         await session.refresh(current_user)
+                        await session.refresh(target_user)
                     except Exception as exc:
                         await session.rollback()
                         logger.warning(

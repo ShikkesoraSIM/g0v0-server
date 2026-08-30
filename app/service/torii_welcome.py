@@ -56,15 +56,28 @@ FOUNDER_GIFT_MESSAGE = (
 )
 
 
-async def _send_pm_from(sender_id: int, session: AsyncSession, user: User, text: str) -> bool:
-    """Un PM de `sender_id` a `user`. Devuelve si salio.
+async def _send_pm_from(sender_id: int, session: AsyncSession, user_id: int, text: str) -> bool:
+    """Un PM de `sender_id` al usuario `user_id`. Devuelve si salio.
 
     Reusa el Bot de banchobot porque ya resuelve lo dificil (crear el canal PM si
     no existe, meter a los dos, y avisarle al server de chat para que le llegue en
     vivo al que esta conectado). Lo unico que cambia es de quien sale.
+
+    Toma el ID y NO el objeto User a proposito, y lo recarga con populate_existing
+    en cada llamada. Mandar el PM commitea, y con expire_on_commit en True (el
+    default) ese commit deja expirado al User que nos pasaron: la llamada siguiente
+    toca un atributo, eso dispara IO lazy fuera del greenlet y explota con
+    MissingGreenlet. Pasaba justo con los dos mensajes seguidos del regalo del
+    fundador: salia el primero y el segundo se perdia.
     """
     try:
         from app.router.notification.banchobot import Bot
+
+        # populate_existing fuerza releer: sin eso, si el objeto ya esta en el
+        # identity map expirado, get() lo devuelve tal cual y el problema sigue.
+        user = await session.get(User, user_id, populate_existing=True)
+        if user is None:
+            return False
 
         emisor = Bot(bot_user_id=sender_id)
         channel = await emisor._ensure_pm_channel(user, session)
@@ -73,7 +86,7 @@ async def _send_pm_from(sender_id: int, session: AsyncSession, user: User, text:
         await emisor._send_message(channel, text, session)
         return True
     except Exception as e:
-        logger.warning(f"torii_welcome: no pude mandar el PM de {sender_id} a {user.id}: {e}")
+        logger.warning(f"torii_welcome: no pude mandar el PM de {sender_id} a {user_id}: {e}")
         return False
 
 
@@ -143,7 +156,13 @@ async def _deliver_pending_welcome(user_id: int) -> None:
             if user is None or not user.torii_welcome_pending:
                 return
 
-            if not await _send_pm_from(BANCHOBOT_ID, session, user, WELCOME_MESSAGE):
+            if not await _send_pm_from(BANCHOBOT_ID, session, user_id, WELCOME_MESSAGE):
+                return
+
+            # Mandar el PM commiteo, asi que el User de arriba quedo expirado y
+            # tocarlo ahora reventaria. Lo traemos de nuevo antes de marcarlo.
+            user = await session.get(User, user_id, populate_existing=True)
+            if user is None:
                 return
 
             user.torii_welcome_pending = False
@@ -183,11 +202,8 @@ async def handle_founder_friend(session: AsyncSession, user_id: int) -> bool:
     if not otorgado:
         return False
 
-    # Recien aca cargamos el User, ya con la sesion de este scope, para los mensajes.
-    user = await session.get(User, user_id)
-    if user is None:
-        return False
-
-    await _send_pm_from(founder_id, session, user, FOUNDER_FRIEND_MESSAGE)
-    await _send_pm_from(founder_id, session, user, FOUNDER_GIFT_MESSAGE)
+    # Los dos van por ID: cada uno recarga el User por su cuenta, porque el primero
+    # commitea y dejaria expirado a cualquier objeto que le pasemos al segundo.
+    await _send_pm_from(founder_id, session, user_id, FOUNDER_FRIEND_MESSAGE)
+    await _send_pm_from(founder_id, session, user_id, FOUNDER_GIFT_MESSAGE)
     return True
