@@ -3798,9 +3798,14 @@ async def approve_username_change_request(
     request.reviewed_by_id = admin.id
     session.add(request)
 
+    # Snapshot antes del commit: con expire_on_commit en True, leer user.id despues
+    # dispara IO lazy y revienta.
+    approved_user_id = user.id
+
     await cache_service.invalidate_user_cache(user.id)
     await session.commit()
     await session.refresh(request)
+    await session.refresh(user)
 
     try:
         announcement = GlobalAnnouncement.init(
@@ -3814,7 +3819,27 @@ async def approve_username_change_request(
     except Exception as e:
         logger.debug(f"Failed to notify user {user.id} about approved rename: {e}")
 
-    return _ucr_to_admin_resp(request, new_name, user.avatar_url)
+    # La respuesta se arma ANTES del PM: mandarlo commitea, y eso deja expirados a
+    # request y a user, que son justo lo que lee _ucr_to_admin_resp.
+    resp = _ucr_to_admin_resp(request, new_name, user.avatar_url)
+
+    # Ademas de la notificacion in-game, que solo la ve quien esta conectado en ese
+    # momento, le dejamos un PM: queda en el canal y lo lee cuando entre.
+    try:
+        from app.service.torii_welcome import send_bot_pm
+
+        await send_bot_pm(
+            session,
+            approved_user_id,
+            f"Your username change to '{new_name}' was approved. "
+            f"You were {old_username} and you're now {new_name}.",
+        )
+        await session.commit()
+    except Exception as e:
+        await session.rollback()
+        logger.debug(f"Failed to PM user {approved_user_id} about approved rename: {e}")
+
+    return resp
 
 
 @router.post(
@@ -3838,6 +3863,8 @@ async def reject_username_change_request(
         raise HTTPException(status_code=409, detail="Request already reviewed")
 
     reason = (req.reason or "").strip() or None
+    # Snapshot antes del commit, mismo motivo que en approve.
+    rejected_user_id = request.user_id
     request.status = UCR_REJECTED
     request.reject_reason = reason
     request.reviewed_at = utcnow()
@@ -3862,7 +3889,25 @@ async def reject_username_change_request(
     except Exception as e:
         logger.debug(f"Failed to notify user {request.user_id} about rejected rename: {e}")
 
-    return _ucr_to_admin_resp(request, user.username if user else None, user.avatar_url if user else None)
+    # Igual que en approve: la respuesta primero, el PM despues.
+    resp = _ucr_to_admin_resp(request, user.username if user else None, user.avatar_url if user else None)
+
+    # Aca el PM importa mas que en approve, porque lleva el motivo del rechazo y la
+    # notificacion in-game se pierde si la persona no estaba conectada.
+    try:
+        from app.service.torii_welcome import send_bot_pm
+
+        texto = f"Your username change to '{request.requested_username}' was rejected."
+        if reason:
+            texto += f" Reason: {reason}"
+
+        await send_bot_pm(session, rejected_user_id, texto)
+        await session.commit()
+    except Exception as e:
+        await session.rollback()
+        logger.debug(f"Failed to PM user {rejected_user_id} about rejected rename: {e}")
+
+    return resp
 
 
 # ========== Previous Usernames (admin edit) ==========

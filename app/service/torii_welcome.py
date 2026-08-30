@@ -174,6 +174,16 @@ async def _deliver_pending_welcome(user_id: int) -> None:
         logger.warning(f"torii_welcome: no pude entregar el saludo a {user_id}: {e}")
 
 
+async def send_bot_pm(session: AsyncSession, user_id: int, text: str) -> bool:
+    """Un PM de ToriiHalo a `user_id`. Devuelve si salio.
+
+    Envoltorio publico de `_send_pm_from` para el resto del codigo. A diferencia de
+    una notificacion in-game, esto queda guardado en el canal: si la persona no
+    estaba conectada, lo lee cuando entra.
+    """
+    return await _send_pm_from(BANCHOBOT_ID, session, user_id, text)
+
+
 async def handle_founder_friend(session: AsyncSession, user_id: int) -> bool:
     """Alguien agrego al fundador: le contesta y le regala puntos. Una sola vez.
 
