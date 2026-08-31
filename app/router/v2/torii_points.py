@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Query, Security
@@ -87,6 +87,22 @@ async def get_my_points(
     return {"balance": await get_balance(db, current_user.id)}
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Marca como UTC un datetime naive.
+
+    MySQL guarda DATETIME sin zona, asi que lo que sale de la base es naive
+    aunque el valor SEA UTC (se escribe con utcnow()). Serializado sin offset,
+    el cliente lo parsea como hora LOCAL: en el juego, DateTimeOffset lo asume
+    local y le suma el huso de la persona.
+
+    Eso rompia el cartel de puntos para todo el hemisferio este. El filtro
+    "recien ganado" del cliente acepta menos de 10 minutos, y a alguien en UTC+8
+    un evento de hace 30 segundos le daba 8 horas y media de antiguedad, asi que
+    no se mostraba nunca. Al oeste de UTC daba negativo y pasaba de casualidad.
+    """
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
 class PointTransactionResp(BaseModel):
     amount: int
     reason: str
@@ -124,7 +140,7 @@ async def get_my_points_history(
                 reason=r.reason,
                 ref=r.ref,
                 balance_after=r.balance_after,
-                created_at=r.created_at,
+                created_at=_as_utc(r.created_at),
             )
             for r in rows
         ],
@@ -178,7 +194,7 @@ async def get_my_points_feed(
                 reason=r.reason,
                 ref=r.ref,
                 balance_after=r.balance_after,
-                created_at=r.created_at,
+                created_at=_as_utc(r.created_at),
             )
             for r in rows
         ],
