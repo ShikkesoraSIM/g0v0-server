@@ -16,13 +16,13 @@ cobrar 300 puntos cada vez.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from app.const import BANCHOBOT_ID
 from app.database.user import User
 from app.log import logger
-from app.models.torii_points import PointReason
-from app.service import points_service
 
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 def _founder_user_id() -> int:
@@ -49,6 +49,9 @@ FOUNDER_FRIEND_MESSAGE = (
     "Server to report them or get help through tickets! Thanks young grasshopper, "
     "a thank-you-gift is on its way to you!"
 )
+
+# Lo que se ve como remitente en el regalo, en vez del "Torii Halo" por defecto.
+FOUNDER_GIFT_SENDER = "Shikkesora"
 
 FOUNDER_GIFT_MESSAGE = (
     "Thank you for being here! Run away with this small pouch and don't tell anyone! "
@@ -220,49 +223,49 @@ async def handle_founder_friend(session: AsyncSession, user_id: int) -> bool:
     if user_id is None or user_id == founder_id:
         return False
 
-    otorgado = await points_service.award(
-        session,
-        user_id,
-        FOUNDER_GIFT_POINTS,
-        PointReason.GIFT,
-        ref="founder_friend_gift",
-        idempotency_key=f"founder_friend_gift:{user_id}",
-    )
-    if not otorgado:
+    from app.database.torii_gifts import ToriiGift
+
+    # Un REGALO de verdad, no puntos sueltos mas un PM.
+    #
+    # Antes esto otorgaba los puntos por su cuenta y mandaba el texto del regalo
+    # como mensaje de chat. Estaba mal por dos lados: el texto del regalo es parte
+    # del regalo y va adentro de su presentacion (el cliente ya lo muestra
+    # envuelto, con remitente y puntos), y ademas cada PM extra creaba su propia
+    # entrada en la lista de chats.
+    #
+    # ToriiGift ya trae todo lo necesario: puntos, mensaje, remitente y hasta
+    # cosmeticos para cuando el aura este aprobada y shippeada.
+    # Se mira tambien el mensaje y no solo created_by: un regalo que el fundador
+    # mande A MANO desde el admin tambien lleva su id, y sin esta condicion
+    # bloquearia el automatico para esa persona para siempre.
+    ya_tiene = (
+        await session.exec(
+            select(ToriiGift.id).where(
+                col(ToriiGift.recipient_id) == user_id,
+                col(ToriiGift.created_by) == founder_id,
+                col(ToriiGift.message) == FOUNDER_GIFT_MESSAGE,
+            )
+        )
+    ).first()
+
+    # Idempotente por su cuenta: agregar y sacar al fundador en loop no paga otra vez.
+    if ya_tiene is not None:
         return False
 
-    # El aura va antes que los mensajes para que, cuando lea el que la anuncia,
-    # ya la tenga de verdad. record_owned_cosmetics es idempotente por su cuenta,
-    # asi que no necesita su propia guarda.
-    aura_nueva = False
-
-    try:
-        # Sin id configurado no se otorga nada y no se manda el mensaje del aura:
-        # el resto del regalo (los puntos) sigue igual.
-        if FOUNDER_GIFT_AURA_ID is None:
-            raise SkipAuraGift
-
-        from app.database.torii_store import record_owned_cosmetics
-
-        await record_owned_cosmetics(
-            session, user_id, [FOUNDER_GIFT_AURA_ID], source="founder_friend_gift"
+    session.add(
+        ToriiGift(
+            recipient_id=user_id,
+            points=FOUNDER_GIFT_POINTS,
+            grant_cosmetics=(
+                json.dumps([FOUNDER_GIFT_AURA_ID]) if FOUNDER_GIFT_AURA_ID else None
+            ),
+            message=FOUNDER_GIFT_MESSAGE,
+            sender=FOUNDER_GIFT_SENDER,
+            created_by=founder_id,
         )
-        await session.commit()
-        aura_nueva = True
-    except SkipAuraGift:
-        pass
-    except Exception:
-        # Que falle el aura no se lleva puesto al regalo de puntos, que ya esta
-        # otorgado. Se avisa y se sigue con los mensajes.
-        await session.rollback()
-        logger.exception(f"torii_welcome: no pude dar el aura a {user_id}")
+    )
+    await session.commit()
 
-    # Los mensajes van por ID: cada uno recarga el User por su cuenta, porque el
-    # primero commitea y dejaria expirado a cualquier objeto que le pasemos al segundo.
+    # Por chat va SOLO el saludo del fundador. Lo del regalo lo cuenta el regalo.
     await _send_pm_from(founder_id, session, user_id, FOUNDER_FRIEND_MESSAGE)
-    await _send_pm_from(founder_id, session, user_id, FOUNDER_GIFT_MESSAGE)
-
-    if aura_nueva:
-        await _send_pm_from(founder_id, session, user_id, FOUNDER_GIFT_AURA_MESSAGE)
-
     return True
