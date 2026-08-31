@@ -55,6 +55,18 @@ FOUNDER_GIFT_MESSAGE = (
     "-Shikkesora, Torii Founder"
 )
 
+# El aura que viene con el regalo. Es a proposito la mas discreta del catalogo
+# (dos particulas, MaxAlive 7): le va a caer a muchisima gente, y una llamativa
+# ensuciaria todos los leaderboards. El id tiene que existir en TORII_AURAS y
+# tener un .toriicosmetic con el mismo nombre del lado del cliente, si no queda
+# poseida pero invisible.
+FOUNDER_GIFT_AURA_ID = "grasshopper-hop"
+
+FOUNDER_GIFT_AURA_MESSAGE = (
+    "Oh, and the grasshoppers seem to like you. They're yours now: "
+    "equip them from Settings, under your aura."
+)
+
 
 async def _send_pm_from(sender_id: int, session: AsyncSession, user_id: int, text: str) -> bool:
     """Un PM de `sender_id` al usuario `user_id`. Devuelve si salio.
@@ -212,8 +224,31 @@ async def handle_founder_friend(session: AsyncSession, user_id: int) -> bool:
     if not otorgado:
         return False
 
-    # Los dos van por ID: cada uno recarga el User por su cuenta, porque el primero
-    # commitea y dejaria expirado a cualquier objeto que le pasemos al segundo.
+    # El aura va antes que los mensajes para que, cuando lea el que la anuncia,
+    # ya la tenga de verdad. record_owned_cosmetics es idempotente por su cuenta,
+    # asi que no necesita su propia guarda.
+    aura_nueva = False
+
+    try:
+        from app.database.torii_store import record_owned_cosmetics
+
+        await record_owned_cosmetics(
+            session, user_id, [FOUNDER_GIFT_AURA_ID], source="founder_friend_gift"
+        )
+        await session.commit()
+        aura_nueva = True
+    except Exception:
+        # Que falle el aura no se lleva puesto al regalo de puntos, que ya esta
+        # otorgado. Se avisa y se sigue con los mensajes.
+        await session.rollback()
+        logger.exception(f"torii_welcome: no pude dar el aura a {user_id}")
+
+    # Los mensajes van por ID: cada uno recarga el User por su cuenta, porque el
+    # primero commitea y dejaria expirado a cualquier objeto que le pasemos al segundo.
     await _send_pm_from(founder_id, session, user_id, FOUNDER_FRIEND_MESSAGE)
     await _send_pm_from(founder_id, session, user_id, FOUNDER_GIFT_MESSAGE)
+
+    if aura_nueva:
+        await _send_pm_from(founder_id, session, user_id, FOUNDER_GIFT_AURA_MESSAGE)
+
     return True

@@ -261,6 +261,127 @@ TORII_AURAS: dict[str, AuraDefinition] = {
         owning_groups=(),
         default_priority=200,
     ),
+    # ── Tanda de agosto 2026 ────────────────────────────────────────────
+    # Todas ownership-only: owning_groups vacio, asi que ningun grupo las
+    # otorga y nunca ganan el fallback por defecto (de ahi el 200, que aca
+    # es la prioridad MAS baja: gana el numero chico). La unica forma de
+    # tenerlas es una fila en torii_owned_cosmetics.
+    #
+    # display_name sale del Name del .toriicosmetic correspondiente y tiene
+    # que seguir coincidiendo: el picker toma el nombre de aca y el arte del
+    # cliente, asi que si se separan se ve un nombre sobre el dibujo de otra.
+    "grasshopper-hop": AuraDefinition(
+        aura_id="grasshopper-hop",
+        display_name="Grasshopper",
+        description="A couple of tiny grasshoppers hopping through the grass. For friending the founder.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "tidepool": AuraDefinition(
+        aura_id="tidepool",
+        display_name="Tidepool",
+        description="Bubbles rising through slow turquoise ripples.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "thunderhead": AuraDefinition(
+        aura_id="thunderhead",
+        display_name="Thunderhead",
+        description="Violet stormclouds with the odd lightning strike.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "origami": AuraDefinition(
+        aura_id="origami",
+        display_name="Origami",
+        description="Folded paper drifting down, turning as it falls.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "vinyl-groove": AuraDefinition(
+        aura_id="vinyl-groove",
+        display_name="Vinyl Groove",
+        description="Warm amber grooves spreading out like a spinning record.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "glacier": AuraDefinition(
+        aura_id="glacier",
+        display_name="Glacier",
+        description="Falling ice crystals and thin frozen shards.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "firefly-dusk": AuraDefinition(
+        aura_id="firefly-dusk",
+        display_name="Firefly Dusk",
+        description="Fireflies blinking their way through the warm dark.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "desert-bloom": AuraDefinition(
+        aura_id="desert-bloom",
+        display_name="Desert Bloom",
+        description="Desert flowers opening in the drifting dust.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "circuitry": AuraDefinition(
+        aura_id="circuitry",
+        display_name="Circuitry",
+        description="Signals running along the traces of a circuit board.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "koi-pond": AuraDefinition(
+        aura_id="koi-pond",
+        display_name="Koi Pond",
+        description="Koi passing under falling petals, leaving ripples behind.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "ink-wash": AuraDefinition(
+        aura_id="ink-wash",
+        display_name="Ink Wash",
+        description="Sumi-e ink blooming and settling in the water.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "starforge": AuraDefinition(
+        aura_id="starforge",
+        display_name="Starforge",
+        description="Sparks flying off the anvil, cooling as they fall.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "moth-lantern": AuraDefinition(
+        aura_id="moth-lantern",
+        display_name="Moth & Lantern",
+        description="Moths circling a lantern that never quite goes out.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "prism-split": AuraDefinition(
+        aura_id="prism-split",
+        display_name="Prism Split",
+        description="White light splitting into its three channels.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "mycelium": AuraDefinition(
+        aura_id="mycelium",
+        display_name="Mycelium",
+        description="Bioluminescent spores drifting up through the dark.",
+        owning_groups=(),
+        default_priority=200,
+    ),
+    "clockwork": AuraDefinition(
+        aura_id="clockwork",
+        display_name="Clockwork",
+        description="Brass gears turning against each other, forever.",
+        owning_groups=(),
+        default_priority=200,
+    ),
 }
 
 
