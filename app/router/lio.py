@@ -140,7 +140,11 @@ async def invite_user(
     if not channel:
         u1, u2 = sorted([req.inviter_id, user_id])
         channel = ChatChannel(
-            name=f"pm_{u1}_{u2}",
+# channel_name y NO name: el modelo mapea la propiedad channel_name a la
+# columna `name`, asi que un `name=` se descarta en silencio en la capa
+# de SQLModel y la fila entra con name = NULL. Ahi el canal deja de
+# encontrarse por nombre y cada intento crea uno nuevo.
+            channel_name=f"pm_{u1}_{u2}",
             description="Private Message",
             type=ChannelType.PM,
         )

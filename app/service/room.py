@@ -23,7 +23,11 @@ async def create_playlist_room_from_api(session: AsyncSession, room: APIUploaded
     await session.refresh(db_room)
 
     channel = ChatChannel(
-        name=f"room_{db_room.id}",
+# channel_name y NO name: el modelo mapea la propiedad channel_name a la
+# columna `name`, asi que un `name=` se descarta en silencio en la capa
+# de SQLModel y la fila entra con name = NULL. Ahi el canal deja de
+# encontrarse por nombre y cada intento crea uno nuevo.
+        channel_name=f"room_{db_room.id}",
         description="Playlist room",
         type=ChannelType.MULTIPLAYER,
     )
@@ -67,7 +71,11 @@ async def create_playlist_room(
     await session.refresh(db_room)
 
     channel = ChatChannel(
-        name=f"room_{db_room.id}",
+# channel_name y NO name: el modelo mapea la propiedad channel_name a la
+# columna `name`, asi que un `name=` se descarta en silencio en la capa
+# de SQLModel y la fila entra con name = NULL. Ahi el canal deja de
+# encontrarse por nombre y cada intento crea uno nuevo.
+        channel_name=f"room_{db_room.id}",
         description="Playlist room",
         type=ChannelType.MULTIPLAYER,
     )

@@ -113,7 +113,11 @@ class Bot:
         channel = await ChatChannel.get_pm_channel(user_id, bot.id, session)
         if channel is None:
             channel = ChatChannel(
-                name=f"pm_{user_id}_{bot.id}",
+    # channel_name y NO name: el modelo mapea la propiedad channel_name a la
+    # columna `name`, asi que un `name=` se descarta en silencio en la capa
+    # de SQLModel y la fila entra con name = NULL. Ahi el canal deja de
+    # encontrarse por nombre y cada intento crea uno nuevo.
+                channel_name=f"pm_{user_id}_{bot.id}",
                 description="Private message channel",
                 type=ChannelType.PM,
             )
