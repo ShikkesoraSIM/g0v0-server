@@ -55,12 +55,15 @@ FOUNDER_GIFT_MESSAGE = (
     "-Shikkesora, Torii Founder"
 )
 
-# El aura que viene con el regalo. Es a proposito la mas discreta del catalogo
-# (dos particulas, MaxAlive 7): le va a caer a muchisima gente, y una llamativa
-# ensuciaria todos los leaderboards. El id tiene que existir en TORII_AURAS y
-# tener un .toriicosmetic con el mismo nombre del lado del cliente, si no queda
-# poseida pero invisible.
-FOUNDER_GIFT_AURA_ID = "grasshopper-hop"
+# El aura que viene con el regalo.
+#
+# APAGADO hasta que el .toriicosmetic este SHIPPEADO en un cliente publicado.
+# Mientras el archivo no viaje en el cliente, otorgarla deja a la persona con el
+# aura marcada como suya, un mensaje diciendole que la equipe, y nada que
+# equipar: el cliente no la puede dibujar porque no la tiene.
+#
+# Poner el id aca de nuevo SOLO despues de que salga la release que la incluye.
+FOUNDER_GIFT_AURA_ID: str | None = None
 
 FOUNDER_GIFT_AURA_MESSAGE = (
     "Oh, and the grasshoppers seem to like you. They're yours now: "
@@ -186,6 +189,10 @@ async def _deliver_pending_welcome(user_id: int) -> None:
         logger.warning(f"torii_welcome: no pude entregar el saludo a {user_id}: {e}")
 
 
+class SkipAuraGift(Exception):
+    """El aura del regalo esta apagada. No es un error: se saltea y listo."""
+
+
 async def send_bot_pm(session: AsyncSession, user_id: int, text: str) -> bool:
     """Un PM de ToriiHalo a `user_id`. Devuelve si salio.
 
@@ -230,6 +237,11 @@ async def handle_founder_friend(session: AsyncSession, user_id: int) -> bool:
     aura_nueva = False
 
     try:
+        # Sin id configurado no se otorga nada y no se manda el mensaje del aura:
+        # el resto del regalo (los puntos) sigue igual.
+        if FOUNDER_GIFT_AURA_ID is None:
+            raise SkipAuraGift
+
         from app.database.torii_store import record_owned_cosmetics
 
         await record_owned_cosmetics(
@@ -237,6 +249,8 @@ async def handle_founder_friend(session: AsyncSession, user_id: int) -> bool:
         )
         await session.commit()
         aura_nueva = True
+    except SkipAuraGift:
+        pass
     except Exception:
         # Que falle el aura no se lleva puesto al regalo de puntos, que ya esta
         # otorgado. Se avisa y se sigue con los mensajes.
