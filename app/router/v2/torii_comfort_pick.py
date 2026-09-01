@@ -41,6 +41,16 @@ class ComfortPickBody(BaseModel):
     star_rating: float
 
 
+# OJO: aca va from_int_extra y NO from_int. El cliente manda el ruleset que el
+# jugador tiene seleccionado, y los de Torii (relax=4, autopilot=5, taiko relax=6,
+# catch relax=7) NO estan en from_int: tira KeyError, o sea 500, o sea el picker
+# de star rating no aparece NUNCA. Y el sintoma no se lee como un error de modo:
+# se lee como "ranked play no me deja elegir la dificultad".
+#
+# from_int_extra los conoce, y to_base_ruleset() los baja al ruleset base (relax ->
+# osu), que es justo lo que queremos: el pick es UNO por ruleset base.
+
+
 def _elo_data(mu: int) -> dict:
     # shape EXACTA que deserializa el EloPlayer del spectator (Newtonsoft, keys snake):
     # {"initial_rating": {mu,sig}, "contest_count": int, "approximate_posterior": {mu,sig}}.
@@ -81,7 +91,7 @@ async def get_comfort_picks_bulk(
     Es dato publico: el pick de cada uno ya se ve al enfrentarlo, y el punto de
     mostrarlo en la cola es justamente poder decidir si entrar.
     """
-    mode = GameMode.from_int(ruleset_id).to_base_ruleset()
+    mode = GameMode.from_int_extra(ruleset_id).to_base_ruleset()
     season = settings.matchmaking_current_season
 
     ids: list[int] = []
@@ -123,7 +133,7 @@ async def get_comfort_floor(
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
     ruleset_id: int = Query(0),
 ):
-    mode = GameMode.from_int(ruleset_id).to_base_ruleset()
+    mode = GameMode.from_int_extra(ruleset_id).to_base_ruleset()
     season = settings.matchmaking_current_season
 
     floor, top_sr = await compute_comfort_floor(db, redis, fetcher, current_user.id, mode)
@@ -154,7 +164,7 @@ async def get_matchmaking_rank(
     "Master" sin haber jugado. Lee ``matchmaking_user_stats`` (misma tabla que el
     spectator), tomando la fila del pool ranked_play con mas partidas del ruleset.
     """
-    mode = GameMode.from_int(ruleset_id).to_base_ruleset()
+    mode = GameMode.from_int_extra(ruleset_id).to_base_ruleset()
 
     pools = (
         await db.exec(
@@ -199,7 +209,7 @@ async def get_comfort_pick(
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
     ruleset_id: int = Query(0),
 ):
-    mode = GameMode.from_int(ruleset_id).to_base_ruleset()
+    mode = GameMode.from_int_extra(ruleset_id).to_base_ruleset()
     season = settings.matchmaking_current_season
     existing = await _get_pick(db, current_user.id, int(mode), season)
     if existing is None:
@@ -220,7 +230,7 @@ async def set_comfort_pick(
     fetcher: Fetcher,
     current_user: Annotated[User, Security(get_current_user, scopes=["public"])],
 ):
-    mode = GameMode.from_int(body.ruleset_id).to_base_ruleset()
+    mode = GameMode.from_int_extra(body.ruleset_id).to_base_ruleset()
     season = settings.matchmaking_current_season
 
     if await _get_pick(db, current_user.id, int(mode), season) is not None:
