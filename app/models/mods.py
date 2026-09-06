@@ -387,7 +387,6 @@ RANKED_MODS: RankedMods = {}
 # the server's mod economy.
 _STD_ALWAYS_UNRANKED_MODS = frozenset(
     {
-        "AS",
         "MG",
     }
 )
@@ -520,6 +519,22 @@ def _mods_can_get_pp(ruleset_id: int, mods: list[APIMod], ranked_mods: RankedMod
         # unranked across every ruleset. WindUp ("WU") is fine because it
         # only makes the play HARDER than baseline, never easier.
         if mod["acronym"] == "WD":
+            return False
+        # adaptive speed (AS): la velocidad de la pista sigue al jugador en tiempo
+        # real y el diffcalc la mide una sola vez, al rate base. estaba bloqueado
+        # solo en std (ruleset 0, _STD_ALWAYS_UNRANKED_MODS), asi que en taiko y
+        # mania pagaba pp entero: un 1.8k y un 2.5k en mania con initial_rate 2.0
+        # (sep 2026). server-wide, igual que WD.
+        if mod["acronym"] == "AS":
+            return False
+        # constant speed (CS) en taiko y mania: le saca al mapa los cambios de
+        # scroll con los que fue rateado y el diffcalc no lo descuenta. medido
+        # contra el perf-server de prod sobre FUWANITY: CS aporta 0.000 al SR,
+        # con y sin el resto de los mods. osu! oficial lo tiene unranked por esto
+        # y el cliente ya lo muestra unranked (Mod.Ranked default false); el
+        # server era el unico que le pagaba pp. caso real: 118 scores y 18.7k pp
+        # de taiko en tres dias.
+        if ruleset_id in {1, 3} and mod["acronym"] == "CS":
             return False
         if app_settings.enable_rx and mod["acronym"] == "RX" and ruleset_id in {0, 1, 2}:
             continue
