@@ -226,6 +226,18 @@ async def process_daily_challenge_top():
             stats.last_update = now
         await session.commit()
 
+        # torii: dia congelado. una llave en redis por fecha
+        # (daily_challenge:streak_freeze:YYYY-MM-DD) hace que este cierre cuente
+        # los placements de los que jugaron pero NO le corte la racha a nadie,
+        # igual que un dia sin challenge. para cuando la sala salio tarde (el
+        # 2026-09-17 se creo a las 14:27 utc, o sea que el challenge existio
+        # nueve horas y media) o el admin quiere perdonar un dia. el que juega
+        # al dia siguiente sigue sumando desde donde estaba; el que falta dos
+        # seguidos cae en el cierre del segundo, como siempre.
+        if await redis.exists(f"daily_challenge:streak_freeze:{room_day.isoformat()}"):
+            logger.info(f"[daily challenge] streak freeze for {room_day.isoformat()}: closed room {room.id} without cutting streaks")
+            return
+
         # Solo se rompen rachas los dias que REALMENTE hubo daily challenge. Si
         # el server no puso challenge no se toca a nadie: no es culpa del
         # jugador.
