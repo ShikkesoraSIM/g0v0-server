@@ -195,6 +195,11 @@ async def process_daily_challenge_top():
             return
 
         room_day = room.ends_at.replace(tzinfo=UTC).date()
+        # se guarda ANTES del commit de abajo: al commitear la sesion expira los
+        # atributos de la sala, y volver a leerlos despues dispara un refresh
+        # sincronico adentro del loop async (MissingGreenlet, sentry
+        # PYTHON-FASTAPI-8J el 2026-09-18).
+        room_id = room.id
 
         scores = (
             await session.exec(
@@ -235,7 +240,7 @@ async def process_daily_challenge_top():
         # al dia siguiente sigue sumando desde donde estaba; el que falta dos
         # seguidos cae en el cierre del segundo, como siempre.
         if await redis.exists(f"daily_challenge:streak_freeze:{room_day.isoformat()}"):
-            logger.info(f"[daily challenge] streak freeze for {room_day.isoformat()}: closed room {room.id} without cutting streaks")
+            logger.info(f"[daily challenge] streak freeze for {room_day.isoformat()}: closed room {room_id} without cutting streaks")
             return
 
         # Solo se rompen rachas los dias que REALMENTE hubo daily challenge. Si
