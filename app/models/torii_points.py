@@ -81,6 +81,14 @@ DAILY_PLAY_MIN_TOTAL_SCORE = 5_000
 REDUCED_EARN_MODE_VALUES = {"osurx", "osuap", "taikorx", "fruitsrx"}
 REDUCED_EARN_MULTIPLIER = 0.4
 
+# Cada modo (relax y autopilot cuentan como modos aparte) tiene su propia lista de top
+# plays, asi que en un modo donde recien arrancas casi cualquier score es un #1 o top 5
+# nuevo y ademas mueve mucho tu total de pp ahi: premia ser nuevo en algo, no ser bueno.
+# Medido 2026-10-01: el #1 historico junto el 89% de sus puntos en modos que no eran el
+# suyo. Un top play fuera de tu modo principal (el modo donde tenes mas pp) paga esta
+# fraccion. Se acumula con el x0.4 de relax si aplican los dos.
+SECONDARY_MODE_MULTIPLIER = 0.6
+
 
 def earn_multiplier(gamemode) -> float:
     """Point multiplier for a gamemode: reduced for relax/autopilot (cheap pp),

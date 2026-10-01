@@ -251,6 +251,27 @@ async def _lock_user(session: AsyncSession, user_id: int):
     return (await session.exec(select(User).where(User.id == user_id).with_for_update())).first()
 
 
+async def is_main_mode(session: AsyncSession, user_id: int, gamemode, current_mode_pp: float) -> bool:
+    """Tu modo principal es el modo donde tenes mas pp (relax y autopilot cuentan como
+    modos aparte, igual que en las listas de top plays). No es un ajuste: sigue al pp y
+    puede cambiar con el tiempo. Empate = principal, para no castigar al que recien
+    empieza ni al que juega dos modos parejo.
+
+    ``current_mode_pp`` es el pp ya recalculado del modo de este score (puede no estar
+    flusheado todavia), por eso aca solo se consultan los OTROS modos."""
+    from app.database.statistics import UserStatistics
+
+    max_other = (
+        await session.exec(
+            select(func.coalesce(func.max(UserStatistics.pp), 0.0)).where(
+                UserStatistics.user_id == user_id,
+                UserStatistics.mode != gamemode,
+            )
+        )
+    ).one()
+    return float(max_other or 0.0) <= float(current_mode_pp or 0.0)
+
+
 async def award_top_play(
     session: AsyncSession,
     user_id: int,
@@ -259,12 +280,16 @@ async def award_top_play(
     account_pp_delta: int,
     score_id: int,
     gamemode=None,
+    main_mode: bool = True,
 ) -> bool:
     """Award a new-top-play reward scaled by the play's RANK among the user's best
     plays + their tenure, plus the pp it added to the account total, reduced for
-    relax/autopilot modes. The breakdown is stored in the ledger ref
-    (``score:ID|rank:R|b:..|pp:..``) so the client can show the calc + the rank."""
+    relax/autopilot modes and for modes that are not the user's main one. The
+    breakdown is stored in the ledger ref (``score:ID|rank:R|b:..|pp:..``, plus
+    ``rx:40`` / ``alt:60`` when a multiplier applied and ``capped:1`` past the soft
+    cap) so the client can show the calc, the rank and why it paid less."""
     from app.models.torii_points import (
+        SECONDARY_MODE_MULTIPLIER,
         TOP_PLAY_DAILY_HARD_CAP,
         TOP_PLAY_DAILY_POINTS_CAP,
         earn_multiplier,
@@ -286,7 +311,12 @@ async def award_top_play(
 
     # Relax/autopilot inflate pp cheaply, so scale the components down (kept on the
     # components, not just the total, so the ref/toast breakdown stays honest).
-    mult = earn_multiplier(gamemode)
+    # Un modo que no es tu principal tiene su propia lista de top plays recien
+    # empezada, asi que ahi los PBs de rank alto salen regalados: tambien baja. Los
+    # dos se multiplican y se redondea una sola vez.
+    rx_mult = earn_multiplier(gamemode)
+    alt_mult = 1.0 if main_mode else SECONDARY_MODE_MULTIPLIER
+    mult = rx_mult * alt_mult
     base = int(round(base * mult))
     pp_bonus = int(round(pp_bonus * mult))
 
@@ -306,6 +336,11 @@ async def award_top_play(
         return False
 
     ref = f"score:{score_id}|rank:{rank}|b:{base}|pp:{pp_bonus}"
+    # porcentajes enteros: el cliente los lee con parseTagInt y arma "paid at 60%".
+    if rx_mult < 1.0:
+        ref += f"|rx:{int(round(rx_mult * 100))}"
+    if alt_mult < 1.0:
+        ref += f"|alt:{int(round(alt_mult * 100))}"
     if capped:
         ref += "|capped:1"
 

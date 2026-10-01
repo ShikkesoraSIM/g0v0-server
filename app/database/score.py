@@ -1966,7 +1966,7 @@ async def _process_statistics(
         # pays ~nothing. account_pp_delta (the pp this play added to the total) is
         # known here, so this is the right place — not _process_score_pp.
         try:
-            from app.service.points_service import award_top_play
+            from app.service.points_service import award_top_play, is_main_mode
 
             is_new_best = (
                 await session.exec(select(BestScore.score_id).where(BestScore.score_id == score.id))
@@ -1993,6 +1993,14 @@ async def _process_statistics(
                         )
                     )
                 ).one()
+                # statistics.pp ya es el total nuevo de este modo; el helper compara
+                # contra los otros modos para saber si este es el principal.
+                main_mode = await is_main_mode(
+                    session,
+                    statistics.user_id,
+                    score.gamemode,
+                    float(statistics.pp or 0.0),
+                )
                 await award_top_play(
                     session,
                     statistics.user_id,
@@ -2001,6 +2009,7 @@ async def _process_statistics(
                     int(round(score.account_pp_delta or 0.0)),
                     score.id,
                     score.gamemode,
+                    main_mode=main_mode,
                 )
         except Exception as _tp_err:
             logger.warning("Top-play points award failed for user {}: {}", statistics.user_id, _tp_err)
