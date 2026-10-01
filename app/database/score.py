@@ -2626,6 +2626,16 @@ async def process_user(
     alert_join_date = user.join_date
 
     # Send ToriiHalo private message if score was zeroed due to Flashlight/accuracy rules.
+    #
+    # torii: una sola vez por score. submit_score corre process_user inline y, si
+    # despues no ve la fila del leaderboard (lo normal cuando el score NO mejoro
+    # tu mejor, que es justo el caso de un relax con poca acc y 0pp), programa una
+    # segunda pasada en background "por las dudas". Esa pasada recalcula la razon
+    # y mandaba el mismo PM de nuevo. La llave NX en redis hace que el segundo
+    # intento no mande nada.
+    if _pp_zero_reason and not await redis.set(f"toriihalo:zero_pp_pm:{score_id}", 1, nx=True, ex=86400):
+        _pp_zero_reason = None
+
     if _pp_zero_reason:
         try:
             from app.router.notification.banchobot import bot as _toriihalo
