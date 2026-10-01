@@ -252,13 +252,10 @@ async def _lock_user(session: AsyncSession, user_id: int):
 
 
 async def is_main_mode(session: AsyncSession, user_id: int, gamemode, current_mode_pp: float) -> bool:
-    """Tu modo principal es el modo donde tenes mas pp (relax y autopilot cuentan como
-    modos aparte, igual que en las listas de top plays). No es un ajuste: sigue al pp y
-    puede cambiar con el tiempo. Empate = principal, para no castigar al que recien
-    empieza ni al que juega dos modos parejo.
-
-    ``current_mode_pp`` es el pp ya recalculado del modo de este score (puede no estar
-    flusheado todavia), por eso aca solo se consultan los OTROS modos."""
+    """Whether ``gamemode`` is the user's main mode: the one with the most pp, relax/ap
+    counted separately, ties count as main. ``current_mode_pp`` is the freshly
+    recalculated pp of this mode (may not be flushed yet), so only the other modes
+    are queried."""
     from app.database.statistics import UserStatistics
 
     max_other = (
@@ -311,9 +308,7 @@ async def award_top_play(
 
     # Relax/autopilot inflate pp cheaply, so scale the components down (kept on the
     # components, not just the total, so the ref/toast breakdown stays honest).
-    # Un modo que no es tu principal tiene su propia lista de top plays recien
-    # empezada, asi que ahi los PBs de rank alto salen regalados: tambien baja. Los
-    # dos se multiplican y se redondea una sola vez.
+    # A mode that isn't the user's main one is a fresh top-play list, so it scales too.
     rx_mult = earn_multiplier(gamemode)
     alt_mult = 1.0 if main_mode else SECONDARY_MODE_MULTIPLIER
     mult = rx_mult * alt_mult
@@ -336,7 +331,7 @@ async def award_top_play(
         return False
 
     ref = f"score:{score_id}|rank:{rank}|b:{base}|pp:{pp_bonus}"
-    # porcentajes enteros: el cliente los lee con parseTagInt y arma "paid at 60%".
+    # whole percentages, the client reads them to show "paid at 60%".
     if rx_mult < 1.0:
         ref += f"|rx:{int(round(rx_mult * 100))}"
     if alt_mult < 1.0:

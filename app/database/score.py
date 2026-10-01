@@ -1993,8 +1993,7 @@ async def _process_statistics(
                         )
                     )
                 ).one()
-                # statistics.pp ya es el total nuevo de este modo; el helper compara
-                # contra los otros modos para saber si este es el principal.
+                # statistics.pp is already the new total for this mode.
                 main_mode = await is_main_mode(
                     session,
                     statistics.user_id,
