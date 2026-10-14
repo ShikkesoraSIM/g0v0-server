@@ -24,6 +24,10 @@ async def create_oauth_app(
     current_user: ClientUser,
     description: Annotated[str, Body(description="应用程序描述")] = "",
 ):
+    # Limit max 3 oauth applications per user to prevent abuse
+    existing_count = len((await session.exec(select(OAuthClient.client_id).where(OAuthClient.owner_id == current_user.id))).all())
+    if existing_count >= 3:
+        raise HTTPException(status_code=400, detail="You can only create up to 3 OAuth applications.")
     result = await session.execute(
         text(
             "SELECT AUTO_INCREMENT FROM information_schema.TABLES "

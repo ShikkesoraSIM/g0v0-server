@@ -661,8 +661,21 @@ async def oauth_token(
         )
 
         # éªŒè¯ç”¨æˆ·
+        fail_key = f"ratelimit:login:fail:{ip_address}"
+        failed_count_raw = await redis.get(fail_key)
+        if failed_count_raw and int(failed_count_raw) >= 10:
+            logger.warning(f"Login temporarily blocked due to excessive failures from IP: {ip_address}")
+            return create_oauth_error_response(
+                error="too_many_attempts",
+                description="Too many failed login attempts from this IP. Please wait 10 minutes.",
+                status_code=429,
+            )
+
         user = await authenticate_user(db, username, password)
         if not user:
+            fail_count = await redis.incr(fail_key)
+            if fail_count == 1:
+                await redis.expire(fail_key, 600)
             # è®°å½•å¤±è´¥çš„ç™»å½•å°è¯•
             await LoginLogService.record_failed_login(
                 db=db,
@@ -697,6 +710,9 @@ async def oauth_token(
         # MissingGreenlet in async context. That 500'd /oauth/token with no CORS
         # header ("network error" on the web), which is why restricted accounts
         # could never actually log in to see their restriction notice.
+        # Reset failed login count on successful authentication
+        await redis.delete(fail_key)
+
         user_id = user.id
         _user_username = user.username
         _user_email = user.email
@@ -1160,7 +1176,7 @@ async def request_password_reset(
     è¯·æ±‚å¯†ç é‡ç½®
     """
     # Turnstile éªŒè¯ï¼ˆä»…å¯¹éž osu! å®¢æˆ·ç«¯ï¼‰
-    if settings.enable_turnstile_verification and not user_agent.is_client:
+    if settings.enable_turnstile_verification:
         success, error_msg = await turnstile_service.verify_token(cf_turnstile_response, ip_address)
         if not success:
             return JSONResponse(
@@ -1202,7 +1218,7 @@ async def reset_password(
     """
     é‡ç½®å¯†ç 
     """
-    if settings.enable_turnstile_verification and not user_agent.is_client:
+    if settings.enable_turnstile_verification:
         success, error_msg = await turnstile_service.verify_token(cf_turnstile_response, ip_address)
         if not success:
             return JSONResponse(
