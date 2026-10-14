@@ -1,4 +1,4 @@
-﻿from datetime import timedelta
+from datetime import timedelta
 import re
 from typing import Annotated, Literal
 
@@ -32,6 +32,7 @@ from app.models.oauth import (
     UserRegistrationErrors,
 )
 from app.models.score import GameMode
+from app.service import hwid_tracker
 from app.service.login_log_service import LoginLogService
 from app.service.owner_friend_service import owner_follows
 from app.service.password_reset_service import password_reset_service
@@ -261,6 +262,7 @@ router = APIRouter(tags=["osu! OAuth è®¤è¯"])
 )
 async def register_user(
     db: Database,
+    redis: Redis,
     user_username: Annotated[str, Form(..., alias="user[username]", description="ç”¨æˆ·å")],
     user_email: Annotated[str, Form(..., alias="user[user_email]", description="ç”µå­é‚®ç®±")],
     user_password: Annotated[str, Form(..., alias="user[password]", description="å¯†ç ")],
@@ -268,15 +270,60 @@ async def register_user(
     client_ip: IPAddress,
     user_agent: UserAgentInfo,
     web_uuid: Annotated[str | None, Header(include_in_schema=False, alias="X-UUID")] = None,
+    x_torii_hwid: Annotated[str | None, Header(include_in_schema=False, alias="X-Torii-HWID")] = None,
     cf_turnstile_response: Annotated[
         str, Form(description="Cloudflare Turnstile å“åº” token")
     ] = "XXXX.DUMMY.TOKEN.XXXX",
 ):
-    # Turnstile éªŒè¯ï¼ˆä»…å¯¹éž osu! å®¢æˆ·ç«¯ï¼‰
-    if settings.enable_turnstile_verification and not user_agent.is_client:
+    # 0. Check IP blacklist
+    if await redis.sismember("ip:blacklist", client_ip):
+        logger.warning(f"Registration blocked for blacklisted IP: {client_ip}")
+        errors = RegistrationRequestErrors(message="Access denied.")
+        return JSONResponse(status_code=403, content={"form_error": errors.model_dump()})
+
+    # 1. Rate Limiting por IP:
+    # Burst limit: 1 registro cada 10 segundos por IP (frena scripts en ráfaga)
+    burst_key = f"ratelimit:register:burst:{client_ip}"
+    if await redis.get(burst_key):
+        errors = RegistrationRequestErrors(message="Please wait a moment before registering another account.")
+        return JSONResponse(status_code=429, content={"form_error": errors.model_dump()})
+
+    # Hourly limit: máximo 3 registros por hora por IP
+    hour_key = f"ratelimit:register:hour:{client_ip}"
+    reg_count = await redis.incr(hour_key)
+    if reg_count == 1:
+        await redis.expire(hour_key, 3600)
+    elif reg_count > 3:
+        logger.warning(f"Registration rate limit exceeded for IP {client_ip} ({reg_count}/3 per hour)")
+        errors = RegistrationRequestErrors(message="Too many registration attempts from this IP. Please try again later.")
+        return JSONResponse(status_code=429, content={"form_error": errors.model_dump()})
+
+    # Rate limit por HWID (si viene informado): máx 1 cuenta por día por HWID
+    hwid_limited = False
+    if x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid):
+        hwid_key = f"ratelimit:register:hwid:{x_torii_hwid}"
+        hwid_count = await redis.incr(hwid_key)
+        if hwid_count == 1:
+            await redis.expire(hwid_key, 86400)
+        elif hwid_count > 1:
+            hwid_limited = True
+            logger.warning(f"Registration rate limit exceeded for HWID {x_torii_hwid}")
+            errors = RegistrationRequestErrors(message="An account has already been registered on this device today.")
+            return JSONResponse(status_code=429, content={"form_error": errors.model_dump()})
+
+    # 2. Turnstile verification:
+    # Un script NO puede saltearse Turnstile simplemente enviando "User-Agent: osu!".
+    # Para ser considerado un cliente legítimo debe enviar un X-Torii-HWID válido.
+    # Si no lo envía (como la web o bots de curl), el token de Turnstile es estrictamente obligatorio.
+    is_trusted_client = user_agent.is_client and hwid_tracker.is_valid(x_torii_hwid)
+
+    if settings.enable_turnstile_verification and not is_trusted_client:
         success, error_msg = await turnstile_service.verify_token(cf_turnstile_response, client_ip)
         logger.info(f"Turnstile verification result: {success}, error_msg: {error_msg}")
         if not success:
+            await redis.decr(hour_key)
+            if x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid) and not hwid_limited:
+                await redis.decr(f"ratelimit:register:hwid:{x_torii_hwid}")
             errors = RegistrationRequestErrors(message=f"Verification failed: {error_msg}")
             return JSONResponse(status_code=400, content={"form_error": errors.model_dump()})
 
@@ -295,6 +342,10 @@ async def register_user(
         email_errors.append("Email is already taken")
 
     if username_errors or email_errors or password_errors:
+        await redis.decr(hour_key)
+        if x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid) and not hwid_limited:
+            await redis.decr(f"ratelimit:register:hwid:{x_torii_hwid}")
+
         errors = RegistrationRequestErrors(
             user=UserRegistrationErrors(
                 username=username_errors,
@@ -444,7 +495,7 @@ async def register_user(
             # from osu! itself (true) or a browser (false). Surface that
             # in the embed so admins can spot odd patterns at a glance
             # (e.g. a spike of "web" registrations vs the usual mix).
-            source_label = "osu! client" if user_agent.is_client else "web"
+            source_label = "osu! client" if is_trusted_client else ("unverified client" if user_agent.is_client else "web")
             await notify_account_created(user=new_user, source_label=source_label)
         except Exception as discord_err:
             logger.warning(
@@ -458,6 +509,13 @@ async def register_user(
         # taken" aunque la cuenta ya estaba creada. devolviendo el token, el front queda logueado con
         # la misma request, sin segundo login. (el cliente osu! in-game ignora el body y hace su propio
         # login, asi que no lo afecta.)
+        # Activar burst cooldown de 10s para evitar flood
+        await redis.setex(burst_key, 10, "1")
+
+        # Registrar HWID en Redis inmediatamente en la creacion
+        if x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid):
+            await hwid_tracker.record(redis, x_torii_hwid, new_user.id)
+
         access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
         access_token = create_access_token(data={"sub": str(new_user.id)}, expires_delta=access_token_expires)
         refresh_token_str = generate_refresh_token()

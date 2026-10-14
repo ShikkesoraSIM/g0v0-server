@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from app.auth import get_token_by_access_token
 from app.dependencies.database import get_redis, with_db
+from app.dependencies.geoip import get_client_ip
 from app.log import log
 from app.service import hwid_tracker
 
@@ -59,6 +60,16 @@ async def _record_safely(token: str, hwid: str) -> None:
 
 class HwidTrackingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        try:
+            client_ip = get_client_ip(request)
+            if client_ip:
+                redis = get_redis()
+                if await redis.sismember("ip:blacklist", client_ip):
+                    logger.warning(f"Blocked request from blacklisted IP: {client_ip} ({request.method} {request.url.path})")
+                    return Response(content="Forbidden", status_code=403)
+        except Exception:
+            pass
+
         if request.method not in _RECORDED_METHODS:
             return await call_next(request)
 

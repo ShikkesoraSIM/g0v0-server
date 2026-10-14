@@ -295,7 +295,7 @@ async def resolve_user(session: AsyncSession, player_name: str, override_id: int
     if player_name:
         result = await session.exec(
             select(User).where(
-                func.json_contains(User.previous_usernames, text(f"JSON_QUOTE('{player_name}')")) == 1
+                func.json_contains(User.previous_usernames, func.json_quote(player_name)) == 1
             )
         )
         user = result.first()
