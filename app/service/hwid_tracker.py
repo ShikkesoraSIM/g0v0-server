@@ -59,3 +59,23 @@ async def hwids_for(redis: "Redis", user_id: int) -> list[str]:
         return []
     raw = await redis.smembers(f"hwid:user:{user_id}")
     return sorted([h for h in (raw or []) if is_valid(h)])
+
+
+async def is_whitelisted(redis: "Redis", hwid: str) -> bool:
+    """Check if a HWID is whitelisted to bypass the 2-account registration limit."""
+    if not is_valid(hwid):
+        return False
+    return bool(await redis.sismember("hwid:whitelist", hwid))
+
+
+async def add_whitelist(redis: "Redis", hwid: str) -> None:
+    """Add a HWID to the whitelist so more accounts can be registered from this device."""
+    if is_valid(hwid):
+        await redis.sadd("hwid:whitelist", hwid)
+
+
+async def remove_whitelist(redis: "Redis", hwid: str) -> None:
+    """Remove a HWID from the whitelist."""
+    if is_valid(hwid):
+        await redis.srem("hwid:whitelist", hwid)
+

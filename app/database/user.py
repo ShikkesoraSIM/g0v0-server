@@ -1057,6 +1057,7 @@ class User(AsyncAttrs, UserModel, table=True):
     pw_bcrypt: str = Field(max_length=60)
     silence_end_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     donor_end_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    registration_hwid: str | None = Field(default=None, max_length=64, nullable=True, index=True)
 
     account_history: list[UserAccountHistory] = Relationship(back_populates="user")
     statistics: list[UserStatistics] = Relationship(back_populates="user")

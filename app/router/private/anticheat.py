@@ -253,6 +253,93 @@ async def admin_clear_user_hwid(
     }
 
 
+@router.get("/admin/anticheat/hwid/{hwid}", tags=["Admin Anti-cheat"])
+async def admin_get_hwid_info(
+    hwid: str,
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    redis: Redis,
+) -> dict[str, Any]:
+    """Inspect a HWID: whitelisted status, registered accounts in MySQL, and active sessions in Redis."""
+    await require_admin(session, user_and_token)
+
+    if not hwid_tracker.is_valid(hwid):
+        raise HTTPException(status_code=400, detail="Invalid HWID format (expected 16-64 hex chars)")
+
+    is_whitelisted = await hwid_tracker.is_whitelisted(redis, hwid)
+
+    # Cuentas registradas históricamente con este HWID en MySQL
+    users_stmt = select(User).where(User.registration_hwid == hwid)
+    registered_users = (await session.exec(users_stmt)).all()
+
+    # Usuarios activos observados recientemente en Redis
+    active_user_ids = await hwid_tracker.users_for(redis, hwid)
+
+    return {
+        "hwid": hwid,
+        "is_whitelisted": is_whitelisted,
+        "historic_registration_count": len(registered_users),
+        "registration_limit": "unlimited (whitelisted)" if is_whitelisted else 2,
+        "registered_users": [
+            {
+                "id": u.id,
+                "username": u.username,
+                "country_code": u.country_code,
+                "join_date": u.join_date.isoformat() if u.join_date else None,
+            }
+            for u in registered_users
+        ],
+        "active_session_user_ids": active_user_ids,
+    }
+
+
+@router.post("/admin/anticheat/hwid/{hwid}/whitelist", tags=["Admin Anti-cheat"])
+async def admin_whitelist_hwid(
+    hwid: str,
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    redis: Redis,
+) -> dict[str, Any]:
+    """Whitelist a HWID to allow more than 2 accounts to register from this machine."""
+    admin_user = await require_admin(session, user_and_token)
+
+    if not hwid_tracker.is_valid(hwid):
+        raise HTTPException(status_code=400, detail="Invalid HWID format (expected 16-64 hex chars)")
+
+    await hwid_tracker.add_whitelist(redis, hwid)
+    logger.info(f"admin {admin_user.username}#{admin_user.id} whitelisted HWID {hwid}")
+
+    return {
+        "hwid": hwid,
+        "whitelisted": True,
+        "message": f"HWID {hwid} has been whitelisted. New registrations from this machine are now permitted.",
+    }
+
+
+@router.delete("/admin/anticheat/hwid/{hwid}/whitelist", tags=["Admin Anti-cheat"])
+async def admin_unwhitelist_hwid(
+    hwid: str,
+    session: Database,
+    user_and_token: Annotated[UserAndToken, Security(get_client_user_and_token)],
+    redis: Redis,
+) -> dict[str, Any]:
+    """Remove a HWID from the whitelist, enforcing the standard 2-account limit again."""
+    admin_user = await require_admin(session, user_and_token)
+
+    if not hwid_tracker.is_valid(hwid):
+        raise HTTPException(status_code=400, detail="Invalid HWID format (expected 16-64 hex chars)")
+
+    await hwid_tracker.remove_whitelist(redis, hwid)
+    logger.info(f"admin {admin_user.username}#{admin_user.id} removed HWID {hwid} from whitelist")
+
+    return {
+        "hwid": hwid,
+        "whitelisted": False,
+        "message": f"HWID {hwid} whitelist removed.",
+    }
+
+
+
 # ─── Replay browser ────────────────────────────────────────────────────────
 
 

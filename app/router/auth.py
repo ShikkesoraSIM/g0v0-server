@@ -47,7 +47,7 @@ from app.utils import utcnow
 from fastapi import APIRouter, Form, Header, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlmodel import exists, select
+from sqlmodel import exists, func, select
 
 logger = log("Auth")
 LAST_CLIENT_HASH_KEY = "metadata:user:last_client_hash:{user_id}"
@@ -311,6 +311,20 @@ async def register_user(
             errors = RegistrationRequestErrors(message="An account has already been registered on this device today.")
             return JSONResponse(status_code=429, content={"form_error": errors.model_dump()})
 
+        # Límite histórico por HWID en MySQL: máx 2 cuentas por máquina
+        # Si un usuario o familia legítima necesita más, un admin puede agregarlo a la whitelist ("hwid:whitelist")
+        hwid_count_res = await db.exec(select(func.count(User.id)).where(User.registration_hwid == x_torii_hwid))
+        existing_hwid_count = hwid_count_res.one() or 0
+        if existing_hwid_count >= 2 and not await hwid_tracker.is_whitelisted(redis, x_torii_hwid):
+            hwid_limited = True
+            logger.warning(
+                f"Registration blocked: HWID {x_torii_hwid} reached max historic accounts ({existing_hwid_count}/2)"
+            )
+            errors = RegistrationRequestErrors(
+                message="Maximum accounts (2) reached for this device. If you share this computer, contact support to request an allowance."
+            )
+            return JSONResponse(status_code=429, content={"form_error": errors.model_dump()})
+
     # 2. Turnstile verification:
     # Un script NO puede saltearse Turnstile simplemente enviando "User-Agent: osu!".
     # Para ser considerado un cliente legítimo debe enviar un X-Torii-HWID válido.
@@ -411,6 +425,7 @@ async def register_user(
             # (te podes anotar por la web y abrir Torii al otro dia), y un mensaje de
             # chat mandado a alguien que todavia no esta adentro no lo ve nadie.
             torii_welcome_pending=True,
+            registration_hwid=x_torii_hwid if (x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid)) else None,
         )
         db.add(new_user)
         await db.commit()
