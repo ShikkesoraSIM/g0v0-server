@@ -308,6 +308,21 @@ async def register_user(
         elif hwid_count > 1:
             hwid_limited = True
             logger.warning(f"Registration rate limit exceeded for HWID {x_torii_hwid}")
+            try:
+                related_ids = await SuspiciousAlertService._distinct_other_users_by_hwid(
+                    db, redis, x_torii_hwid
+                )
+                await SuspiciousAlertService.alert_blocked_registration(
+                    db,
+                    username=req.username,
+                    ip_address=client_ip,
+                    hwid=x_torii_hwid,
+                    reason="Registration rate limit exceeded (max 1 account per day per machine)",
+                    related_user_ids=related_ids,
+                )
+                await db.commit()
+            except Exception as alert_err:
+                logger.warning(f"Failed to record blocked registration alert: {alert_err}")
             errors = RegistrationRequestErrors(message="An account has already been registered on this device today.")
             return JSONResponse(status_code=429, content={"form_error": errors.model_dump()})
 
@@ -320,6 +335,21 @@ async def register_user(
             logger.warning(
                 f"Registration blocked: HWID {x_torii_hwid} reached max historic accounts ({existing_hwid_count}/2)"
             )
+            try:
+                related_ids = await SuspiciousAlertService._distinct_other_users_by_hwid(
+                    db, redis, x_torii_hwid
+                )
+                await SuspiciousAlertService.alert_blocked_registration(
+                    db,
+                    username=req.username,
+                    ip_address=client_ip,
+                    hwid=x_torii_hwid,
+                    reason=f"Device reached maximum historic accounts ({existing_hwid_count}/2)",
+                    related_user_ids=related_ids,
+                )
+                await db.commit()
+            except Exception as alert_err:
+                logger.warning(f"Failed to record blocked registration alert: {alert_err}")
             errors = RegistrationRequestErrors(
                 message="Maximum accounts (2) reached for this device. If you share this computer, contact support to request an allowance."
             )
@@ -491,6 +521,8 @@ async def register_user(
                 ip_address=client_ip,
                 user_agent=user_agent.raw_ua,
                 web_uuid=web_uuid,
+                hwid=x_torii_hwid if (x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid)) else None,
+                redis=redis,
             )
             if alert_result.created:
                 await db.commit()
@@ -590,6 +622,7 @@ async def oauth_token(
     password: Annotated[str | None, Form(description="å¯†ç ï¼ˆä»…å¯†ç æ¨¡å¼éœ€è¦ï¼‰")] = None,
     refresh_token: Annotated[str | None, Form(description="åˆ·æ–°ä»¤ç‰Œï¼ˆä»…åˆ·æ–°ä»¤ç‰Œæ¨¡å¼éœ€è¦ï¼‰")] = None,
     web_uuid: Annotated[str | None, Header(include_in_schema=False, alias="X-UUID")] = None,
+    x_torii_hwid: Annotated[str | None, Header(include_in_schema=False, alias="X-Torii-HWID")] = None,
     cf_turnstile_response: Annotated[
         str, Form(description="Cloudflare Turnstile å“åº” token")
     ] = "XXXX.DUMMY.TOKEN.XXXX",
@@ -733,6 +766,9 @@ async def oauth_token(
         _user_email = user.email
         _user_country_code = user.country_code
         _user_join_date = user.join_date
+
+        if x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid):
+            await hwid_tracker.record(redis, x_torii_hwid, user_id)
 
         if await user.is_restricted(db):
             # Restricted users are allowed to log in so they can see the
@@ -968,6 +1004,8 @@ async def oauth_token(
                 version_hash=normalized_version_hash or None,
                 client_label=client_label_for_log,
                 is_new_device=not trusted_device,
+                hwid=x_torii_hwid if (x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid)) else None,
+                redis=redis,
             )
             if alert_result.created:
                 await db.commit()
@@ -1017,6 +1055,9 @@ async def oauth_token(
                 description="Associated user no longer exists.",
                 hint="Invalid refresh token",
             )
+
+        if x_torii_hwid and hwid_tracker.is_valid(x_torii_hwid):
+            await hwid_tracker.record(redis, x_torii_hwid, token_record.user_id)
         # Restricted users are allowed to refresh their tokens — see the
         # password-grant branch above for the rationale. The PM is sent
         # via _notify_restricted_login_attempt so the user sees it on

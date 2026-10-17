@@ -228,6 +228,41 @@ class SuspiciousAlertService:
 
         return sorted(seen)[:limit]
 
+    @classmethod
+    async def _distinct_other_users_by_hwid(
+        cls,
+        session: AsyncSession,
+        redis: Redis,
+        hwid: str,
+        *,
+        exclude_user_id: int | None = None,
+        limit: int = 10,
+    ) -> list[int]:
+        seen: set[int] = set()
+        from app.service import hwid_tracker
+
+        if hwid and hwid_tracker.is_valid(hwid):
+            try:
+                redis_users = await hwid_tracker.users_for(redis, hwid)
+                for u in redis_users:
+                    if exclude_user_id is None or u != exclude_user_id:
+                        seen.add(int(u))
+            except Exception as e:
+                logger.debug(f"Failed to query Redis for hwid users: {e}")
+
+            try:
+                stmt = select(User.id).where(User.registration_hwid == hwid)
+                if exclude_user_id is not None:
+                    stmt = stmt.where(User.id != exclude_user_id)
+                mysql_users = (await session.exec(stmt.limit(limit * 2))).all()
+                for u in mysql_users:
+                    if u is not None:
+                        seen.add(int(u))
+            except Exception as e:
+                logger.debug(f"Failed to query MySQL for registration_hwid: {e}")
+
+        return sorted(seen)[:limit]
+
     @staticmethod
     async def _usernames_for_ids(session: AsyncSession, user_ids: list[int]) -> list[str]:
         if not user_ids:
@@ -255,6 +290,101 @@ class SuspiciousAlertService:
         return "".join(result) or "NM"
 
     @classmethod
+    async def alert_blocked_registration(
+        cls,
+        session: AsyncSession,
+        *,
+        username: str,
+        ip_address: str,
+        hwid: str,
+        reason: str,
+        related_user_ids: list[int],
+    ) -> AlertResult:
+        if not settings.enable_suspicious_mod_alerts:
+            return AlertResult(created=False)
+
+        related_users = await cls._usernames_for_ids(session, related_user_ids)
+        fingerprint = cls._fingerprint(
+            "blocked_registration_hwid",
+            username,
+            hwid,
+            ip_address,
+            utcnow().strftime("%Y%m%d%H"),
+        )
+        body = f"Registration attempt for '{username}' was blocked by HWID limit: {reason}."
+        if related_users:
+            body += f" Device already associated with: {', '.join(related_users)}"
+
+        return await cls._create_alert(
+            session,
+            kind="suspicious_account_created",
+            severity="critical",
+            fingerprint=fingerprint,
+            title=f"Registration blocked (HWID limit): {username}",
+            body=body,
+            payload={
+                "username": username,
+                "reasons": [reason],
+                "ip_address": ip_address,
+                "hwid": hwid,
+                "related_user_ids": related_user_ids,
+                "related_users": related_users,
+            },
+        )
+
+    @classmethod
+    async def alert_hwid_activity(
+        cls,
+        *,
+        redis: Redis,
+        user_id: int,
+        hwid: str,
+        peer_ids: list[int],
+    ) -> AlertResult:
+        if not settings.enable_suspicious_mod_alerts:
+            return AlertResult(created=False)
+
+        from app.dependencies.database import with_db
+
+        async with with_db() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                return AlertResult(created=False)
+
+            ignored_user_ids = _parse_ignored_user_ids(getattr(settings, "suspicious_alerts_ignored_user_ids", ""))
+            if user.id in ignored_user_ids or getattr(user, "is_admin", False):
+                return AlertResult(created=False)
+
+            related_users = await cls._usernames_for_ids(session, peer_ids)
+            fingerprint = cls._fingerprint(
+                "hwid_activity",
+                user.id,
+                hwid,
+                ",".join(str(i) for i in sorted(peer_ids)),
+                utcnow().strftime("%Y%m%d"),
+            )
+            res = await cls._create_alert(
+                session,
+                kind="suspicious_login",
+                severity="critical",
+                fingerprint=fingerprint,
+                title=f"Multi-accounting active (HWID match): {user.username}",
+                body=f"Account {user.username} (#{user.id}) active on device shared with other account(s): {', '.join(related_users)}",
+                user_id=user.id,
+                payload={
+                    "username": user.username,
+                    "user_id": user.id,
+                    "reasons": [f"Device HWID already linked to {len(peer_ids)} other account(s)"],
+                    "related_user_ids": peer_ids,
+                    "related_users": related_users,
+                    "hwid": hwid,
+                },
+            )
+            if res.created:
+                await session.commit()
+            return res
+
+    @classmethod
     async def maybe_record_registration_alert(
         cls,
         session: AsyncSession,
@@ -263,6 +393,8 @@ class SuspiciousAlertService:
         ip_address: str,
         user_agent: str | None,
         web_uuid: str | None,
+        hwid: str | None = None,
+        redis: Redis | None = None,
     ) -> AlertResult:
         if not settings.enable_suspicious_mod_alerts:
             return AlertResult(created=False)
@@ -273,6 +405,15 @@ class SuspiciousAlertService:
         if web_uuid:
             shared_uuid_users = await cls._distinct_other_users_by_web_uuid(session, web_uuid, exclude_user_id=user.id)
 
+        shared_hwid_users: list[int] = []
+        if hwid and redis:
+            from app.service import hwid_tracker
+
+            if hwid_tracker.is_valid(hwid):
+                shared_hwid_users = await cls._distinct_other_users_by_hwid(
+                    session, redis, hwid, exclude_user_id=user.id
+                )
+
         reasons: list[str] = []
         severity = "warning"
         if len(shared_ip_users) >= settings.suspicious_shared_ip_user_threshold:
@@ -281,17 +422,26 @@ class SuspiciousAlertService:
         if shared_uuid_users:
             reasons.append(f"web UUID already seen on {len(shared_uuid_users)} other account(s)")
             severity = "critical"
+        if shared_hwid_users:
+            from app.service import hwid_tracker
+
+            if not await hwid_tracker.is_whitelisted(redis, hwid):  # type: ignore[arg-type]
+                reasons.append(f"Device HWID already linked to {len(shared_hwid_users)} other account(s)")
+                severity = "critical"
+            else:
+                shared_hwid_users = []
 
         if not reasons:
             return AlertResult(created=False)
 
-        related_ids = sorted(set(shared_ip_users + shared_uuid_users))
+        related_ids = sorted(set(shared_ip_users + shared_uuid_users + shared_hwid_users))
         related_users = await cls._usernames_for_ids(session, related_ids)
         fingerprint = cls._fingerprint(
             "registration",
             user.id,
             ip_address,
             web_uuid or "",
+            hwid or "",
             ",".join(str(i) for i in related_ids),
         )
         return await cls._create_alert(
@@ -311,6 +461,7 @@ class SuspiciousAlertService:
                 "country_code": user.country_code,
                 "ip_address": ip_address,
                 "web_uuid": web_uuid,
+                "hwid": hwid,
                 "user_agent": (user_agent or "")[:250],
                 "reasons": reasons,
                 "related_user_ids": related_ids,
@@ -334,6 +485,8 @@ class SuspiciousAlertService:
         version_hash: str | None,
         client_label: str | None,
         is_new_device: bool,
+        hwid: str | None = None,
+        redis: Redis | None = None,
     ) -> AlertResult:
         if not settings.enable_suspicious_mod_alerts:
             return AlertResult(created=False)
@@ -383,6 +536,21 @@ class SuspiciousAlertService:
                 reasons.append(f"web UUID already seen on {len(shared_uuid_users)} other account(s)")
                 severity = "critical"
 
+        shared_hwid_users: list[int] = []
+        if hwid and redis:
+            from app.service import hwid_tracker
+
+            if hwid_tracker.is_valid(hwid):
+                shared_hwid_users = await cls._distinct_other_users_by_hwid(
+                    session, redis, hwid, exclude_user_id=user_id
+                )
+                if shared_hwid_users:
+                    if not await hwid_tracker.is_whitelisted(redis, hwid):
+                        reasons.append(f"Device HWID already linked to {len(shared_hwid_users)} other account(s)")
+                        severity = "critical"
+                    else:
+                        shared_hwid_users = []
+
         normalized_label = (client_label or "").strip().lower()
         if version_hash and normalized_label in GENERIC_CLIENT_LABELS:
             reasons.append("client hash is unknown or unresolved")
@@ -396,13 +564,14 @@ class SuspiciousAlertService:
         if new_device_context:
             reasons.append("new device/location login")
 
-        related_ids = sorted(set(shared_ip_users + shared_uuid_users))
+        related_ids = sorted(set(shared_ip_users + shared_uuid_users + shared_hwid_users))
         related_users = await cls._usernames_for_ids(session, related_ids)
         fingerprint = cls._fingerprint(
             "login",
             user_id,
             ip_address,
             web_uuid or "",
+            hwid or "",
             version_hash or "",
             utcnow().strftime("%Y%m%d%H"),
         )
@@ -421,6 +590,7 @@ class SuspiciousAlertService:
                 "join_date": join_date.isoformat() if join_date is not None else None,
                 "ip_address": ip_address,
                 "web_uuid": web_uuid,
+                "hwid": hwid,
                 "version_hash": version_hash,
                 "client_label": client_label,
                 "user_agent": (user_agent or "")[:250],

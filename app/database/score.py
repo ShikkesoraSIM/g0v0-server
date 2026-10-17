@@ -2253,6 +2253,19 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                 "known_hwids": [],
                 "correlated_user_ids": [],
                 "correlated_account_count": 0,
+                "device_token": None,
+                "token_correlated_user_ids": [],
+                "hwid_v2": None,
+                "hwid_v2_correlated_user_ids": [],
+                "banned_user_ids": [],
+            }
+            environment_payload: dict[str, Any] = {
+                "raw": None,
+                "tablet_model": None,
+                "tablet_area": None,
+                "display_hz": None,
+                "audio_offset_ms": None,
+                "env_matches_banned_user_ids": [],
             }
             try:
                 from app.service import hwid_tracker as _hwid
@@ -2264,13 +2277,72 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                     for u in await _hwid.users_for(_r, h):
                         if u != user.id:
                             correlated.add(u)
-                # Cap the list we send across the wire; the count is the
-                # signal that matters, the IDs are just for debug context.
+
+                # Breadcrumbs (device token)
+                user_tokens = await _hwid.tokens_for_user(_r, user.id)
+                token_correlated: set[int] = set()
+                for t in user_tokens:
+                    for u in await _hwid.users_for_token(_r, t):
+                        if u != user.id:
+                            token_correlated.add(u)
+
+                # Deep hardware v2 (MAC, disk volume, GPU)
+                user_v2s = await _hwid.v2_for_user(_r, user.id)
+                v2_correlated: set[int] = set()
+                for v in user_v2s:
+                    for u in await _hwid.users_for_v2(_r, v):
+                        if u != user.id:
+                            v2_correlated.add(u)
+
+                all_peers = sorted(correlated | token_correlated | v2_correlated)
+                banned_peers: list[int] = []
+                if all_peers:
+                    for peer_id in all_peers[:32]:
+                        try:
+                            is_restr = (await bg_session.exec(select(User.is_restricted_query(peer_id)))).first()
+                            if is_restr:
+                                banned_peers.append(peer_id)
+                        except Exception:
+                            pass
+
                 hwid_summary = {
                     "known_hwids": user_hwids[:8],
                     "correlated_user_ids": sorted(correlated)[:32],
                     "correlated_account_count": len(correlated),
+                    "device_token": user_tokens[0] if user_tokens else None,
+                    "token_correlated_user_ids": sorted(token_correlated)[:32],
+                    "hwid_v2": user_v2s[0] if user_v2s else None,
+                    "hwid_v2_correlated_user_ids": sorted(v2_correlated)[:32],
+                    "banned_user_ids": banned_peers,
                 }
+
+                # Environment metadata
+                user_env = await _hwid.env_for_user(_r, user.id)
+                if user_env:
+                    environment_payload["raw"] = user_env
+                    import urllib.parse
+                    for part in user_env.split("|"):
+                        if part.startswith("tablet="):
+                            for sub in part.split(";"):
+                                if sub.startswith("tablet="):
+                                    environment_payload["tablet_model"] = urllib.parse.unquote_plus(sub[7:])
+                                elif sub.startswith("area="):
+                                    environment_payload["tablet_area"] = sub[5:]
+                        elif part.startswith("disp="):
+                            if "@" in part:
+                                try:
+                                    environment_payload["display_hz"] = int(float(part.split("@")[1]))
+                                except Exception:
+                                    pass
+                        elif part.startswith("audio="):
+                            try:
+                                environment_payload["audio_offset_ms"] = int(float(part[6:]))
+                            except Exception:
+                                pass
+
+                    if banned_peers and environment_payload["tablet_area"]:
+                        environment_payload["env_matches_banned_user_ids"] = banned_peers
+
             except Exception as hwid_err:
                 logger.debug(
                     "anticheat: hwid correlation lookup failed for user {}: {}",
@@ -2316,6 +2388,7 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                 "prior_alerts": trust.prior_alert_count,
                 "has_restriction_history": trust.has_restriction_history,
                 "hwid": hwid_summary,
+                "environment": environment_payload,
                 "baseline": baseline_payload,
                 "velocity": velocity_payload,
             }
