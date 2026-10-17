@@ -57,7 +57,7 @@ def payload_de(score: Score, beatmap_raw: str) -> dict:
             "small_tick_hit": score.nsmall_tick_hit or 0,
             "slider_tail_hit": score.nslider_tail_hit or 0,
         },
-        "ruleset": 0,
+        "ruleset": "osu",
     }
 
 
