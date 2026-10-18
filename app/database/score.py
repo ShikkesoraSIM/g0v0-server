@@ -2267,6 +2267,7 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                 "audio_offset_ms": None,
                 "env_matches_banned_user_ids": [],
                 "otd_plugins": [],
+                "integrity_signals": [],
             }
             try:
                 from app.service import hwid_tracker as _hwid
@@ -2345,6 +2346,15 @@ async def _submit_to_anticheat_background(engine, score_id: int):
                                 environment_payload["otd_plugins"] = [
                                     urllib.parse.unquote_plus(p.strip())
                                     for p in part[4:].split(",")
+                                    if p.strip()
+                                ]
+                            except Exception:
+                                pass
+                        elif part.startswith("integ="):
+                            try:
+                                environment_payload["integrity_signals"] = [
+                                    urllib.parse.unquote_plus(p.strip())
+                                    for p in part[6:].split(",")
                                     if p.strip()
                                 ]
                             except Exception:
