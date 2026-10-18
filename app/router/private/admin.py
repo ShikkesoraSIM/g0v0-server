@@ -5,7 +5,7 @@ from typing import Annotated, cast, Any
 from app.auth import invalidate_user_tokens, validate_username
 from app.config import settings
 from app.database.auth import OAuthToken
-from app.database.beatmap import Beatmap, BannedBeatmaps
+from app.database.beatmap import Beatmap, BannedBeatmaps, invalidate_banned_beatmaps_cache
 from app.database.beatmapset import Beatmapset
 from app.database.chat import ChannelType, ChatChannel, ChatMessage, ChatMessageModel, MessageType
 from app.database.score import Score
@@ -1818,6 +1818,7 @@ async def add_blacklisted_beatmap(
             reason="manual admin blacklist",
         ))
         await session.commit()
+        invalidate_banned_beatmaps_cache()
         return {
             "beatmap_id": beatmap_id,
             "beatmapset_id": beatmap.beatmapset_id,
@@ -1872,6 +1873,7 @@ async def add_blacklisted_beatmap(
         ))
 
     await session.commit()
+    invalidate_banned_beatmaps_cache()
 
     return {
         "beatmapset_id": beatmapset_id,
@@ -1905,6 +1907,7 @@ async def remove_blacklisted_single_beatmap(
 
     await session.delete(banned_item)
     await session.commit()
+    invalidate_banned_beatmaps_cache()
 
 
 @router.delete(
@@ -1947,6 +1950,7 @@ async def remove_blacklisted_beatmap(
         await session.delete(banned_item)
 
     await session.commit()
+    invalidate_banned_beatmaps_cache()
 
 
 @router.post(

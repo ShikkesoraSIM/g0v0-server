@@ -170,6 +170,8 @@ class BeatmapsetDict(TypedDict):
     language: NotRequired[BeatmapTranslationText]
     nominations: NotRequired["BeatmapNominations"]
     ratings: NotRequired[list[int]]
+    is_blacklisted: NotRequired[bool]
+    has_blacklisted_difficulties: NotRequired[bool]
 
 
 class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
@@ -179,6 +181,8 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         "bpm",
         "deleted_atcan_be_hyped",
         "discussion_locked",
+        "has_blacklisted_difficulties",
+        "is_blacklisted",
         "is_scoreable",
         "last_updated",
         "legacy_thread_url",
@@ -225,6 +229,26 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
             # transform arma un dict a mano, no pasa por los validators del modelo, asi que las
             # @2x hay que completarlas aca tambien. Ver completar_covers().
             beatmapset_resp["covers"] = completar_covers(beatmapset_resp["covers"])
+
+        beatmaps = beatmapset_resp.get("beatmaps")
+        if beatmaps is not None and len(beatmaps) > 0:
+            has_blacklisted = any(bm.get("is_blacklisted", False) for bm in beatmaps)
+            all_blacklisted = all(bm.get("is_blacklisted", False) for bm in beatmaps)
+            beatmapset_resp["is_blacklisted"] = all_blacklisted
+            beatmapset_resp["has_blacklisted_difficulties"] = has_blacklisted
+        else:
+            from .beatmap import get_all_banned_beatmap_ids
+
+            banned_ids = await get_all_banned_beatmap_ids(session) if session is not None else set()
+            if hasattr(db_instance, "beatmaps") and db_instance.beatmaps:
+                has_blacklisted = any(bm.id in banned_ids for bm in db_instance.beatmaps)
+                all_blacklisted = all(bm.id in banned_ids for bm in db_instance.beatmaps)
+            else:
+                has_blacklisted = False
+                all_blacklisted = False
+            beatmapset_resp["is_blacklisted"] = all_blacklisted
+            beatmapset_resp["has_blacklisted_difficulties"] = has_blacklisted
+
         return beatmapset_resp
 
     @field_validator("last_updated", "ranked_date", "submitted_date", mode="before")
@@ -252,6 +276,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         *BEATMAPSET_TRANSFORMER_INCLUDES,
         "beatmaps.current_user_playcount",
         "beatmaps.current_user_tag_ids",
+        "beatmaps.is_blacklisted",
         "beatmaps.max_combo",
         "current_nominations",
         "current_user_attributes",

@@ -1,5 +1,6 @@
 from datetime import datetime
 import hashlib
+import time
 from typing import TYPE_CHECKING, ClassVar, NotRequired
 from typing_extensions import TypedDict
 
@@ -72,6 +73,7 @@ class BeatmapDict(TypedDict):
     ranked: NotRequired[int]
     playcount: NotRequired[int]
     passcount: NotRequired[int]
+    is_blacklisted: NotRequired[bool]
 
 
 class BeatmapModel(DatabaseModel[BeatmapDict]):
@@ -88,6 +90,7 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
         "deleted_at",
         "drain",
         "hit_length",
+        "is_blacklisted",
         "is_local",
         "is_scoreable",
         "last_updated",
@@ -101,6 +104,7 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
         "beatmapset.ratings",
         "current_user_playcount",
         "failtimes",
+        "is_blacklisted",
         "max_combo",
         "owners",
     ]
@@ -142,6 +146,18 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
     @staticmethod
     async def status(_session: AsyncSession, beatmap: "Beatmap") -> str:
         return effective_rank_status(beatmap.beatmap_status).name.lower()
+
+    @included
+    @staticmethod
+    async def is_blacklisted(
+        _session: AsyncSession,
+        beatmap: "Beatmap",
+        batch_blacklisted_ids: "set[int] | None" = None,
+    ) -> bool:
+        if batch_blacklisted_ids is not None:
+            return beatmap.id in batch_blacklisted_ids
+        banned_ids = await get_all_banned_beatmap_ids(_session)
+        return beatmap.id in banned_ids
 
     @ondemand
     @staticmethod
@@ -244,6 +260,8 @@ class BeatmapModel(DatabaseModel[BeatmapDict]):
         if not beatmaps:
             return ctx
         ids = [b.id for b in beatmaps]
+
+        ctx["batch_blacklisted_ids"] = await get_all_banned_beatmap_ids(session)
 
         if user is not None and "current_user_playcount" in includes:
             rows = (
@@ -661,6 +679,28 @@ class BannedBeatmaps(SQLModel, table=True):
     source: str = Field(default="manual", sa_column=Column(VARCHAR(32), nullable=False, server_default="manual"))
     reason: str | None = Field(default=None, sa_column=Column(VARCHAR(255), nullable=True))
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+_BANNED_BEATMAPS_CACHE: set[int] | None = None
+_BANNED_BEATMAPS_EXPIRY: float = 0.0
+
+
+async def get_all_banned_beatmap_ids(session: AsyncSession | None = None) -> set[int]:
+    global _BANNED_BEATMAPS_CACHE, _BANNED_BEATMAPS_EXPIRY
+    now = time.monotonic()
+    if _BANNED_BEATMAPS_CACHE is not None and now < _BANNED_BEATMAPS_EXPIRY:
+        return _BANNED_BEATMAPS_CACHE
+    if session is None:
+        return _BANNED_BEATMAPS_CACHE or set()
+    rows = (await session.exec(select(BannedBeatmaps.beatmap_id))).all()
+    _BANNED_BEATMAPS_CACHE = set(rows)
+    _BANNED_BEATMAPS_EXPIRY = now + 60.0
+    return _BANNED_BEATMAPS_CACHE
+
+
+def invalidate_banned_beatmaps_cache() -> None:
+    global _BANNED_BEATMAPS_CACHE
+    _BANNED_BEATMAPS_CACHE = None
 
 
 async def calculate_beatmap_attributes(
