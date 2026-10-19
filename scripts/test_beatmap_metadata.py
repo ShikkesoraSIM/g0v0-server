@@ -1,7 +1,10 @@
 from copy import deepcopy
+from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+from app.database._base import DatabaseModel
+from app.database.beatmapset import BeatmapsetModel
 from app.fetcher.beatconnect import beatconnect_beatmapset_to_dict
 from app.fetcher.beatmap import (
     BeatmapFetcher,
@@ -13,6 +16,43 @@ from app.fetcher.beatmapset import (
 )
 
 from pydantic import ValidationError
+
+
+class BeatmapsetBlacklistTest(unittest.IsolatedAsyncioTestCase):
+    async def test_summary_loads_blacklist_asynchronously(self):
+        session = object()
+        load = AsyncMock(return_value=[SimpleNamespace(id=123), SimpleNamespace(id=124)])
+
+        class AwaitableBeatmaps:
+            @property
+            def beatmaps(self):
+                return load()
+
+        class LazyBeatmapset:
+            awaitable_attrs = AwaitableBeatmaps()
+
+            @property
+            def beatmaps(self):
+                raise AssertionError("no leer una relacion lazy sin await")
+
+        with (
+            patch.object(DatabaseModel, "transform", AsyncMock(return_value={"id": 456, "covers": None})),
+            patch("app.database.beatmapset.async_object_session", return_value=session),
+            patch("app.database.beatmap.get_all_banned_beatmap_ids", AsyncMock(return_value={123})) as banned,
+        ):
+            result = await BeatmapsetModel.transform(LazyBeatmapset())
+
+        assert result["has_blacklisted_difficulties"]
+        assert not result["is_blacklisted"]
+        banned.assert_awaited_once_with(session)
+        load.assert_awaited_once()
+
+    async def test_full_response_preserves_blacklist_without_loading_relation(self):
+        payload = {"id": 456, "covers": None, "beatmaps": [{"id": 123, "is_blacklisted": True}]}
+        with patch.object(DatabaseModel, "transform", AsyncMock(return_value=payload)):
+            result = await BeatmapsetModel.transform(object(), session=object())
+        assert result["is_blacklisted"]
+        assert result["has_blacklisted_difficulties"]
 
 
 def remote_set() -> dict:

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict, cast
 
 from app.config import settings
 from app.models.beatmap import BeatmapRankStatus, Genre, Language, effective_rank_status
@@ -11,7 +11,7 @@ from .user import User, UserDict, UserModel
 
 from pydantic import BaseModel, field_validator, ConfigDict
 from sqlalchemy import JSON, Boolean, Column, DateTime, Text
-from sqlalchemy.ext.asyncio import AsyncAttrs
+from sqlalchemy.ext.asyncio import AsyncAttrs, async_object_session
 from sqlmodel import Field, Relationship, SQLModel, col, exists, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -217,6 +217,7 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
         includes: list[str] | None = None,
         **context,
     ) -> BeatmapsetDict:
+        session = session if session is not None else cast(AsyncSession | None, async_object_session(db_instance))
         beatmapset_resp = await super().transform(
             db_instance,
             session=session,
@@ -240,9 +241,11 @@ class BeatmapsetModel(DatabaseModel[BeatmapsetDict]):
             from .beatmap import get_all_banned_beatmap_ids
 
             banned_ids = await get_all_banned_beatmap_ids(session) if session is not None else set()
-            if hasattr(db_instance, "beatmaps") and db_instance.beatmaps:
-                has_blacklisted = any(bm.id in banned_ids for bm in db_instance.beatmaps)
-                all_blacklisted = all(bm.id in banned_ids for bm in db_instance.beatmaps)
+            # la respuesta resumida tambien entra aca, con la relacion todavia sin cargar.
+            stored_beatmaps = await db_instance.awaitable_attrs.beatmaps if banned_ids else []
+            if stored_beatmaps:
+                has_blacklisted = any(bm.id in banned_ids for bm in stored_beatmaps)
+                all_blacklisted = all(bm.id in banned_ids for bm in stored_beatmaps)
             else:
                 has_blacklisted = False
                 all_blacklisted = False
