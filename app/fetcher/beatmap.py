@@ -184,7 +184,9 @@ class BeatmapFetcher(BaseFetcher):
                     if beatmap is not None:
                         beatmapset_id = beatmap.beatmapset_id
         except Exception as e:
-            logger.debug("BeatConnect beatmap pre-resolution failed for id={} md5={}: {}", beatmap_id, beatmap_checksum, e)
+            logger.debug(
+                "BeatConnect beatmap pre-resolution failed for id={} md5={}: {}", beatmap_id, beatmap_checksum, e
+            )
 
         if beatmapset_id is None:
             return None
@@ -222,9 +224,12 @@ class BeatmapFetcher(BaseFetcher):
         if not isinstance(payload, dict):
             return payload
         payload.setdefault("is_local", False)
+        payload.setdefault("is_blacklisted", False)
         beatmapset = payload.get("beatmapset")
         if isinstance(beatmapset, dict):
             beatmapset.setdefault("is_local", False)
+            beatmapset.setdefault("is_blacklisted", False)
+            beatmapset.setdefault("has_blacklisted_difficulties", False)
             # idem para "generado con IA": el tag del autor es lo unico que hay para un
             # mapa de bancho, y sin la clave la validacion rebota entera.
             beatmapset.setdefault("ai", "mapperatorinator" in (beatmapset.get("tags") or "").lower())

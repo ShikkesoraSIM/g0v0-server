@@ -10,7 +10,7 @@ from app.models.model import Cursor
 from app.utils import bg_tasks
 
 from ._base import BaseFetcher
-from .beatconnect import beatconnect_base_url, beatconnect_enabled, beatconnect_headers, beatconnect_beatmapset_to_dict
+from .beatconnect import beatconnect_base_url, beatconnect_beatmapset_to_dict, beatconnect_enabled, beatconnect_headers
 
 from httpx import AsyncClient
 from pydantic import TypeAdapter
@@ -88,12 +88,15 @@ class BeatmapsetFetcher(BaseFetcher):
     def _ensure_local_flags(beatmapset: dict) -> dict:
         """Normalize remote payloads that do not contain local-only fields."""
         beatmapset.setdefault("is_local", False)
+        beatmapset.setdefault("is_blacklisted", False)
+        beatmapset.setdefault("has_blacklisted_difficulties", False)
         # osu! no sabe nada de esto, pero el tag lo pone el autor del mapa: un mapa de
         # bancho generado con la tool se marca igual que uno de aca.
         beatmapset.setdefault("ai", "mapperatorinator" in (beatmapset.get("tags") or "").lower())
         for beatmap in beatmapset.get("beatmaps") or []:
             if isinstance(beatmap, dict):
                 beatmap.setdefault("is_local", False)
+                beatmap.setdefault("is_blacklisted", False)
 
         # Older / graveyarded beatmapsets from osu.ppy.sh sometimes return
         # genre/language as null, which the BeatmapsetModelDict adapter (with
@@ -212,6 +215,7 @@ class BeatmapsetFetcher(BaseFetcher):
         beatconnect_payload = await self._get_beatmapset_from_beatconnect(beatmap_set_id)
         if beatconnect_payload is not None:
             await self._enrich_set_with_osu_direct_checksums(beatmap_set_id, beatconnect_payload)
+            await self._enrich_missing_checksums_from_api(beatmap_set_id, beatconnect_payload)
             # el espejo tampoco sabe nada de nuestros campos: sin esto la validacion
             # rebota y la pagina del set devuelve 500.
             beatconnect_payload = self._ensure_local_flags(beatconnect_payload)
@@ -228,6 +232,30 @@ class BeatmapsetFetcher(BaseFetcher):
                 e,
             )
             raise
+
+    async def _enrich_missing_checksums_from_api(self, beatmap_set_id: int, payload: dict) -> None:
+        missing = {
+            beatmap["id"]: beatmap
+            for beatmap in payload.get("beatmaps") or []
+            if isinstance(beatmap, dict) and beatmap.get("id") and not beatmap.get("checksum")
+        }
+        if not missing:
+            return
+
+        try:
+            # el mirror puede tener diffs nuevas que osu.direct todavia no indexo.
+            response = await self.request_api(f"https://osu.ppy.sh/api/v2/beatmapsets/{beatmap_set_id}")
+            if response.get("id") != beatmap_set_id:
+                return
+
+            for beatmap in response.get("beatmaps") or []:
+                if not isinstance(beatmap, dict) or not beatmap.get("checksum"):
+                    continue
+                target = missing.get(beatmap.get("id"))
+                if target is not None:
+                    target["checksum"] = beatmap["checksum"]
+        except Exception as error:
+            logger.warning("Could not fill missing checksums for set {}: {}", beatmap_set_id, error)
 
     async def _enrich_set_with_osu_direct_checksums(
         self,
