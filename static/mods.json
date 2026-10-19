@@ -119,8 +119,7 @@
         "Settings": [],
         "IncompatibleMods": [
           "EZ",
-          "DA",
-          "MR"
+          "DA"
         ],
         "RequiresConfiguration": false,
         "UserPlayable": true,
@@ -556,9 +555,7 @@
             "Description": ""
           }
         ],
-        "IncompatibleMods": [
-          "HR"
-        ],
+        "IncompatibleMods": [],
         "RequiresConfiguration": false,
         "UserPlayable": true,
         "ValidForMultiplayer": true,
