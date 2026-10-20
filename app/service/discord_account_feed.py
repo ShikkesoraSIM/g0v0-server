@@ -63,7 +63,7 @@ def _user_profile_url(user_id: int) -> str | None:
 def _build_embed(*, user: "User", source_label: str | None) -> dict:
     """Build the Discord webhook payload for a successful registration.
 
-    `source_label` is a short human string like "osu! client" or "web"
+    `source_label` is a short human string like "torii client" or "web"
     that we surface in a field — useful at a glance to know which
     surface the user came in through.
     """

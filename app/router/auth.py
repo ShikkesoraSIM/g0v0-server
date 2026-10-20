@@ -542,7 +542,7 @@ async def register_user(
             # from osu! itself (true) or a browser (false). Surface that
             # in the embed so admins can spot odd patterns at a glance
             # (e.g. a spike of "web" registrations vs the usual mix).
-            source_label = "osu! client" if is_trusted_client else ("unverified client" if user_agent.is_client else "web")
+            source_label = "torii client" if is_trusted_client else ("unverified client" if user_agent.is_client else "web")
             await notify_account_created(user=new_user, source_label=source_label)
         except Exception as discord_err:
             logger.warning(
